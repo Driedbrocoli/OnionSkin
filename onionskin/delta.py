@@ -93,20 +93,42 @@ class RasterDeltaWriter:
     def add_page(self, diff: PageDiff, rgb: np.ndarray | None = None) -> None:
         self._pdf.setPageSize((diff.size.width_pt, diff.size.height_pt))
         if rgb is not None and diff.added_px:
-            h, w = diff.added.shape
-            image = _unmatte(rgb[:h, :w], diff.added)
-            buf = io.BytesIO()
-            image.save(buf, format="PNG", optimize=True)
-            buf.seek(0)
-            self._pdf.drawImage(
-                ImageReader(buf),
-                0,
-                0,
-                width=diff.size.width_pt,
-                height=diff.size.height_pt,
-                mask="auto",
-            )
+            self._draw(diff, rgb)
         self._pdf.showPage()
+
+    def _draw(self, diff: PageDiff, rgb: np.ndarray) -> None:
+        """Embed only the part of the page that has new ink on it.
+
+        A delta is usually a few words on an otherwise empty sheet. Encoding
+        the whole page anyway meant compressing thirteen million transparent
+        pixels to say nothing — which dominated the run time, and bloated the
+        file that has to travel to the printer. Cropping to the ink and placing
+        that rectangle at the matching spot is pixel-for-pixel identical.
+        """
+        height, width = diff.added.shape
+        rows = np.flatnonzero(diff.added.any(axis=1))
+        cols = np.flatnonzero(diff.added.any(axis=0))
+        # One pixel of margin so an anti-aliased edge cannot be clipped.
+        y0, y1 = max(0, int(rows[0]) - 1), min(height, int(rows[-1]) + 2)
+        x0, x1 = max(0, int(cols[0]) - 1), min(width, int(cols[-1]) + 2)
+
+        image = _unmatte(rgb[y0:y1, x0:x1], diff.added[y0:y1, x0:x1])
+        buf = io.BytesIO()
+        image.save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+
+        # Pixels map onto the page linearly, so the crop's rectangle is just
+        # its pixel bounds scaled by the page size.
+        px_to_pt_x = diff.size.width_pt / width
+        px_to_pt_y = diff.size.height_pt / height
+        self._pdf.drawImage(
+            ImageReader(buf),
+            x0 * px_to_pt_x,
+            diff.size.height_pt - y1 * px_to_pt_y,
+            width=(x1 - x0) * px_to_pt_x,
+            height=(y1 - y0) * px_to_pt_y,
+            mask="auto",
+        )
 
     def close(self) -> Path:
         self._pdf.save()

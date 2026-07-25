@@ -260,3 +260,57 @@ def test_a_shift_only_profile_transfers_to_any_paper(tmp_path, onionskin_home):
     )
 
     assert not any(c.code == "profile_page_mismatch" for c in result.checks)
+
+
+# --- the delta carries ink, not empty page ----------------------------------
+
+
+def test_the_embedded_image_is_cropped_to_the_ink(tmp_path):
+    """Encoding a full page to say "three words here" dominated the run time
+    and bloated the file that has to travel to the printer."""
+    import pikepdf
+
+    original = make_pdf(tmp_path / "a.pdf", [(20.0, 40.0, "base")])
+    edited = make_pdf(tmp_path / "b.pdf", [(20.0, 40.0, "base"), (60.0, 150.0, "new")])
+
+    result = pipeline.run(original, edited, tmp_path / "d.pdf",
+                          pipeline.Options(dpi=300))
+
+    with pikepdf.open(result.output) as pdf:
+        image = list(pdf.pages[0].resources.XObject.values())[0]
+        width, height = int(image.Width), int(image.Height)
+
+    full_page_px = (210 / 25.4 * 300) * (297 / 25.4 * 300)
+    assert width * height < full_page_px * 0.05, "the image should be a crop"
+    assert width > 10 and height > 10
+
+
+def test_cropping_does_not_move_the_ink(tmp_path):
+    """The crop is an optimisation; it must be invisible in the output."""
+    from helpers import ink_bbox_mm
+
+    original = make_pdf(tmp_path / "a.pdf", [(20.0, 40.0, "base")])
+    edited = make_pdf(tmp_path / "b.pdf", [(20.0, 40.0, "base"), (60.0, 150.0, "new")])
+
+    result = pipeline.run(original, edited, tmp_path / "d.pdf",
+                          pipeline.Options(dpi=300))
+
+    region = result.pages[0].added_regions[0]
+    x0, y0, x1, y1 = ink_bbox_mm(result.output, 300.0)
+    assert x0 == pytest.approx(region.x0_mm, abs=0.3)
+    assert y0 == pytest.approx(region.y0_mm, abs=0.3)
+    assert x1 == pytest.approx(region.x1_mm, abs=0.3)
+    assert y1 == pytest.approx(region.y1_mm, abs=0.3)
+
+
+def test_ink_at_the_very_edge_survives_the_crop(tmp_path):
+    """The crop pads by a pixel; ink in the first row must not be clipped."""
+    from helpers import ink_bbox_mm
+
+    original = make_pdf(tmp_path / "a.pdf", [(100.0, 150.0, "base")])
+    edited = make_pdf(tmp_path / "b.pdf", [(100.0, 150.0, "base"), (2.0, 6.0, "E")])
+
+    result = pipeline.run(original, edited, tmp_path / "d.pdf",
+                          pipeline.Options(dpi=300))
+
+    assert ink_bbox_mm(result.output, 300.0) is not None
