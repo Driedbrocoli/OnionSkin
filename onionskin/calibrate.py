@@ -41,7 +41,61 @@ from .geometry import (
 A4 = PageSize(210.0, 297.0)
 LETTER = PageSize(215.9, 279.4)
 
-PAGE_PRESETS = {"a4": A4, "letter": LETTER}
+#: Every paper size Onionskin knows by name. A printer Onionskin has never
+#: heard of is still fine — pass a size as ``WIDTHxHEIGHT`` in millimetres.
+PAGE_PRESETS = {
+    "a3": PageSize(297.0, 420.0),
+    "a4": A4,
+    "a5": PageSize(148.0, 210.0),
+    "a6": PageSize(105.0, 148.0),
+    "b5": PageSize(176.0, 250.0),
+    "letter": LETTER,
+    "legal": PageSize(215.9, 355.6),
+    "tabloid": PageSize(279.4, 431.8),
+    "executive": PageSize(184.15, 266.7),
+    "statement": PageSize(139.7, 215.9),
+}
+
+#: The smallest sheet the target still fits on, with room for the fiducials.
+MIN_TARGET_MM = 90.0
+
+
+def parse_page(spec: str) -> PageSize:
+    """Resolve a page name, or a custom ``WIDTHxHEIGHT`` in millimetres.
+
+    Anyone whose printer takes a size not in the list — a photo tray, an index
+    card, A0 — can still calibrate it, which is the whole point of accepting
+    arbitrary dimensions rather than a fixed menu.
+    """
+    text = (spec or "").strip().lower()
+    if text in PAGE_PRESETS:
+        return PAGE_PRESETS[text]
+
+    separator = "x" if "x" in text else ("*" if "*" in text else None)
+    if separator:
+        parts = text.split(separator)
+        if len(parts) == 2:
+            try:
+                width, height = float(parts[0]), float(parts[1])
+            except ValueError:
+                width = height = 0.0
+            if width > 0 and height > 0:
+                if width < MIN_TARGET_MM or height < MIN_TARGET_MM:
+                    raise ValueError(
+                        f"{width:g}×{height:g} mm is too small to calibrate on — "
+                        f"the target needs at least {MIN_TARGET_MM:g} mm each way. "
+                        "Calibrate on a larger sheet from the same printer instead; "
+                        "the correction is a property of the paper path, not the page."
+                    )
+                if width > 2000 or height > 2000:
+                    raise ValueError(f"{width:g}×{height:g} mm is not a paper size")
+                return PageSize(width, height)
+
+    raise ValueError(
+        f"unknown page size '{spec}'. Use one of "
+        f"{', '.join(sorted(PAGE_PRESETS))}, or a custom size like '210x297' (mm)."
+    )
+
 
 #: How far the measuring rulers extend from each crosshair.
 RULER_REACH_MM = 4.0
@@ -55,7 +109,12 @@ def home_dir() -> Path:
 
 def profiles_dir() -> Path:
     path = home_dir() / "profiles"
-    path.mkdir(parents=True, exist_ok=True)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+        path.parent.chmod(0o700)
+    except (OSError, NotImplementedError):
+        pass
     return path
 
 
@@ -129,6 +188,10 @@ def profile_path(name: str) -> Path:
 def save_profile(profile: Profile) -> Path:
     path = profile_path(profile.name)
     path.write_text(json.dumps(profile.to_dict(), indent=2), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except (OSError, NotImplementedError):
+        pass
     return path
 
 
@@ -245,12 +308,26 @@ def _draw_scales(pdf: canvas.Canvas, x_mm: float, y_mm: float, page: PageSize) -
     pdf.drawRightString(sx - mm_to_pt(2.4), sy - mm_to_pt(0.5), "y")
 
 
+def default_inset(page: PageSize) -> float:
+    """How far in to place the corner crosshairs on a given sheet.
+
+    25 mm suits office paper, but a small sheet needs the fiducials pulled in
+    proportionally or their scales would hang off the edge. Spread still has to
+    be as wide as the sheet allows, since rotation and scale are only
+    observable from points far apart.
+    """
+    shortest = min(page.width_mm, page.height_mm)
+    return max(15.0, min(25.0, shortest / 4.0))
+
+
 def make_target(
     out_path: str | Path,
     page: PageSize = A4,
-    inset_mm: float = 25.0,
+    inset_mm: float | None = None,
 ) -> Path:
     """Write the two-pass calibration target."""
+    if inset_mm is None:
+        inset_mm = default_inset(page)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -284,8 +361,21 @@ def make_target(
             cx, cy + mm_to_pt(ARM_MM + 2.5), f"P{idx}   {x_mm:g}, {y_mm:g}"
         )
 
-    # Instructions, kept clear of the fiducials and their rulers.
+    # Instructions, kept clear of the fiducials and their rulers. A small sheet
+    # has no room for them, and a target you can read beats a target with
+    # printed prose over the crosshairs.
     text_x, text_y = to_pt(page.width_mm / 2, page.height_mm / 2 + 22)
+    if page.width_mm < 170 or page.height_mm < 230:
+        pdf.setFont("Helvetica", 5.5)
+        pdf.drawCentredString(
+            text_x,
+            text_y - mm_to_pt(2),
+            "Onionskin target — print at 100%, re-feed the sheet, print again.",
+        )
+        pdf.showPage()
+        pdf.save()
+        return out_path
+
     pdf.setFont("Helvetica-Bold", 9)
     pdf.drawCentredString(text_x, text_y, "Onionskin — printer calibration target")
 
@@ -316,9 +406,15 @@ def make_target(
 def solve_from_offsets(
     offsets: Sequence[tuple[int, float, float]],
     page: PageSize = A4,
-    inset_mm: float = 25.0,
+    inset_mm: float | None = None,
 ) -> SimilarityFit:
-    """Fit the printer's error from per-fiducial ``(index, dx_mm, dy_mm)`` readings."""
+    """Fit the printer's error from per-fiducial ``(index, dx_mm, dy_mm)`` readings.
+
+    The inset must match the target that was printed, or the fitted rotation and
+    scale will be wrong — hence the shared default.
+    """
+    if inset_mm is None:
+        inset_mm = default_inset(page)
     points = fiducials(page, inset_mm)
     nominal, observed = [], []
     for index, dx, dy in offsets:

@@ -62,8 +62,17 @@ onionskin add form.pdf -o delta.pdf \
 ```
 
 `--width` wraps the text at that many millimetres; without it, text stays on
-one line. `onionskin fonts` lists the built-in fonts, and `--font-file` takes
-any TrueType file.
+one line. `onionskin fonts` lists the built-in fonts.
+
+**Writing in any language.** The fonts built into every PDF reader only cover
+Western European characters. Ask for Chinese, Arabic, Cyrillic, Greek, Hebrew or
+an emoji and Onionskin will refuse rather than print a row of black boxes onto
+your sheet. Point it at a font that has the characters and it embeds it:
+
+```bash
+onionskin add form.pdf -o delta.pdf --text '1:30,80:承認済み 2026年7月25日' \
+  --font-file /usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc
+```
 
 `--save-layout` writes the placements out as JSON, and `--layout` reads them
 back — so a monthly form can be filled with one command. Layout files number
@@ -109,7 +118,9 @@ Uncalibrated, a second pass through a sheet-fed printer lands within about
 box. Calibration gets it under **±0.5 mm**, and needs no scanner.
 
 ```bash
-onionskin calibrate target -o target.pdf
+onionskin calibrate target -o target.pdf                 # A4 by default
+onionskin calibrate target -o target.pdf --page legal    # or a5, a3, tabloid…
+onionskin calibrate target -o target.pdf --page 100x150  # or any size in mm
 ```
 
 1. Print `target.pdf` on **blank** paper at 100%.
@@ -135,6 +146,11 @@ onionskin delta a.docx b.docx -o delta.pdf --profile office
 
 Calibrate once per printer, per tray. Profiles are per-printer, not per-job.
 
+Calibrate on the paper you actually print on. A shift carries over to any sheet
+size — the paper path pushes every page the same way — but rotation and scale
+are applied about the centre of the page, so using an A4 profile on Legal leaves
+some error behind. Onionskin says so when it spots the mismatch.
+
 ## Raster or vector
 
 | | what it prints | when |
@@ -144,6 +160,18 @@ Calibrate once per printer, per tray. Profiles are per-printer, not per-job.
 
 Raster recovers anti-aliasing as an alpha channel, so glyph edges stay smooth
 rather than printing inside a pale halo.
+
+## Pages that are not the simple case
+
+A page is not always a box starting at (0,0) the right way up. Media boxes have
+non-zero origins, crop boxes shrink the visible area, and `/Rotate` turns a page
+a quarter turn — all three are ordinary in scans and anything that has been
+through a PDF editor, and all three move where ink lands on paper.
+
+Onionskin renders and diffs the page as you see it, then writes the delta back
+into the source's own frame, copying its boxes and rotation exactly. A printer
+places both impressions identically, so they line up. Without that the delta
+would print somewhere other than where the preview showed it.
 
 ## Other checks
 
@@ -201,6 +229,21 @@ else:
 
 Memory stays flat regardless of document length: each page is rendered,
 diffed, written and released before the next one is touched.
+
+## Privacy and networking
+
+Onionskin never uses the network. There is no telemetry, no update check, and
+no external asset in the browser UI — verified by running the whole app, and the
+test suite, with every socket call blocked.
+
+`onionskin serve` binds to `127.0.0.1`, so the UI is reachable only from your
+own machine. It has no password: if you override `--host`, anyone who can reach
+that address can upload documents and read every delta, and Onionskin warns you
+when you do. Working files are written with owner-only permissions so that other
+accounts on a shared machine cannot read documents you have processed.
+
+Onionskin also refuses to write a delta over one of the documents it was made
+from, since that would destroy the sheet you were about to print onto.
 
 ## Development
 

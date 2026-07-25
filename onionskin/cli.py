@@ -102,8 +102,14 @@ def cmd_delta(args: argparse.Namespace) -> int:
 
 def cmd_add(args: argparse.Namespace) -> int:
     """Place text on the page directly, with no second document."""
-    if args.font_file:
+    # register_font returns the name the font is known by; without using it the
+    # boxes would silently keep the default font and --font-file would appear
+    # to do nothing — which is exactly the escape hatch non-Latin text needs.
+    registered = (
         compose.register_font(args.font_file, args.font_name)
+        if args.font_file
+        else None
+    )
 
     boxes: list[compose.TextBox] = []
     if args.layout:
@@ -111,7 +117,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     for spec in args.text or []:
         box = compose.parse_text_spec(spec)
         box.size_pt = args.size
-        box.font = args.font_name or args.font
+        box.font = registered or args.font
         box.width_mm = args.width
         box.align = args.align
         box.colour = args.colour
@@ -199,7 +205,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate_target(args: argparse.Namespace) -> int:
-    page = calibrate.PAGE_PRESETS[args.page]
+    page = calibrate.parse_page(args.page)
     path = calibrate.make_target(args.output, page, inset_mm=args.inset)
     print(f"Wrote {path} ({page.describe()})")
     print(
@@ -212,7 +218,7 @@ def cmd_calibrate_target(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate_solve(args: argparse.Namespace) -> int:
-    page = calibrate.PAGE_PRESETS[args.page]
+    page = calibrate.parse_page(args.page)
     try:
         offsets = [calibrate.parse_point(spec) for spec in args.point]
         fit = calibrate.solve_from_offsets(offsets, page, inset_mm=args.inset)
@@ -260,7 +266,7 @@ def cmd_calibrate_set(args: argparse.Namespace) -> int:
             rotation_deg=args.rotation,
             scale=args.scale,
         ),
-        page=calibrate.PAGE_PRESETS[args.page],
+        page=calibrate.parse_page(args.page),
         notes=args.notes or "entered manually",
     )
     path = calibrate.save_profile(profile)
@@ -311,6 +317,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
         )
         return 1
     from .web.app import create_app
+
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        # There is no login on this app. Anything reachable can upload
+        # documents and download anyone else's delta.
+        print(
+            f"WARNING: serving on {args.host}, not just this computer.\n"
+            "         Onionskin has no password. Anyone who can reach this\n"
+            "         address can upload documents and read every document\n"
+            "         processed here. Use 127.0.0.1 unless you are certain.",
+            file=sys.stderr,
+        )
 
     print(f"Onionskin running at http://{args.host}:{args.port}")
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
@@ -480,10 +497,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     target = cal_subs.add_parser("target", help="write the two-pass target page")
     target.add_argument("-o", "--output", default="onionskin-target.pdf")
-    target.add_argument("--page", choices=sorted(calibrate.PAGE_PRESETS), default="a4")
     target.add_argument(
-        "--inset", type=float, default=25.0,
-        help="how far the corner crosshairs sit from the edges, mm (default 25)",
+        "--page", default="a4",
+        help="paper size: a name (%s) or a custom 'WIDTHxHEIGHT' in mm"
+        % ", ".join(sorted(calibrate.PAGE_PRESETS)),
+    )
+    target.add_argument(
+        "--inset", type=float,
+        help="how far the corner crosshairs sit from the edges, mm "
+             "(default: 25, or less on a small sheet)",
     )
     target.set_defaults(func=cmd_calibrate_target)
 
@@ -493,8 +515,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="measured offset at a crosshair, mm; repeat for each one measured",
     )
     solve.add_argument("--name", default="default", help="profile name")
-    solve.add_argument("--page", choices=sorted(calibrate.PAGE_PRESETS), default="a4")
-    solve.add_argument("--inset", type=float, default=25.0)
+    solve.add_argument(
+        "--page", default="a4", help="the paper size the target was printed on"
+    )
+    solve.add_argument(
+        "--inset", type=float,
+        help="only if you overrode --inset when making the target",
+    )
     solve.add_argument("--notes", help="free text, e.g. the printer and tray")
     solve.set_defaults(func=cmd_calibrate_solve)
 
@@ -506,7 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--rotation", type=float, default=0.0, help="printer rotation, degrees clockwise"
     )
     manual.add_argument("--scale", type=float, default=1.0, help="printer scale factor")
-    manual.add_argument("--page", choices=sorted(calibrate.PAGE_PRESETS), default="a4")
+    manual.add_argument("--page", default="a4")
     manual.add_argument("--notes")
     manual.set_defaults(func=cmd_calibrate_set)
 

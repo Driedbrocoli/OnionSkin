@@ -240,6 +240,45 @@ def check_calibration(calibrated: bool, profile_name: str | None) -> list[Check]
     ]
 
 
+def check_profile_page(profile, page: PageSize) -> list[Check]:
+    """Warn when a profile is used on a sheet size it was not measured on.
+
+    A pure shift carries over to any paper: the paper path pushes every sheet
+    the same way. Rotation and scale do not — Onionskin applies them about the
+    centre of the page, so measuring on A4 and printing on A5 pivots the
+    correction around a different point and leaves error behind.
+    """
+    if profile is None:
+        return []
+    measured = getattr(profile, "page", None)
+    error = getattr(profile, "error", None)
+    if measured is None or error is None or measured.matches(page, tol_mm=2.0):
+        return []
+    if abs(error.rotation_deg) < 5e-3 and abs(error.scale - 1.0) < 5e-6:
+        return []  # a shift alone transfers cleanly
+
+    drift = max(
+        abs(page.width_mm - measured.width_mm), abs(page.height_mm - measured.height_mm)
+    )
+    return [
+        Check(
+            severity=WARNING,
+            code="profile_page_mismatch",
+            message=(
+                f"Profile '{profile.name}' was measured on {measured.describe()}, "
+                f"but this page is {page.describe()}."
+            ),
+            detail=(
+                f"Its rotation and scale are applied about the centre of the page, "
+                f"and the centre has moved by up to {drift / 2:.0f} mm. The shift "
+                "still applies, but expect some of the rotation and scale "
+                "correction to be off. Calibrate again on this paper size for the "
+                "best result."
+            ),
+        )
+    ]
+
+
 def check_all(
     diffs: Sequence[PageDiff],
     original_sizes: Sequence[PageSize],

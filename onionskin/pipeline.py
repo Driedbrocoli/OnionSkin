@@ -11,7 +11,13 @@ import numpy as np
 from . import calibrate as calib
 from . import safety
 from .compose import Composition, TextBox, compose
-from .delta import RasterDeltaWriter, VectorDeltaWriter, apply_correction, preview_page
+from .delta import (
+    RasterDeltaWriter,
+    VectorDeltaWriter,
+    apply_correction,
+    conform_to_source,
+    preview_page,
+)
 from .diff import (
     DEFAULT_GROUP_MM,
     DEFAULT_INK_THRESHOLD,
@@ -22,7 +28,7 @@ from .diff import (
     label_regions,
 )
 from .geometry import PageSize, Similarity
-from .render import Document, Workspace, to_pdf
+from .render import Document, DocumentError, Workspace, to_pdf
 from .safety import Check
 
 RASTER = "raster"
@@ -108,6 +114,35 @@ def _blank_gray(size: PageSize, dpi: float) -> np.ndarray:
     return np.full((h, w), 255, dtype=np.uint8)
 
 
+def guard_output(output: str | Path, *inputs: str | Path) -> Path:
+    """Refuse to write the delta over one of the documents it was made from.
+
+    ``onionskin delta report.pdf report-v2.pdf -o report.pdf`` is an easy thing
+    to type, and without this it destroys the original — the very sheet the
+    delta is meant to be printed onto, and quite possibly the only copy. Paths
+    are resolved first so that a symlink or a roundabout relative path cannot
+    slip past.
+    """
+    output = Path(output)
+    try:
+        resolved = output.resolve()
+    except OSError:
+        return output
+
+    for source in inputs:
+        candidate = Path(source)
+        try:
+            if candidate.exists() and candidate.resolve() == resolved:
+                raise DocumentError(
+                    f"refusing to write the delta over '{candidate}' — that is one "
+                    "of the documents it is made from, and overwriting it would "
+                    "destroy the original. Choose a different --output."
+                )
+        except OSError:
+            continue
+    return output
+
+
 def compose_run(
     source: str | Path,
     boxes: Sequence[TextBox],
@@ -124,7 +159,7 @@ def compose_run(
     """
     options = options or Options()
     options.validate()
-    output = Path(output)
+    output = guard_output(output, source)
 
     profile = calib.load_profile(options.profile) if options.profile else None
     if options.preview_dir:
@@ -181,10 +216,14 @@ def compose_run(
             checks += safety.check_calibration(
                 profile is not None, profile.name if profile else None
             )
+            checks += safety.check_profile_page(profile, doc.page_sizes[0])
 
             correction = profile.correction if profile else Similarity.identity()
             output.parent.mkdir(parents=True, exist_ok=True)
-            apply_correction(staged, output, correction, list(doc.page_sizes))
+            corrected = apply_correction(
+                staged, work / "delta-corrected.pdf", correction, list(doc.page_sizes)
+            )
+            conform_to_source(corrected, output, doc.frames, list(doc.page_sizes))
 
     return Result(
         output=output,
@@ -210,7 +249,7 @@ def run(
     """
     options = options or Options()
     options.validate()
-    output = Path(output)
+    output = guard_output(output, original, edited)
 
     profile = calib.load_profile(options.profile) if options.profile else None
 
@@ -292,10 +331,17 @@ def run(
             checks += safety.check_calibration(
                 profile is not None, profile.name if profile else None
             )
+            checks += safety.check_profile_page(profile, sizes[0])
 
             correction = profile.correction if profile else Similarity.identity()
             output.parent.mkdir(parents=True, exist_ok=True)
-            apply_correction(staged, output, correction, sizes)
+            corrected = apply_correction(
+                staged, work / "delta-corrected.pdf", correction, sizes
+            )
+            # Conform to the ORIGINAL: that is the sheet going back in the tray.
+            frames = list(old_doc.frames[: len(sizes)])
+            frames += [new_doc.frames[i] for i in range(len(frames), len(sizes))]
+            conform_to_source(corrected, output, frames, sizes)
 
     return Result(
         output=output,

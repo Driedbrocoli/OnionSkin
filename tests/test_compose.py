@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -367,3 +368,132 @@ def test_compose_onto_a_word_document(tmp_path):
     assert not result.blocked
     assert result.total_regions >= 1
     assert ink_bbox_mm(result.output, 300.0) is not None
+
+
+# --- text the font cannot actually write ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, label",
+    [
+        ("季度报告", "Chinese"),
+        ("承認済み", "Japanese"),
+        ("تمت الموافقة", "Arabic"),
+        ("Утверждено", "Cyrillic"),
+        ("Έγκριση", "Greek"),
+        ("אושר", "Hebrew"),
+        ("Approved ✅", "emoji"),
+    ],
+)
+def test_text_the_builtin_fonts_cannot_write_is_refused(text, label):
+    """reportlab silently substitutes a black box for every character it cannot
+    encode. Printed onto someone's only copy, that is the worst outcome there
+    is — so it has to be an error, not a surprise."""
+    with pytest.raises(LayoutError) as exc:
+        TextBox(text=text).validate(1)
+    assert "cannot write these characters" in str(exc.value)
+    assert "--font-file" in str(exc.value)
+
+
+def test_western_european_text_still_works():
+    TextBox(text="café — naïve Ärger £50 «déjà»").validate(1)
+
+
+def test_decomposed_accents_are_accepted(tmp_path):
+    """macOS hands out decomposed Unicode, so "café" can arrive as e + combining
+    acute. Rejecting that would break ordinary French on one platform only."""
+    decomposed = "café"
+    assert decomposed != "café"
+
+    box = TextBox(text=decomposed)
+    box.validate(1)
+
+    assert box.lines() == ["café"]
+    out = compose(Composition([A4], [TextBox(text=decomposed, x_mm=30, y_mm=100)]),
+                  tmp_path / "d.pdf")
+    assert ink_bbox_mm(out, 300.0) is not None
+
+
+def test_a_registered_font_lifts_the_restriction(tmp_path):
+    from onionskin.compose import register_font
+
+    font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    if not font_path.is_file():
+        pytest.skip("DejaVuSans is not installed")
+
+    name = register_font(font_path)
+    box = TextBox(text="Утверждено", font=name, x_mm=30.0, y_mm=100.0, size_pt=14)
+    box.validate(1)
+
+    out = compose(Composition([A4], [box]), tmp_path / "ru.pdf")
+    assert ink_bbox_mm(out, 300.0) is not None
+
+
+def test_symbol_font_is_not_held_to_latin_coverage():
+    TextBox(text="abg", font="Symbol").validate(1)
+
+
+# --- numbers that are not numbers -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"x_mm": float("inf")}, "finite"),
+        ({"y_mm": float("-inf")}, "finite"),
+        ({"x_mm": float("nan")}, "not a number"),
+        ({"size_pt": float("nan")}, "not a number"),
+        ({"rotation_deg": float("nan")}, "not a number"),
+        ({"rotation_deg": float("inf")}, "finite"),
+        ({"line_spacing": float("inf")}, "finite"),
+        ({"width_mm": float("nan")}, "not a number"),
+    ],
+)
+def test_non_finite_numbers_are_refused_cleanly(kwargs, message):
+    """NaN slips past every range check — comparisons against it are all false —
+    and only surfaces later as a traceback from inside the PDF writer."""
+    with pytest.raises(LayoutError, match=message):
+        TextBox(text="hi", **kwargs).validate(1)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"text": 123}, "text must be text"),
+        ({"text": None}, "text must be text"),
+        ({"text": {"a": 1}}, "text must be text"),
+        ({"size_pt": "big"}, "must be a number"),
+        ({"width_mm": []}, "must be a number"),
+        ({"x_mm": "abc"}, "must be a number"),
+        ({"line_spacing": None}, "must be a number"),
+        ({"colour": 12345}, "colour must be text"),
+        ({"font": 7}, "unknown font"),
+    ],
+)
+def test_wrong_types_give_a_clean_error_not_a_traceback(kwargs, message):
+    base = {"text": "hi"}
+    base.update(kwargs)
+    with pytest.raises(LayoutError, match=message):
+        TextBox(**base).validate(1)
+
+
+@pytest.mark.parametrize("page", [1e400, None, [1], {"a": 1}, "abc"])
+def test_from_dict_rejects_impossible_page_numbers(page):
+    """1e400 parses from JSON straight to inf, and OverflowError is neither
+    TypeError nor ValueError, so it used to escape the handler entirely."""
+    with pytest.raises(LayoutError, match="page number"):
+        TextBox.from_dict({"page": page, "text": "hi"})
+
+
+def test_bad_layout_reaches_the_user_as_an_error_not_a_crash(tmp_path):
+    from onionskin import pipeline
+
+    source = make_pdf(tmp_path / "a.pdf", [(20.0, 40.0, "base")])
+    for bad in ({"page": 1, "text": 123}, {"page": 1, "text": "x", "size_pt": "big"}):
+        path = tmp_path / "layout.json"
+        path.write_text(json.dumps([bad]))
+        with pytest.raises(LayoutError):
+            pipeline.compose_run(
+                source, load_layout(path), tmp_path / "d.pdf",
+                pipeline.Options(dpi=150),
+            )

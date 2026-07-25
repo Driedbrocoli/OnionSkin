@@ -39,9 +39,36 @@ STATIC = Path(__file__).parent / "static"
 
 
 def jobs_root() -> Path:
+    """The scratch area holding uploaded documents.
+
+    These are the user's own files — contracts, invoices, letters — sitting in
+    a world-readable shared temp directory by default. On a machine with more
+    than one account that is enough for anyone logged in to read them, since
+    the directory listing hands out the job names. Lock it to the owner.
+    """
     root = Path(tempfile.gettempdir()) / "onionskin-web"
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _restrict(root)
     return root
+
+
+def _restrict(path: Path, mode: int = 0o700) -> None:
+    """Best-effort private permissions; a no-op where the OS has no notion."""
+    try:
+        path.chmod(mode)
+    except (OSError, NotImplementedError):
+        pass
+
+
+def _restrict_tree(root: Path) -> None:
+    """Lock down everything a job produced, not just what was uploaded.
+
+    The delta and the proof previews are renderings of the user's document —
+    just as revealing as the document itself — and they are written by the
+    pipeline rather than through save_upload, so they need restricting here.
+    """
+    for path in root.rglob("*"):
+        _restrict(path, 0o700 if path.is_dir() else 0o600)
 
 
 def sweep_old_jobs(ttl: int = JOB_TTL_SECONDS) -> None:
@@ -90,6 +117,7 @@ async def save_upload(upload: UploadFile, destination: Path) -> Path:
     if size == 0:
         path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="that file is empty")
+    _restrict(path, 0o600)
     return path
 
 
@@ -137,7 +165,8 @@ def create_app() -> FastAPI:
         sweep_old_jobs()
         job_id = uuid.uuid4().hex
         work = jobs_root() / job_id
-        work.mkdir(parents=True)
+        work.mkdir(parents=True, mode=0o700)
+        _restrict(work)
 
         try:
             original_path = await save_upload(original, work / "original")
@@ -164,6 +193,8 @@ def create_app() -> FastAPI:
         except Exception:
             shutil.rmtree(work, ignore_errors=True)
             raise
+
+        _restrict_tree(work)
 
         payload = result.to_dict()
         payload["job"] = job_id
@@ -207,7 +238,8 @@ def create_app() -> FastAPI:
         sweep_old_jobs()
         job_id = uuid.uuid4().hex
         work = jobs_root() / job_id
-        work.mkdir(parents=True)
+        work.mkdir(parents=True, mode=0o700)
+        _restrict(work)
 
         try:
             stored = await save_upload(source, work / "source")
@@ -237,6 +269,7 @@ def create_app() -> FastAPI:
                             format="PNG",
                             optimize=True,
                         )
+                _restrict_tree(work)
         except HTTPException:
             shutil.rmtree(work, ignore_errors=True)
             raise
@@ -302,6 +335,8 @@ def create_app() -> FastAPI:
         except (compose.LayoutError, FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        _restrict_tree(work)
+
         data = result.to_dict()
         data["job"] = job
         data["download"] = f"/api/jobs/{job}/delta.pdf"
@@ -312,12 +347,16 @@ def create_app() -> FastAPI:
 
     @app.post("/api/calibrate/target")
     async def calibration_target(page: str = Form("a4")) -> FileResponse:
-        if page not in calibrate.PAGE_PRESETS:
-            raise HTTPException(status_code=400, detail="unknown page size")
+        try:
+            size = calibrate.parse_page(page)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         sweep_old_jobs()
         work = jobs_root() / uuid.uuid4().hex
-        work.mkdir(parents=True)
-        path = calibrate.make_target(work / "target.pdf", calibrate.PAGE_PRESETS[page])
+        work.mkdir(parents=True, mode=0o700)
+        _restrict(work)
+        path = calibrate.make_target(work / "target.pdf", size)
+        _restrict(path, 0o600)
         return FileResponse(
             path, media_type="application/pdf", filename="onionskin-target.pdf"
         )
@@ -328,9 +367,10 @@ def create_app() -> FastAPI:
         page: str = Form("a4"),
         points: str = Form(...),
     ) -> dict:
-        if page not in calibrate.PAGE_PRESETS:
-            raise HTTPException(status_code=400, detail="unknown page size")
-        size = calibrate.PAGE_PRESETS[page]
+        try:
+            size = calibrate.parse_page(page)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             offsets = [
                 calibrate.parse_point(spec)
@@ -369,12 +409,14 @@ def create_app() -> FastAPI:
         scale: float = Form(1.0),
         page: str = Form("a4"),
     ) -> dict:
-        if page not in calibrate.PAGE_PRESETS:
-            raise HTTPException(status_code=400, detail="unknown page size")
+        try:
+            size = calibrate.parse_page(page)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         stored = calibrate.Profile(
             name=name or "default",
             error=Similarity(dx_mm=dx, dy_mm=dy, rotation_deg=rotation, scale=scale),
-            page=calibrate.PAGE_PRESETS[page],
+            page=size,
             notes="entered by hand",
         )
         calibrate.save_profile(stored)

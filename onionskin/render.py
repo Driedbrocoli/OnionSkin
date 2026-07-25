@@ -95,7 +95,9 @@ def to_pdf(source: str | Path, workdir: str | Path, timeout: int = 180) -> Path:
 
     cmd = [
         soffice,
-        f"-env:UserInstallation=file://{profile}",
+        # as_uri() gets this right on Windows (file:///C:/...) where a bare
+        # f"file://{path}" does not, and percent-encodes spaces.
+        f"-env:UserInstallation={profile.absolute().as_uri()}",
         "--headless",
         "--norestore",
         "--invisible",
@@ -125,6 +127,104 @@ def to_pdf(source: str | Path, workdir: str | Path, timeout: int = 180) -> Path:
     return produced[0]
 
 
+@dataclass(frozen=True)
+class PageFrame:
+    """Where a page's content actually sits, in PDF user space.
+
+    A page is not always the simple case of "a box starting at (0,0), the right
+    way up". It can have a media box with a non-zero origin, a crop box smaller
+    than the media box, and a ``/Rotate`` that turns it a quarter turn for
+    display. All three are common in the wild — phone scans and anything that
+    has been through a PDF editor — and all three move where ink lands on the
+    physical sheet.
+
+    Onionskin renders and diffs in *display space*: the page as you see it,
+    origin at the top-left, already cropped and rotated. The delta must then be
+    written back into the source's own frame, or it will not line up with the
+    sheet in the tray.
+    """
+
+    media: tuple[float, float, float, float]
+    crop: tuple[float, float, float, float]
+    rotate: int
+
+    @property
+    def crop_size_pt(self) -> tuple[float, float]:
+        return (self.crop[2] - self.crop[0], self.crop[3] - self.crop[1])
+
+    @property
+    def display_size(self) -> PageSize:
+        """The page as rendered: cropped, and turned if ``/Rotate`` says so."""
+        width, height = self.crop_size_pt
+        if self.rotate in (90, 270):
+            width, height = height, width
+        return PageSize.from_pt(width, height)
+
+    @property
+    def is_simple(self) -> bool:
+        """True when display space and user space are the same thing."""
+        return (
+            self.rotate == 0
+            and abs(self.crop[0]) < 1e-6
+            and abs(self.crop[1]) < 1e-6
+            and all(abs(c - m) < 1e-6 for c, m in zip(self.crop, self.media))
+        )
+
+    def describe(self) -> str:
+        bits = []
+        if self.rotate:
+            bits.append(f"rotated {self.rotate}°")
+        if abs(self.crop[0]) > 1e-6 or abs(self.crop[1]) > 1e-6:
+            bits.append(f"origin at ({self.crop[0]:.1f}, {self.crop[1]:.1f}) pt")
+        if any(abs(c - m) > 1e-6 for c, m in zip(self.crop, self.media)):
+            bits.append("cropped")
+        return ", ".join(bits) or "standard"
+
+
+def _read_frames(pdf_path: str | Path) -> list[PageFrame]:
+    """Read every page's box geometry, resolving inherited attributes."""
+    import pikepdf
+
+    frames: list[PageFrame] = []
+    with pikepdf.open(str(pdf_path)) as pdf:
+        for page in pdf.pages:
+            handle = pikepdf.Page(page)
+            media = tuple(float(v) for v in handle.mediabox)
+            try:
+                crop = tuple(float(v) for v in handle.cropbox)
+            except Exception:
+                crop = media
+            rotate = int(handle.rotation or 0) % 360
+            if rotate % 90:
+                raise DocumentError(
+                    f"page {len(frames) + 1} is rotated {rotate}°, which the PDF "
+                    "specification does not allow (it must be a multiple of 90)"
+                )
+            # A crop box is only meaningful where it intersects the media box.
+            crop = (
+                max(crop[0], media[0]),
+                max(crop[1], media[1]),
+                min(crop[2], media[2]),
+                min(crop[3], media[3]),
+            )
+            if crop[2] - crop[0] <= 0 or crop[3] - crop[1] <= 0:
+                crop = media
+            frames.append(PageFrame(media=media, crop=crop, rotate=rotate))
+    return frames
+
+
+def _fit(array: np.ndarray, height: int, width: int, fill: int) -> np.ndarray:
+    """Crop or pad an image to exactly ``height`` × ``width``, paper-side out."""
+    cropped = array[:height, :width]
+    if cropped.shape[0] == height and cropped.shape[1] == width:
+        return cropped
+
+    shape = (height, width) + array.shape[2:]
+    padded = np.full(shape, fill, dtype=array.dtype)
+    padded[: cropped.shape[0], : cropped.shape[1]] = cropped
+    return padded
+
+
 @dataclass
 class RenderedPage:
     index: int
@@ -143,14 +243,15 @@ class Document:
     def __init__(self, pdf_path: str | Path):
         self.path = Path(pdf_path)
         self._doc = pdfium.PdfDocument(str(self.path))
-        self.page_sizes: list[PageSize] = []
-        for i in range(len(self._doc)):
-            page = self._doc[i]
-            width_pt, height_pt = page.get_size()
-            self.page_sizes.append(PageSize.from_pt(width_pt, height_pt))
-            page.close()
+        self.frames: list[PageFrame] = _read_frames(self.path)
+        self.page_sizes: list[PageSize] = [f.display_size for f in self.frames]
         if not self.page_sizes:
             raise DocumentError(f"{self.path.name} has no pages")
+        if len(self._doc) != len(self.frames):
+            raise DocumentError(
+                f"{self.path.name} is inconsistent: pdfium sees {len(self._doc)} "
+                f"page(s), the page tree has {len(self.frames)}"
+            )
 
     def __len__(self) -> int:
         return len(self.page_sizes)
@@ -164,14 +265,20 @@ class Document:
         finally:
             page.close()
 
-        target = size.px_size(dpi)
-        if image.size != target:
-            # pdfium rounds independently per axis; force both documents onto
-            # identical rasters so the diff is a straight array comparison.
-            image = image.resize(target, Image.LANCZOS)
-
         rgb = np.asarray(image, dtype=np.uint8)
         gray = np.asarray(image.convert("L"), dtype=np.uint8)
+
+        target_w, target_h = size.px_size(dpi)
+        if (rgb.shape[1], rgb.shape[0]) != (target_w, target_h):
+            # pdfium rounds each axis independently, so a page can come back a
+            # pixel off. Both documents must land on identical rasters for the
+            # diff to be a straight array comparison — but the difference is
+            # never more than a pixel, so crop or pad rather than resample.
+            # Resampling a 13-megapixel page to move it one pixel was costing
+            # a fifth of the total run time and blurring every glyph edge.
+            rgb = _fit(rgb, target_h, target_w, fill=255)
+            gray = _fit(gray, target_h, target_w, fill=255)
+
         return RenderedPage(index=index, size=size, rgb=rgb, gray=gray)
 
     def pages(self, dpi: float) -> Iterator[RenderedPage]:

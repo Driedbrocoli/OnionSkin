@@ -14,6 +14,7 @@ because nothing else on the page is being laid out.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Sequence
@@ -67,6 +68,32 @@ def _known_font(name: str) -> bool:
         return False
 
 
+#: The built-in fonts that carry text, all of them WinAnsi-encoded. Symbol and
+#: ZapfDingbats are left out: they have their own encodings and no Latin text.
+_WINANSI_FONTS = frozenset(STANDARD_FONTS) - {"Symbol", "ZapfDingbats"}
+
+
+def _number(value, field: str) -> float:
+    """Accept a real, finite number, or explain why it is not one.
+
+    ``float('nan')`` slips past every ordinary range check, because comparisons
+    against NaN are all false, and only surfaces much later as an unreadable
+    traceback from deep inside the PDF writer. JSON hands out both NaN and
+    infinity readily — ``1e400`` parses straight to ``inf`` — so hostile or
+    merely careless layout files reach here routinely.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LayoutError(
+            f"{field} must be a number, not {type(value).__name__}"
+        )
+    number = float(value)
+    if math.isnan(number):
+        raise LayoutError(f"{field} is not a number")
+    if math.isinf(number):
+        raise LayoutError(f"{field} must be a finite number")
+    return number
+
+
 def _parse_colour(value: str | Color) -> Color:
     if isinstance(value, Color):
         return value
@@ -99,30 +126,100 @@ class TextBox:
     rotation_deg: float = 0.0
 
     def validate(self, page_count: int) -> None:
+        if not isinstance(self.text, str):
+            raise LayoutError(
+                f"text must be text, not {type(self.text).__name__}"
+            )
         if not self.text.strip():
             raise LayoutError("a text box with no text would print nothing")
+        if not isinstance(self.page, int) or isinstance(self.page, bool):
+            raise LayoutError(f"'{self.page}' is not a page number")
         if not 0 <= self.page < page_count:
             raise LayoutError(
                 f"page {self.page + 1} is not in the document "
                 f"(it has {page_count} page(s))"
             )
-        if self.size_pt <= 0 or self.size_pt > 400:
-            raise LayoutError(f"font size {self.size_pt} pt is out of range")
-        if not _known_font(self.font):
+
+        x_mm = _number(self.x_mm, "x")
+        y_mm = _number(self.y_mm, "y")
+        del x_mm, y_mm  # validated for finiteness; the values are used at draw time
+
+        size = _number(self.size_pt, "font size")
+        if size <= 0 or size > 400:
+            raise LayoutError(f"font size {size:g} pt is out of range (1 to 400)")
+
+        if not isinstance(self.font, str) or not _known_font(self.font):
             raise LayoutError(
                 f"unknown font '{self.font}'. Built in: {', '.join(STANDARD_FONTS)}"
             )
         if self.align not in ALIGNMENTS:
             raise LayoutError(f"align must be one of {ALIGNMENTS}")
-        if self.width_mm is not None and self.width_mm <= 0:
-            raise LayoutError("wrap width must be positive")
-        if self.line_spacing <= 0:
+        if self.width_mm is not None:
+            width = _number(self.width_mm, "wrap width")
+            if width <= 0:
+                raise LayoutError("wrap width must be positive")
+        spacing = _number(self.line_spacing, "line spacing")
+        if spacing <= 0:
             raise LayoutError("line spacing must be positive")
+        _number(self.rotation_deg, "rotation")
+        if not isinstance(self.colour, str):
+            raise LayoutError(
+                f"colour must be text like '#1a1a1a', not "
+                f"{type(self.colour).__name__}"
+            )
         _parse_colour(self.colour)
+        self.check_font_covers_text()
+
+    def check_font_covers_text(self) -> None:
+        """Refuse text the chosen font cannot actually write.
+
+        The fonts built into every PDF reader carry Western European characters
+        and nothing else. Hand reportlab a Chinese, Arabic or Cyrillic string
+        and it does not complain — it quietly substitutes a placeholder for
+        every character it cannot encode, and you get a row of solid black
+        boxes. Printed onto someone's only copy of a document, that is the
+        worst possible outcome, so it has to be an error rather than a surprise.
+        """
+        if self.font not in _WINANSI_FONTS:
+            return  # a registered TrueType font carries its own coverage
+        missing = []
+        for char in self.normalised_text:
+            if char in "\n\r\t":
+                continue
+            try:
+                char.encode("cp1252")
+            except UnicodeEncodeError:
+                if char not in missing:
+                    missing.append(char)
+        if not missing:
+            return
+
+        shown = " ".join(missing[:8]) + (" …" if len(missing) > 8 else "")
+        raise LayoutError(
+            f"'{self.font}' cannot write these characters: {shown}\n"
+            "The fonts built into every PDF reader only cover Western European "
+            "text. Supply a font that has them with --font-file (any .ttf or "
+            ".otf on your system will do — for example a Noto or Arial Unicode "
+            "font), and Onionskin will embed it in the delta."
+        )
+
+    @property
+    def normalised_text(self) -> str:
+        """The text in composed form.
+
+        macOS hands out decomposed Unicode as a matter of course, so "café"
+        typed on a Mac can arrive as ``e`` followed by a combining acute. The
+        built-in fonts have "é" but no combining accent, so without this the
+        app would reject perfectly ordinary French — and every other accented
+        language — from one platform but not the others.
+        """
+        import unicodedata
+
+        return unicodedata.normalize("NFC", self.text)
 
     def lines(self) -> list[str]:
         """Split into printed lines, wrapping at ``width_mm`` if set."""
-        paragraphs = self.text.replace("\r\n", "\n").split("\n")
+        paragraphs = self.normalised_text.replace("\r\n", "\n").split("\n")
         if self.width_mm is None:
             return paragraphs
 
@@ -192,10 +289,13 @@ class TextBox:
             )
         values = {k: v for k, v in data.items() if k in known}
         if "page" in values:
+            raw = values["page"]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+                raise LayoutError(f"'{raw}' is not a page number")
             try:
-                page = int(values["page"])
-            except (TypeError, ValueError) as exc:
-                raise LayoutError(f"'{values['page']}' is not a page number") from exc
+                page = int(float(raw) if isinstance(raw, str) else raw)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise LayoutError(f"'{raw}' is not a page number") from exc
             if page < 1:
                 raise LayoutError("pages are numbered from 1")
             values["page"] = page - 1

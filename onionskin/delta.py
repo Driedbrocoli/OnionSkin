@@ -214,6 +214,73 @@ def apply_correction(
     return out_path
 
 
+def _display_to_user_matrix(frame, display: PageSize) -> tuple[float, ...]:
+    """Map delta (display-space) coordinates into the source page's user space.
+
+    The delta is written as a plain page: origin at (0,0), the right way up,
+    the size you see on screen. The source page may be none of those things.
+    This returns the PDF matrix that puts the delta's ink exactly where the
+    same spot appears on the source page, so both land together on the sheet.
+    """
+    x0, y0 = frame.crop[0], frame.crop[1]
+    width, height = frame.crop_size_pt
+    rotate = frame.rotate
+
+    if rotate == 90:
+        #  a  b  c  d   e         f
+        return (0.0, 1.0, -1.0, 0.0, x0 + width, y0)
+    if rotate == 180:
+        return (-1.0, 0.0, 0.0, -1.0, x0 + width, y0 + height)
+    if rotate == 270:
+        return (0.0, -1.0, 1.0, 0.0, x0, y0 + height)
+    return (1.0, 0.0, 0.0, 1.0, x0, y0)
+
+
+def conform_to_source(
+    pdf_path: str | Path,
+    out_path: str | Path,
+    frames: Sequence,
+    sizes: Sequence[PageSize],
+) -> Path:
+    """Give the delta the same page geometry as the document it overlays.
+
+    Printers place a page on paper using its boxes and ``/Rotate``. If the delta
+    disagrees with the source about any of those, the two impressions cannot
+    line up no matter how good the calibration is — so the delta copies them
+    exactly, and its content is transformed to match.
+    """
+    pdf_path = Path(pdf_path)
+    out_path = Path(out_path)
+
+    if all(getattr(f, "is_simple", True) for f in frames):
+        if pdf_path != out_path:
+            out_path.write_bytes(pdf_path.read_bytes())
+        return out_path
+
+    with pikepdf.open(str(pdf_path)) as pdf:
+        for i, page in enumerate(pdf.pages):
+            if i >= len(frames):
+                break
+            frame = frames[i]
+            if frame.is_simple:
+                continue
+            display = sizes[i] if i < len(sizes) else frame.display_size
+            a, b, c, d, e, f = _display_to_user_matrix(frame, display)
+            page.contents_add(
+                f"q {a:.6f} {b:.6f} {c:.6f} {d:.6f} {e:.6f} {f:.6f} cm ".encode("ascii"),
+                prepend=True,
+            )
+            page.contents_add(b" Q")
+            page.MediaBox = list(frame.media)
+            page.CropBox = list(frame.crop)
+            if frame.rotate:
+                page.Rotate = frame.rotate
+            elif "/Rotate" in page:
+                del page.Rotate
+        pdf.save(str(out_path))
+    return out_path
+
+
 def preview_page(
     diff: PageDiff,
     old_gray: np.ndarray,
