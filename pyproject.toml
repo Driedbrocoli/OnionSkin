@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onionskin"
+version = "0.1.0"
+description = "Add words to a page that is already printed."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["pdf", "printing", "overprint", "docx", "diff", "registration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Printing",
+    "Topic :: Office/Business",
+]
+
+# Deliberately permissive licences only: PyMuPDF would be the obvious choice
+# for the PDF work, but it is AGPL and would follow anyone shipping this.
+dependencies = [
+    "pypdfium2>=4.20",   # BSD-3/Apache-2.0 — rendering pages to pixels
+    "pikepdf>=8",        # MPL-2.0 — clipping and transforming page content
+    "reportlab>=4",      # BSD — writing the delta and the calibration target
+    "pillow>=10",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.9"]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+onionskin = "onionskin.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["onionskin*"]
+
+[tool.setuptools.package-data]
+"onionskin.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
