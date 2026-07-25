@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, calibrate, pipeline, safety
+from . import __version__, calibrate, compose, pipeline, safety
 from .geometry import PageSize
 from .render import ConversionError, DocumentError, find_soffice
 
@@ -97,6 +97,68 @@ def cmd_delta(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    return 0
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    """Place text on the page directly, with no second document."""
+    if args.font_file:
+        compose.register_font(args.font_file, args.font_name)
+
+    boxes: list[compose.TextBox] = []
+    if args.layout:
+        boxes += compose.load_layout(args.layout)
+    for spec in args.text or []:
+        box = compose.parse_text_spec(spec)
+        box.size_pt = args.size
+        box.font = args.font_name or args.font
+        box.width_mm = args.width
+        box.align = args.align
+        box.colour = args.colour
+        box.rotation_deg = args.rotation
+        boxes.append(box)
+
+    if not boxes:
+        print(
+            "error: nothing to place. Use --text 'PAGE:X,Y:the words' "
+            "or --layout layout.json",
+            file=sys.stderr,
+        )
+        return 1
+
+    options = pipeline.Options(
+        dpi=args.dpi,
+        margin_mm=args.margin,
+        profile=args.profile,
+        preview_dir=Path(args.preview) if args.preview else None,
+    )
+    result = pipeline.compose_run(args.source, boxes, args.output, options)
+
+    if args.save_layout:
+        compose.save_layout(boxes, args.save_layout)
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        _report(result)
+        if args.save_layout:
+            print(f"\nLayout saved to {args.save_layout} — reuse it with --layout")
+
+    if result.blocked and not args.force:
+        print(
+            "\nRefusing to recommend printing — see the blockers above. "
+            "Pass --force if you know better.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
+def cmd_fonts(args: argparse.Namespace) -> int:
+    print("Fonts built into every PDF reader:")
+    for name in compose.available_fonts():
+        print(f"  {name}")
+    print("\nFor anything else, pass --font-file path/to/Font.ttf")
     return 0
 
 
@@ -309,6 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  onionskin delta report.docx report-v2.docx -o delta.pdf\n"
             "  onionskin delta a.docx b.docx -o delta.pdf --profile office --preview ./proof\n"
             "  onionskin inspect a.docx b.docx\n"
+            "  onionskin add form.pdf -o delta.pdf --text '1:60,150:Approved 25 July'\n"
             "  onionskin calibrate target -o target.pdf\n"
             "  onionskin serve\n"
         ),
@@ -368,6 +431,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_diff_options(inspect)
     inspect.set_defaults(func=cmd_inspect)
+
+    add = subs.add_parser(
+        "add",
+        help="type text onto the page directly, with no second document",
+        description=(
+            "Place text at fixed positions on a document's pages. Absolutely "
+            "positioned text cannot push anything else around, so nothing "
+            "reflows and the delta always matches the printed sheet."
+        ),
+    )
+    add.add_argument("source", help="the document as it was printed")
+    add.add_argument("-o", "--output", required=True, help="delta PDF to write")
+    add.add_argument(
+        "--text", action="append", metavar="PAGE:X,Y:WORDS",
+        help="text to place, e.g. '1:60,150:Approved 25 July'; repeat as needed",
+    )
+    add.add_argument("--layout", help="JSON layout file with full per-box control")
+    add.add_argument("--save-layout", help="write the resulting layout back out")
+    add.add_argument("--size", type=float, default=11.0, help="type size in pt")
+    add.add_argument(
+        "--font", default="Helvetica",
+        help="one of the built-in PDF fonts (see 'onionskin fonts')",
+    )
+    add.add_argument("--font-file", help="a .ttf to use instead")
+    add.add_argument("--font-name", help="name for --font-file (default: its filename)")
+    add.add_argument(
+        "--width", type=float, help="wrap text at this width, mm (default: no wrap)"
+    )
+    add.add_argument("--align", choices=compose.ALIGNMENTS, default="left")
+    add.add_argument("--colour", "--color", default="#000000", dest="colour")
+    add.add_argument(
+        "--rotation", type=float, default=0.0, help="degrees clockwise on the page"
+    )
+    add.add_argument("--dpi", type=float, default=pipeline.DEFAULT_DPI)
+    add.add_argument("--margin", type=float, default=safety.DEFAULT_MARGIN_MM)
+    add.add_argument("--profile", help="calibration profile to correct with")
+    add.add_argument("--preview", help="directory to write proof PNGs into")
+    add.add_argument("--json", action="store_true")
+    add.add_argument("--force", action="store_true")
+    add.set_defaults(func=cmd_add)
+
+    fonts = subs.add_parser("fonts", help="list the fonts available for 'add'")
+    fonts.set_defaults(func=cmd_fonts)
 
     cal = subs.add_parser("calibrate", help="measure and store printer registration")
     cal_subs = cal.add_subparsers(dest="calibrate_command", required=True)

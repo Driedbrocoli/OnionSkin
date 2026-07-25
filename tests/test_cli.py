@@ -249,3 +249,109 @@ def test_no_command_is_an_error(capsys):
     with pytest.raises(SystemExit) as exc:
         main([])
     assert exc.value.code == 2
+
+
+# --- typing on the page -----------------------------------------------------
+
+
+def test_add_places_text_without_a_second_document(tmp_path, capsys):
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "Authorised by:")])
+    out = tmp_path / "delta.pdf"
+
+    code = main(
+        ["add", str(source), "-o", str(out), "--text", "1:60,150:Approved"] + FAST
+    )
+
+    assert code == 0
+    x0, y0, _, _ = ink_bbox_mm(out, 300.0)
+    assert x0 == pytest.approx(60.0, abs=1.0)
+    assert y0 == pytest.approx(150.0, abs=1.5)
+    assert "mode compose" in capsys.readouterr().out
+
+
+def test_add_takes_several_boxes_across_pages(tmp_path):
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "base")], pages=2)
+    out = tmp_path / "delta.pdf"
+
+    main(
+        ["add", str(source), "-o", str(out),
+         "--text", "1:30,100:first page", "--text", "2:30,100:second page"] + FAST
+    )
+
+    assert ink_bbox_mm(out, 200.0, page=0) is not None
+    assert ink_bbox_mm(out, 200.0, page=1) is not None
+
+
+def test_add_honours_size_and_alignment(tmp_path):
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "base")])
+    small, large = tmp_path / "s.pdf", tmp_path / "l.pdf"
+
+    main(["add", str(source), "-o", str(small), "--text", "1:30,100:Onionskin",
+          "--size", "8"] + FAST)
+    main(["add", str(source), "-o", str(large), "--text", "1:30,100:Onionskin",
+          "--size", "24"] + FAST)
+
+    small_box, large_box = ink_bbox_mm(small, 300.0), ink_bbox_mm(large, 300.0)
+    assert (large_box[2] - large_box[0]) > 2.5 * (small_box[2] - small_box[0])
+
+
+def test_add_round_trips_a_layout_file(tmp_path):
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "base")])
+    layout = tmp_path / "layout.json"
+
+    main(["add", str(source), "-o", str(tmp_path / "a.pdf"),
+          "--text", "1:60,150:Approved", "--save-layout", str(layout)] + FAST)
+    assert layout.is_file()
+
+    main(["add", str(source), "-o", str(tmp_path / "b.pdf"),
+          "--layout", str(layout)] + FAST)
+
+    for got, want in zip(
+        ink_bbox_mm(tmp_path / "b.pdf", 300.0), ink_bbox_mm(tmp_path / "a.pdf", 300.0)
+    ):
+        assert got == pytest.approx(want, abs=0.1)
+
+
+def test_add_with_nothing_to_place_is_an_error(tmp_path, capsys):
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "base")])
+    code = main(["add", str(source), "-o", str(tmp_path / "d.pdf")])
+    assert code == 1
+    assert "nothing to place" in capsys.readouterr().err
+
+
+def test_add_reports_a_bad_text_spec(tmp_path, capsys):
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "base")])
+    code = main(["add", str(source), "-o", str(tmp_path / "d.pdf"),
+                 "--text", "nonsense"])
+    assert code == 1
+    assert "PAGE:X,Y" in capsys.readouterr().err
+
+
+def test_add_reports_a_page_that_does_not_exist(tmp_path, capsys):
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "base")])
+    code = main(["add", str(source), "-o", str(tmp_path / "d.pdf"),
+                 "--text", "5:30,30:too far"])
+    assert code == 1
+    assert "not in the document" in capsys.readouterr().err
+
+
+def test_add_applies_a_calibration_profile(tmp_path, onionskin_home):
+    calibrate.save_profile(
+        calibrate.Profile(name="office", error=Similarity(dx_mm=1.5))
+    )
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "base")])
+
+    main(["add", str(source), "-o", str(tmp_path / "plain.pdf"),
+          "--text", "1:60,150:Approved"] + FAST)
+    main(["add", str(source), "-o", str(tmp_path / "fixed.pdf"),
+          "--text", "1:60,150:Approved", "--profile", "office"] + FAST)
+
+    plain = ink_bbox_mm(tmp_path / "plain.pdf", 300.0)
+    fixed = ink_bbox_mm(tmp_path / "fixed.pdf", 300.0)
+    assert fixed[0] == pytest.approx(plain[0] - 1.5, abs=0.3)
+
+
+def test_fonts_are_listed(capsys):
+    assert main(["fonts"]) == 0
+    text = capsys.readouterr().out
+    assert "Helvetica" in text and "Times-Roman" in text

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
 from . import calibrate as calib
 from . import safety
+from .compose import Composition, TextBox, compose
 from .delta import RasterDeltaWriter, VectorDeltaWriter, apply_correction, preview_page
 from .diff import (
     DEFAULT_GROUP_MM,
@@ -17,6 +19,7 @@ from .diff import (
     DEFAULT_TOLERANCE_MM,
     PageDiff,
     diff_page,
+    label_regions,
 )
 from .geometry import PageSize, Similarity
 from .render import Document, Workspace, to_pdf
@@ -25,6 +28,9 @@ from .safety import Check
 RASTER = "raster"
 VECTOR = "vector"
 MODES = (RASTER, VECTOR)
+
+#: Not a diff mode — the label a composed delta reports itself under.
+COMPOSE = "compose"
 
 DEFAULT_DPI = 400.0
 
@@ -100,6 +106,95 @@ class Result:
 def _blank_gray(size: PageSize, dpi: float) -> np.ndarray:
     w, h = size.px_size(dpi)
     return np.full((h, w), 255, dtype=np.uint8)
+
+
+def compose_run(
+    source: str | Path,
+    boxes: Sequence[TextBox],
+    output: str | Path,
+    options: Options | None = None,
+) -> Result:
+    """Place text at fixed positions on a document's pages.
+
+    Everything downstream of the delta is shared with :func:`run` — the same
+    margin and coverage checks, the same proof previews, the same calibration.
+    What is absent is the reflow check, and not by omission: absolutely
+    positioned text cannot displace anything, so no ink can move. That is the
+    whole reason this path exists.
+    """
+    options = options or Options()
+    options.validate()
+    output = Path(output)
+
+    profile = calib.load_profile(options.profile) if options.profile else None
+    if options.preview_dir:
+        Path(options.preview_dir).mkdir(parents=True, exist_ok=True)
+
+    with Workspace() as work:
+        source_pdf = to_pdf(source, work)
+
+        with Document(source_pdf) as doc:
+            composition = Composition(page_sizes=list(doc.page_sizes), boxes=list(boxes))
+            staged = work / "delta-raw.pdf"
+            compose(composition, staged)
+
+            diffs: list[PageDiff] = []
+            previews: list[Path] = []
+
+            with Document(staged) as delta_doc:
+                for index in range(len(doc)):
+                    size = doc.page_sizes[index]
+                    rendered = delta_doc.render(index, options.dpi)
+                    added = rendered.gray <= options.ink_threshold
+                    empty = np.zeros_like(added)
+
+                    diff = PageDiff(
+                        index=index,
+                        size=size,
+                        dpi=options.dpi,
+                        added=added,
+                        removed=empty,
+                        added_px=int(added.sum()),
+                        removed_px=0,
+                        added_regions=label_regions(
+                            added, options.dpi, options.group_mm, options.min_region_mm2
+                        ),
+                        removed_regions=[],
+                    )
+
+                    if options.preview_dir:
+                        page = doc.render(index, options.dpi)
+                        image = preview_page(diff, page.gray, options.preview_width)
+                        path = Path(options.preview_dir) / f"page-{index + 1:03d}.png"
+                        image.save(path, format="PNG", optimize=True)
+                        previews.append(path)
+                        del page
+
+                    diff.release()
+                    diffs.append(diff)
+
+            checks: list[safety.Check] = []
+            for diff in diffs:
+                checks += safety.check_margins(diff, options.margin_mm)
+                checks += safety.check_coverage(diff)
+            checks += safety.check_empty(diffs)
+            checks += safety.check_calibration(
+                profile is not None, profile.name if profile else None
+            )
+
+            correction = profile.correction if profile else Similarity.identity()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            apply_correction(staged, output, correction, list(doc.page_sizes))
+
+    return Result(
+        output=output,
+        pages=diffs,
+        checks=safety.sort_checks(checks),
+        previews=previews,
+        mode=COMPOSE,
+        dpi=options.dpi,
+        profile=profile,
+    )
 
 
 def run(

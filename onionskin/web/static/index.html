@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Onionskin</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23b4571f'/><rect x='7' y='6' width='15' height='19' rx='2' fill='%23fff' opacity='.55'/><rect x='11' y='9' width='15' height='19' rx='2' fill='%23fff' opacity='.9'/></svg>">
 <style>
   :root {
     color-scheme: light dark;
@@ -56,6 +57,7 @@
   .drops { display: grid; grid-template-columns: 1fr 1fr; gap: .85rem; }
   @media (max-width: 640px) { .drops { grid-template-columns: 1fr; } }
   .drop {
+    display: block;  /* a <label> is inline by default, which breaks the border */
     border: 1.5px dashed var(--line); border-radius: var(--radius);
     padding: 1.1rem .9rem; text-align: center; cursor: pointer;
     transition: border-color .15s, background .15s; background: transparent;
@@ -101,6 +103,33 @@
   details summary { cursor: pointer; font-weight: 600; }
   .cal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .6rem; margin: .8rem 0; }
   .hidden { display: none; }
+  .tabs { display: flex; gap: .4rem; margin-bottom: 1.1rem; }
+  .tab {
+    background: transparent; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 7px; padding: .45rem .9rem; font-weight: 600; font-size: .9rem;
+  }
+  .tab.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .stage {
+    position: relative; display: inline-block; max-width: 100%;
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+    background: #fff; cursor: crosshair; line-height: 0;
+  }
+  .stage img {
+    display: block; max-height: 62vh; width: auto; max-width: 100%;
+  }
+  #stage-boxes { position: absolute; inset: 0; }
+  .tbox {
+    position: absolute; white-space: pre; cursor: grab; line-height: 1.15;
+    outline: 1px dashed transparent; padding: 1px; transform-origin: top left;
+  }
+  .tbox:hover { outline-color: var(--accent); }
+  .tbox.on { outline: 1.5px solid var(--accent); background: rgba(180,87,31,.07); }
+  .tbox.dragging { cursor: grabbing; }
+  textarea {
+    background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: .45rem .55rem; font: inherit; font-size: .9rem;
+    width: 100%; resize: vertical;
+  }
   code { background: var(--accent-soft); padding: .1rem .3rem; border-radius: 4px; font-size: .85em; }
   .err { color: var(--blocker); font-size: .9rem; }
 </style>
@@ -112,7 +141,12 @@
     <p class="tagline">Add words to a page that is already printed.</p>
   </header>
 
-  <section>
+  <nav class="tabs">
+    <button class="tab on" data-panel="panel-compare">Compare two files</button>
+    <button class="tab" data-panel="panel-type">Type on the page</button>
+  </nav>
+
+  <section id="panel-compare">
     <h2>1 &nbsp;The two documents</h2>
     <div class="drops">
       <label class="drop" id="drop-original">
@@ -156,6 +190,70 @@
     <div class="actions">
       <button id="go" disabled>Build the delta</button>
       <span class="status" id="status"></span>
+    </div>
+  </section>
+
+  <section id="panel-type" class="hidden">
+    <h2>1 &nbsp;The printed document</h2>
+    <label class="drop" id="drop-source">
+      <span class="label">The page as printed</span>
+      <span class="hint">one file — you type the additions here</span>
+      <input type="file" id="file-source" accept=".pdf,.docx,.doc,.odt,.rtf,.txt">
+    </label>
+    <p class="status" id="type-status" style="margin:.7rem 0 0"></p>
+
+    <div id="editor" class="hidden">
+      <div class="pages" id="editor-pages"></div>
+      <p class="status" style="margin:0 0 .6rem">
+        Click anywhere on the page to add text. Drag a box to move it.
+      </p>
+      <div class="stage" id="stage">
+        <img id="stage-img" alt="Page">
+        <div id="stage-boxes"></div>
+      </div>
+
+      <div id="box-tools" class="hidden">
+        <div class="field" style="margin-top:.9rem">
+          <label for="box-text">Text</label>
+          <textarea id="box-text" rows="2"></textarea>
+        </div>
+        <div class="options" style="margin-top:.7rem">
+          <div class="field"><label for="box-font">Font</label>
+            <select id="box-font"></select></div>
+          <div class="field"><label for="box-size">Size (pt)</label>
+            <input type="number" id="box-size" min="4" max="200" step="0.5" style="width:5.5rem"></div>
+          <div class="field"><label for="box-align">Align</label>
+            <select id="box-align">
+              <option value="left">Left</option>
+              <option value="center">Centre</option>
+              <option value="right">Right</option>
+            </select></div>
+          <div class="field"><label for="box-width">Wrap (mm)</label>
+            <input type="number" id="box-width" min="0" step="1" placeholder="none" style="width:5.5rem"></div>
+          <div class="field"><label for="box-rotation">Rotate (°)</label>
+            <input type="number" id="box-rotation" step="1" style="width:5.5rem"></div>
+          <div class="field"><label for="box-colour">Colour</label>
+            <input type="color" id="box-colour" style="width:3.2rem;padding:.15rem"></div>
+          <div class="field"><label for="box-x">X (mm)</label>
+            <input type="number" id="box-x" step="0.5" style="width:5.5rem"></div>
+          <div class="field"><label for="box-y">Y (mm)</label>
+            <input type="number" id="box-y" step="0.5" style="width:5.5rem"></div>
+        </div>
+        <div class="actions">
+          <button class="ghost" id="box-delete">Delete this box</button>
+        </div>
+      </div>
+
+      <div class="options" style="margin-top:1rem">
+        <div class="field"><label for="type-margin">Dead border</label>
+          <input type="number" id="type-margin" value="5" min="0" max="25" step="0.5" style="width:5.5rem"></div>
+        <div class="field"><label for="type-profile">Printer</label>
+          <select id="type-profile"><option value="">Uncalibrated</option></select></div>
+      </div>
+      <div class="actions">
+        <button id="type-go">Build the delta</button>
+        <span class="status" id="type-build-status"></span>
+      </div>
     </div>
   </section>
 
@@ -230,13 +328,18 @@ wireDrop('edited');
 async function loadProfiles() {
   try {
     const { profiles } = await (await fetch('/api/profiles')).json();
-    const sel = $('profile');
-    sel.innerHTML = '<option value="">Uncalibrated</option>';
-    for (const p of profiles) {
-      const opt = document.createElement('option');
-      opt.value = p.name;
-      opt.textContent = `${p.name} — ${p.error}`;
-      sel.appendChild(opt);
+    for (const id of ['profile', 'type-profile']) {
+      const sel = $(id);
+      if (!sel) continue;
+      const previous = sel.value;
+      sel.innerHTML = '<option value="">Uncalibrated</option>';
+      for (const p of profiles) {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = `${p.name} — ${p.error}`;
+        sel.appendChild(opt);
+      }
+      sel.value = previous;
     }
   } catch { /* the page still works without profiles */ }
 }
@@ -321,6 +424,249 @@ $('download').addEventListener('click', () => {
   if (!job) return;
   const name = encodeURIComponent(`${job.source_name || 'document'}-onionskin`);
   window.location = `${job.download}?name=${name}`;
+});
+
+// --- typing directly on the page -----------------------------------------
+
+const editor = {
+  job: null, name: 'document', pages: [], images: [],
+  page: 0, boxes: [], selected: null,
+};
+
+document.querySelectorAll('.tab').forEach(tab =>
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+    tab.classList.add('on');
+    $('panel-compare').classList.toggle('hidden', tab.dataset.panel !== 'panel-compare');
+    $('panel-type').classList.toggle('hidden', tab.dataset.panel !== 'panel-type');
+    $('results').classList.add('hidden');
+    $('print-help').classList.add('hidden');
+  }));
+
+(async () => {
+  try {
+    const { fonts } = await (await fetch('/api/fonts')).json();
+    $('box-font').innerHTML = fonts
+      .map(f => `<option value="${f}">${f}</option>`).join('');
+  } catch { /* the editor still works with the default font */ }
+})();
+
+// mm <-> screen pixels, from the page's real width
+const pxPerMm = () => $('stage-img').clientWidth / editor.pages[editor.page].width_mm;
+
+function wireSourceDrop() {
+  const zone = $('drop-source'), input = $('file-source');
+  const open = async (file) => {
+    if (!file) return;
+    zone.classList.add('filled');
+    zone.querySelector('.hint').textContent = file.name;
+    $('type-status').textContent = 'Opening…';
+    const body = new FormData();
+    body.append('source', file);
+    try {
+      const res = await fetch('/api/compose/open', { method: 'POST', body });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'could not open that file');
+      Object.assign(editor, {
+        job: data.job, name: data.name, pages: data.pages, images: data.images,
+        page: 0, boxes: [], selected: null,
+      });
+      $('type-status').textContent =
+        `${data.pages.length} page(s), ${data.pages[0].label}`;
+      $('editor').classList.remove('hidden');
+      renderPageTabs();
+      showPage(0);
+    } catch (err) {
+      $('type-status').innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
+    }
+  };
+  input.addEventListener('change', () => open(input.files[0]));
+  ['dragenter', 'dragover'].forEach(e =>
+    zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(e =>
+    zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.remove('over'); }));
+  zone.addEventListener('drop', ev => open(ev.dataTransfer.files[0]));
+}
+wireSourceDrop();
+
+function renderPageTabs() {
+  $('editor-pages').innerHTML = editor.images.map((_, i) =>
+    `<button data-page="${i}" class="${i === 0 ? 'on' : ''}">Page ${i + 1}</button>`).join('');
+  $('editor-pages').querySelectorAll('button').forEach(btn =>
+    btn.addEventListener('click', () => showPage(Number(btn.dataset.page))));
+}
+
+function showPage(index) {
+  editor.page = index;
+  $('editor-pages').querySelectorAll('button').forEach(b =>
+    b.classList.toggle('on', Number(b.dataset.page) === index));
+  const img = $('stage-img');
+  img.onload = drawBoxes;
+  img.src = editor.images[index];
+  img.alt = `Page ${index + 1}`;
+  select(null);
+}
+
+$('stage').addEventListener('click', (ev) => {
+  if (ev.target.closest('.tbox')) return;
+  const rect = $('stage-img').getBoundingClientRect();
+  const scale = pxPerMm();
+  const box = {
+    page: editor.page + 1,
+    x_mm: round1((ev.clientX - rect.left) / scale),
+    y_mm: round1((ev.clientY - rect.top) / scale),
+    text: 'New text', size_pt: 11, font: $('box-font').value || 'Helvetica',
+    width_mm: null, line_spacing: 1.15, align: 'left',
+    colour: '#000000', rotation_deg: 0,
+  };
+  editor.boxes.push(box);
+  drawBoxes();
+  select(editor.boxes.length - 1);
+  $('box-text').focus();
+  $('box-text').select();
+});
+
+const round1 = (v) => Math.round(v * 10) / 10;
+
+function drawBoxes() {
+  const scale = pxPerMm();
+  const host = $('stage-boxes');
+  host.innerHTML = '';
+  editor.boxes.forEach((box, i) => {
+    if (box.page - 1 !== editor.page) return;
+    const el = document.createElement('div');
+    el.className = 'tbox' + (i === editor.selected ? ' on' : '');
+    el.dataset.index = i;
+    el.textContent = box.text;
+    el.style.left = `${box.x_mm * scale}px`;
+    el.style.top = `${box.y_mm * scale}px`;
+    // pt -> mm -> screen px, so what you see is close to what prints
+    el.style.fontSize = `${box.size_pt * (25.4 / 72) * scale}px`;
+    el.style.color = box.colour;
+    el.style.fontFamily = fontStack(box.font);
+    el.style.transform = box.rotation_deg ? `rotate(${box.rotation_deg}deg)` : '';
+    if (box.width_mm) {
+      el.style.width = `${box.width_mm * scale}px`;
+      el.style.whiteSpace = 'pre-wrap';
+      el.style.textAlign = box.align === 'center' ? 'center'
+        : box.align === 'right' ? 'right' : 'left';
+    }
+    el.addEventListener('mousedown', ev => startDrag(ev, i));
+    host.appendChild(el);
+  });
+}
+
+function fontStack(name) {
+  if (name.startsWith('Times')) return 'Times, "Times New Roman", serif';
+  if (name.startsWith('Courier')) return 'Courier, "Courier New", monospace';
+  return 'Helvetica, Arial, sans-serif';
+}
+
+function startDrag(ev, index) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  select(index);
+  // select() redraws, so the node under the cursor has just been replaced.
+  const el = $('stage-boxes').querySelector(`.tbox[data-index="${index}"]`);
+  if (!el) return;
+  const scale = pxPerMm();
+  const box = editor.boxes[index];
+  const startX = ev.clientX, startY = ev.clientY;
+  const originX = box.x_mm, originY = box.y_mm;
+  el.classList.add('dragging');
+
+  const move = (m) => {
+    box.x_mm = round1(Math.max(0, originX + (m.clientX - startX) / scale));
+    box.y_mm = round1(Math.max(0, originY + (m.clientY - startY) / scale));
+    el.style.left = `${box.x_mm * scale}px`;
+    el.style.top = `${box.y_mm * scale}px`;
+    $('box-x').value = box.x_mm;
+    $('box-y').value = box.y_mm;
+  };
+  const stop = () => {
+    el.classList.remove('dragging');
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', stop);
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', stop);
+}
+
+function select(index) {
+  editor.selected = index;
+  const tools = $('box-tools');
+  if (index === null || !editor.boxes[index]) {
+    tools.classList.add('hidden');
+    drawBoxes();
+    return;
+  }
+  const box = editor.boxes[index];
+  tools.classList.remove('hidden');
+  $('box-text').value = box.text;
+  $('box-font').value = box.font;
+  $('box-size').value = box.size_pt;
+  $('box-align').value = box.align;
+  $('box-width').value = box.width_mm ?? '';
+  $('box-rotation').value = box.rotation_deg;
+  $('box-colour').value = box.colour;
+  $('box-x').value = box.x_mm;
+  $('box-y').value = box.y_mm;
+  drawBoxes();
+}
+
+const BINDINGS = {
+  'box-text': (b, v) => b.text = v,
+  'box-font': (b, v) => b.font = v,
+  'box-size': (b, v) => b.size_pt = Number(v) || 11,
+  'box-align': (b, v) => b.align = v,
+  'box-width': (b, v) => b.width_mm = v === '' ? null : Number(v),
+  'box-rotation': (b, v) => b.rotation_deg = Number(v) || 0,
+  'box-colour': (b, v) => b.colour = v,
+  'box-x': (b, v) => b.x_mm = Number(v) || 0,
+  'box-y': (b, v) => b.y_mm = Number(v) || 0,
+};
+for (const [id, apply] of Object.entries(BINDINGS)) {
+  $(id).addEventListener('input', () => {
+    if (editor.selected === null) return;
+    apply(editor.boxes[editor.selected], $(id).value);
+    drawBoxes();
+  });
+}
+
+$('box-delete').addEventListener('click', () => {
+  if (editor.selected === null) return;
+  editor.boxes.splice(editor.selected, 1);
+  select(null);
+});
+
+$('type-go').addEventListener('click', async () => {
+  if (!editor.job) return;
+  if (!editor.boxes.length) {
+    $('type-build-status').innerHTML =
+      '<span class="err">Click the page to add some text first.</span>';
+    return;
+  }
+  const body = new FormData();
+  body.append('job', editor.job);
+  body.append('boxes', JSON.stringify(editor.boxes));
+  body.append('margin', $('type-margin').value);
+  body.append('profile', $('type-profile').value);
+
+  $('type-go').disabled = true;
+  $('type-build-status').textContent = 'Composing…';
+  try {
+    const res = await fetch('/api/compose/render', { method: 'POST', body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'something went wrong');
+    data.source_name = editor.name;
+    render(data);
+    $('type-build-status').textContent = '';
+    $('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    $('type-build-status').innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
+  } finally {
+    $('type-go').disabled = false;
+  }
 });
 
 // --- calibration ---------------------------------------------------------

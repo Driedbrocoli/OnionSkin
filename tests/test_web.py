@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -221,3 +223,225 @@ def test_a_profile_moves_the_delta(client, docs, onionskin_home):
 
     left = plain["pages"][0]["added_regions"][0]["x_mm"]
     assert left > 0
+
+
+# --- typing directly on the page -------------------------------------------
+
+
+@pytest.fixture
+def opened(client, tmp_path):
+    """A document opened for editing, ready to receive text boxes."""
+    source = make_pdf(tmp_path / "form.pdf", [(20.0, 40.0, "Authorised by:")], pages=2)
+    with source.open("rb") as f:
+        res = client.post(
+            "/api/compose/open",
+            files={"source": ("form.pdf", f, "application/pdf")},
+            data={"dpi": "80"},
+        )
+    assert res.status_code == 200
+    return res.json()
+
+
+def box(**kwargs):
+    base = {"page": 1, "x_mm": 60.0, "y_mm": 150.0, "text": "Approved", "size_pt": 12}
+    base.update(kwargs)
+    return base
+
+
+def test_fonts_are_listed(client):
+    fonts = client.get("/api/fonts").json()["fonts"]
+    assert "Helvetica" in fonts and "Times-Roman" in fonts
+
+
+def test_opening_returns_page_geometry_and_images(opened):
+    assert len(opened["pages"]) == 2
+    assert opened["pages"][0]["width_mm"] == pytest.approx(210.0, abs=0.5)
+    assert "A4" in opened["pages"][0]["label"]
+    assert len(opened["images"]) == 2
+
+
+def test_page_images_are_served(client, opened):
+    res = client.get(opened["images"][0])
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+
+
+def test_opening_rejects_an_unsupported_file(client, tmp_path):
+    bad = tmp_path / "notes.xyz"
+    bad.write_text("nope")
+    with bad.open("rb") as f:
+        res = client.post("/api/compose/open", files={"source": ("notes.xyz", f)})
+    assert res.status_code == 400
+
+
+def test_composing_places_text_and_returns_a_delta(client, opened):
+    res = client.post(
+        "/api/compose/render",
+        data={"job": opened["job"], "boxes": json.dumps([box()]), "dpi": "200"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+
+    assert body["mode"] == "compose"
+    assert body["blocked"] is False
+    assert body["pages_with_additions"] == [1]
+    region = body["pages"][0]["added_regions"][0]
+    assert region["x_mm"] == pytest.approx(60.0, abs=1.5)
+
+    pdf = client.get(body["download"])
+    assert pdf.status_code == 200
+    assert pdf.content.startswith(b"%PDF")
+
+
+def test_composing_onto_the_second_page(client, opened):
+    res = client.post(
+        "/api/compose/render",
+        data={
+            "job": opened["job"],
+            "boxes": json.dumps([box(page=2)]),
+            "dpi": "200",
+        },
+    )
+    assert res.json()["pages_with_additions"] == [2]
+
+
+def test_composing_never_blocks_on_reflow(client, opened):
+    """Absolutely positioned text cannot displace anything."""
+    res = client.post(
+        "/api/compose/render",
+        data={
+            "job": opened["job"],
+            "boxes": json.dumps([box(x_mm=20.0, y_mm=40.0, text="right over it")]),
+            "dpi": "200",
+        },
+    )
+    body = res.json()
+    assert body["blocked"] is False
+    assert not any(c["code"] == "reflow" for c in body["checks"])
+
+
+def test_composing_still_warns_about_the_border(client, opened):
+    res = client.post(
+        "/api/compose/render",
+        data={
+            "job": opened["job"],
+            "boxes": json.dumps([box(x_mm=1.0, y_mm=150.0)]),
+            "dpi": "200",
+        },
+    )
+    assert any(c["code"] == "margin" for c in res.json()["checks"])
+
+
+def test_composing_reports_a_page_that_does_not_exist(client, opened):
+    res = client.post(
+        "/api/compose/render",
+        data={"job": opened["job"], "boxes": json.dumps([box(page=9)]), "dpi": "200"},
+    )
+    assert res.status_code == 400
+    assert "not in the document" in res.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "boxes, message",
+    [
+        ("not json", "not valid JSON"),
+        ('{"page": 1}', "must be a list"),
+        ('[{"page": 1, "text": ""}]', "no text"),
+        ('[{"page": 1, "text": "x", "font": "Comic Sans"}]', "unknown font"),
+        ('[{"page": 1, "text": "x", "bold": true}]', "bold"),
+    ],
+)
+def test_bad_box_payloads_are_reported(client, opened, boxes, message):
+    res = client.post(
+        "/api/compose/render",
+        data={"job": opened["job"], "boxes": boxes, "dpi": "200"},
+    )
+    assert res.status_code == 400
+    assert message in res.json()["detail"]
+
+
+def test_composing_against_an_unknown_job(client):
+    res = client.post(
+        "/api/compose/render",
+        data={"job": "a" * 32, "boxes": json.dumps([box()])},
+    )
+    assert res.status_code == 404
+
+
+@pytest.mark.parametrize("job_id", ["../../etc", "not-hex", "0" * 31])
+def test_compose_job_ids_are_validated(client, job_id):
+    res = client.post(
+        "/api/compose/render", data={"job": job_id, "boxes": json.dumps([box()])}
+    )
+    assert res.status_code == 404
+    assert client.get(f"/api/jobs/{job_id}/page/1").status_code == 404
+
+
+def test_composing_applies_a_calibration_profile(client, opened, onionskin_home):
+    calibrate.save_profile(
+        calibrate.Profile(name="shifty", error=Similarity(dx_mm=1.5))
+    )
+    res = client.post(
+        "/api/compose/render",
+        data={
+            "job": opened["job"],
+            "boxes": json.dumps([box()]),
+            "dpi": "200",
+            "profile": "shifty",
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["profile"] == "shifty"
+    assert "-1.50" in res.json()["correction"]
+
+
+# --- the served page itself -------------------------------------------------
+
+
+def read_index() -> str:
+    from onionskin.web.app import STATIC
+
+    return (STATIC / "index.html").read_text(encoding="utf-8")
+
+
+def test_head_has_no_stray_markup():
+    """A data-URI favicon with double quotes once broke out of its attribute
+    and rendered as text at the top of the page."""
+    from html.parser import HTMLParser
+
+    class Collector(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stray = []
+
+        def handle_data(self, data):
+            if data.strip() and self.lasttag not in ("style", "title"):
+                self.stray.append(data.strip()[:40])
+
+    collector = Collector()
+    collector.feed(read_index().split("</head>")[0])
+    assert collector.stray == []
+
+
+@pytest.mark.parametrize(
+    "element_id",
+    [
+        "panel-compare", "panel-type",          # the two workflows
+        "file-original", "file-edited", "file-source",
+        "stage", "stage-img", "stage-boxes",    # the editor canvas
+        "box-text", "box-size", "box-font", "box-x", "box-y", "box-delete",
+        "type-go", "go", "download", "results", "checks", "summary",
+        "profile", "type-profile",
+    ],
+)
+def test_elements_the_script_drives_exist(element_id):
+    assert f'id="{element_id}"' in read_index()
+
+
+def test_the_page_is_self_contained():
+    """No external hosts: this often runs on a machine with no internet."""
+    import re
+
+    html = read_index()
+    remote = re.findall(r'(?:src|href)="(https?://[^"]+)"', html)
+    assert remote == []

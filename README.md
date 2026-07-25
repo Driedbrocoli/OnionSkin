@@ -22,26 +22,63 @@ Word documents are rendered by **LibreOffice**, which must be installed
 ([download](https://www.libreoffice.org/download/)). PDFs work without it.
 Check the setup with `onionskin doctor`.
 
-## Use
+## Two ways to work
+
+**Type on the page.** One file in, no editing round trip. Say where the words
+go and Onionskin puts them there:
 
 ```bash
-# The common case
-onionskin delta report.docx report-edited.docx -o delta.pdf
-
-# See what changed without producing anything printable
-onionskin inspect report.docx report-edited.docx
-
-# Proof images showing where the new ink lands on the existing page
-onionskin delta a.docx b.docx -o delta.pdf --preview ./proof
-
-# In the browser: drag both files in, see the proof, download the delta
-onionskin serve
+onionskin add po.docx -o delta.pdf --text '1:45,63:J. Bezzina — approved 25 July'
 ```
 
-Then put the printed sheet back in the tray and print `delta.pdf` **at 100% /
-"Actual size"**, with "Fit to page" turned off.
+Coordinates are millimetres from the top-left of the sheet, the way you would
+measure with a ruler. In the browser (`onionskin serve` → *Type on the page*)
+you drop the file in, click where you want the words, and drag to nudge.
+
+Because the text is placed at an absolute position, **nothing on the page can
+move** — the reflow problem below simply cannot happen. This is the path to
+reach for when you are filling a gap on a form.
+
+**Compare two documents.** Edit in Word as you normally would, and let
+Onionskin work out what is new:
+
+```bash
+onionskin delta report.docx report-edited.docx -o delta.pdf
+onionskin inspect report.docx report-edited.docx      # analyse, write nothing
+onionskin delta a.docx b.docx -o delta.pdf --preview ./proof
+```
+
+Either way, put the printed sheet back in the tray and print `delta.pdf` **at
+100% / "Actual size"**, with "Fit to page" turned off.
+
+## Placing text precisely
+
+```bash
+onionskin add form.pdf -o delta.pdf \
+  --text '1:45,63:Approved' \
+  --text '2:20,240:Continued overleaf' \
+  --size 11 --font Times-Roman --width 80 --align right \
+  --save-layout layout.json
+```
+
+`--width` wraps the text at that many millimetres; without it, text stays on
+one line. `onionskin fonts` lists the built-in fonts, and `--font-file` takes
+any TrueType file.
+
+`--save-layout` writes the placements out as JSON, and `--layout` reads them
+back — so a monthly form can be filled with one command. Layout files number
+pages from 1, and take every setting a text box has:
+
+```json
+{"boxes": [
+  {"page": 1, "x_mm": 45, "y_mm": 63, "text": "Approved", "size_pt": 11,
+   "font": "Helvetica", "align": "left", "colour": "#000000", "rotation_deg": 0}
+]}
+```
 
 ## The thing that will bite you: reflow
+
+*(Only when comparing two documents — typing on the page cannot cause it.)*
 
 Insert a word in the middle of a paragraph and every line after it shifts down.
 The delta is then not just your new word — it is the whole re-flowed remainder
@@ -121,8 +158,17 @@ rather than printing inside a pale halo.
 ## Library
 
 ```python
-from onionskin import pipeline
+from onionskin import compose, pipeline
 
+# Type on the page
+pipeline.compose_run(
+    "po.docx",
+    [compose.TextBox(page=0, x_mm=45, y_mm=63, text="Approved", size_pt=11)],
+    "delta.pdf",
+    pipeline.Options(profile="office"),
+)
+
+# Or compare two documents
 result = pipeline.run(
     "report.docx", "report-edited.docx", "delta.pdf",
     pipeline.Options(dpi=600, mode="vector", profile="office"),
