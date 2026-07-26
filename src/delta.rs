@@ -109,6 +109,111 @@ fn pdf_rects(regions: &[Region], page: PageSize) -> String {
         .join(" ")
 }
 
+/// A box drawn round each change, so it can be seen.
+///
+/// Off unless asked for, and deliberately: a delta is printed onto the paper
+/// already in the tray, so a box drawn round a change is as permanent as the
+/// change. Somebody checking an edit wants it. Somebody producing a finished
+/// page very much does not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Outline {
+    /// How thick the line is, in millimetres.
+    pub width_mm: f64,
+    /// How far outside the ink the box sits. Enough that the line does not
+    /// touch the letters it is drawn around.
+    pub pad_mm: f64,
+    /// The line's colour: red, green, blue, each 0 to 1.
+    pub colour: (f64, f64, f64),
+}
+
+impl Default for Outline {
+    fn default() -> Outline {
+        Outline {
+            width_mm: 0.25,
+            pad_mm: 1.2,
+            // Red, because the point of the box is to be noticed, and because
+            // a black box on a black-and-white page reads as part of the page.
+            colour: (0.80, 0.10, 0.10),
+        }
+    }
+}
+
+impl Outline {
+    /// The PDF operators that stroke a box around each region.
+    ///
+    /// Self-contained: it saves the graphics state, sets its own colour and
+    /// line width, strokes, and restores. So it can be appended to any content
+    /// stream without disturbing what was drawn before it.
+    pub fn ops(&self, regions: &[Region], page: PageSize) -> String {
+        let boxes = self.boxes(regions, page);
+        if boxes.is_empty() {
+            return String::new();
+        }
+        // Every rectangle, then one `S`: the whole set is stroked in a single
+        // path, which is both smaller and how a PDF is meant to say it.
+        format!(
+            " q {:.4} {:.4} {:.4} RG {:.4} w {} S Q",
+            self.colour.0,
+            self.colour.1,
+            self.colour.2,
+            mm_to_pt(self.width_mm),
+            pdf_rects(&boxes, page),
+        )
+    }
+
+    /// Where the boxes go: each region grown by the padding, and any that then
+    /// overlap merged into one.
+    pub fn boxes(&self, regions: &[Region], page: PageSize) -> Vec<Region> {
+        let padded: Vec<Region> = regions.iter().map(|r| r.padded(self.pad_mm, page)).collect();
+        merge_touching(padded)
+    }
+}
+
+/// Merge boxes that overlap, until none do.
+///
+/// Two words a few millimetres apart become two boxes that cross each other,
+/// which looks like a mistake and is harder to read than the thing it marks.
+/// One box round the pair is what somebody drawing this by hand would do.
+fn merge_touching(mut boxes: Vec<Region>) -> Vec<Region> {
+    let mut merged = true;
+    while merged {
+        merged = false;
+        let mut out: Vec<Region> = Vec::with_capacity(boxes.len());
+        'next: for box_ in boxes.drain(..) {
+            for kept in out.iter_mut() {
+                if overlaps(kept, &box_) {
+                    *kept = union(kept, &box_);
+                    merged = true;
+                    continue 'next;
+                }
+            }
+            out.push(box_);
+        }
+        boxes = out;
+    }
+    boxes
+}
+
+fn overlaps(a: &Region, b: &Region) -> bool {
+    a.x0_mm < b.x1_mm && b.x0_mm < a.x1_mm && a.y0_mm < b.y1_mm && b.y0_mm < a.y1_mm
+}
+
+fn union(a: &Region, b: &Region) -> Region {
+    Region {
+        x0_mm: a.x0_mm.min(b.x0_mm),
+        y0_mm: a.y0_mm.min(b.y0_mm),
+        x1_mm: a.x1_mm.max(b.x1_mm),
+        y1_mm: a.y1_mm.max(b.y1_mm),
+        ink_mm2: a.ink_mm2 + b.ink_mm2,
+        px_bbox: (
+            a.px_bbox.0.min(b.px_bbox.0),
+            a.px_bbox.1.min(b.px_bbox.1),
+            a.px_bbox.2.max(b.px_bbox.2),
+            a.px_bbox.3.max(b.px_bbox.3),
+        ),
+    }
+}
+
 /// Builds a raster delta a page at a time.
 ///
 /// Pages are written and released as they arrive, so a long document never
@@ -119,6 +224,7 @@ pub struct RasterDeltaWriter {
     pages_id: lopdf::ObjectId,
     page_ids: Vec<Object>,
     title: String,
+    outline: Option<Outline>,
 }
 
 impl RasterDeltaWriter {
@@ -136,7 +242,14 @@ impl RasterDeltaWriter {
             pages_id,
             page_ids: Vec::new(),
             title: title.to_string(),
+            outline: None,
         })
+    }
+
+    /// Draw a box round each change as well as the change itself.
+    pub fn marking(mut self, outline: Option<Outline>) -> RasterDeltaWriter {
+        self.outline = outline;
+        self
     }
 
     /// Add one page, drawing whatever ink is new on it.
@@ -231,10 +344,14 @@ impl RasterDeltaWriter {
         let draw_w = crop_w as f64 * px_to_pt_x;
         let draw_h = crop_h as f64 * px_to_pt_y;
 
-        let content = format!(
+        let mut content = format!(
             "q {:.6} 0 0 {:.6} {:.6} {:.6} cm /Ink Do Q",
             draw_w, draw_h, place_x, place_y
         );
+        // After the ink, so a box is never hidden underneath the thing it marks.
+        if let Some(outline) = self.outline {
+            content.push_str(&outline.ops(&diff.added_regions, diff.size));
+        }
         let mut stream = Stream::new(dictionary! {}, content.into_bytes());
         let _ = stream.compress();
         let content_id = self.doc.add_object(stream);
@@ -307,8 +424,9 @@ pub fn build_raster_delta(
     page_rgb: &[Option<Vec<u8>>],
     out_path: &Path,
     title: &str,
+    outline: Option<Outline>,
 ) -> Result<PathBuf, DeltaError> {
-    let mut writer = RasterDeltaWriter::new(out_path, title)?;
+    let mut writer = RasterDeltaWriter::new(out_path, title)?.marking(outline);
     for (index, diff) in diffs.iter().enumerate() {
         let rgb = page_rgb.get(index).and_then(|o| o.as_deref());
         writer.add_page(diff, rgb)?;
@@ -323,6 +441,7 @@ pub fn build_vector_delta(
     out_path: &Path,
     pad_mm: f64,
     title: &str,
+    outline: Option<Outline>,
 ) -> Result<PathBuf, DeltaError> {
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -352,7 +471,14 @@ pub fn build_vector_delta(
             .map(|r| r.padded(pad_mm, diff.size))
             .collect();
         let clip = format!("q {} W n ", pdf_rects(&regions, diff.size));
-        wrap_content(&mut source, page_id, &clip, " Q")?;
+        // The box goes outside the clip, not inside it: a line drawn round a
+        // region is by definition at the edge of that region, and half of it
+        // would be clipped away.
+        let mut after = String::from(" Q");
+        if let Some(outline) = outline {
+            after.push_str(&outline.ops(&diff.added_regions, diff.size));
+        }
+        wrap_content(&mut source, page_id, &clip, &after)?;
         keep.push(page_id);
     }
 

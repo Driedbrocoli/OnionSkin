@@ -285,7 +285,7 @@ fn a_vector_delta_keeps_the_page_and_clips_it() {
         px_bbox: (0, 0, 1, 1),
     }];
 
-    build_vector_delta(&[diff], &source, &out, 0.3, "test").unwrap();
+    build_vector_delta(&[diff], &source, &out, 0.3, "test", None).unwrap();
 
     let pdf = lopdf::Document::load(&out).unwrap();
     assert_eq!(pdf.get_pages().len(), 1);
@@ -306,7 +306,7 @@ fn a_vector_page_with_no_additions_comes_out_blank() {
     let source = a_pdf(dir.path(), "edited.pdf", &[("Approved", 100.0)]);
     let out = dir.path().join("vector.pdf");
 
-    build_vector_delta(&[a_diff(&[], 40, 56)], &source, &out, 0.3, "test").unwrap();
+    build_vector_delta(&[a_diff(&[], 40, 56)], &source, &out, 0.3, "test", None).unwrap();
 
     let pdf = lopdf::Document::load(&out).unwrap();
     let page_id = *pdf.get_pages().values().next().unwrap();
@@ -573,7 +573,7 @@ fn a_delta_built_from_two_real_pages_carries_only_the_new_words() {
 
     // And the delta renders back to just that.
     let out = dir.path().join("delta.pdf");
-    build_raster_delta(&[diff], &[Some(new.rgb.clone())], &out, "delta").unwrap();
+    build_raster_delta(&[diff], &[Some(new.rgb.clone())], &out, "delta", None).unwrap();
 
     let rendered = engine.open(&out).unwrap().render(0, dpi).unwrap();
     let mut top = usize::MAX;
@@ -622,4 +622,107 @@ fn a_delta_of_a_reflowed_page_reports_the_ink_that_went_missing() {
     assert!(crate::safety::has_blockers(&crate::safety::check_reflow(
         &diff
     )));
+}
+
+// ---------------------------------------------------------------------------
+// Marking what changed
+// ---------------------------------------------------------------------------
+
+fn region(x0: f64, y0: f64, x1: f64, y1: f64) -> Region {
+    Region {
+        x0_mm: x0,
+        y0_mm: y0,
+        x1_mm: x1,
+        y1_mm: y1,
+        ink_mm2: (x1 - x0) * (y1 - y0) * 0.3,
+        px_bbox: (0, 0, 1, 1),
+    }
+}
+
+#[test]
+fn boxes_that_would_cross_each_other_become_one_box() {
+    // Two words a few millimetres apart, padded until their boxes overlap.
+    // Two crossing rectangles read as a mistake, and are harder to follow than
+    // the single box somebody drawing this by hand would have drawn.
+    let page = A4;
+    let outline = Outline {
+        pad_mm: 2.0,
+        ..Default::default()
+    };
+    let boxes = outline.boxes(
+        &[region(20.0, 20.0, 40.0, 24.0), region(41.0, 20.0, 60.0, 24.0)],
+        page,
+    );
+    assert_eq!(boxes.len(), 1, "{boxes:?}");
+    assert!((boxes[0].x0_mm - 18.0).abs() < 1e-9, "{boxes:?}");
+    assert!((boxes[0].x1_mm - 62.0).abs() < 1e-9, "{boxes:?}");
+
+    // Far apart, they stay two.
+    let boxes = outline.boxes(
+        &[region(20.0, 20.0, 40.0, 24.0), region(90.0, 20.0, 110.0, 24.0)],
+        page,
+    );
+    assert_eq!(boxes.len(), 2, "{boxes:?}");
+}
+
+#[test]
+fn a_box_never_runs_off_the_paper() {
+    // A change hard against the edge of the page would otherwise be given a
+    // box drawn partly off the sheet, which prints as three sides.
+    let page = A4;
+    let outline = Outline {
+        pad_mm: 5.0,
+        ..Default::default()
+    };
+    let boxes = outline.boxes(&[region(1.0, 1.0, 30.0, 8.0)], page);
+    assert_eq!(boxes.len(), 1);
+    assert!(boxes[0].x0_mm >= 0.0, "{boxes:?}");
+    assert!(boxes[0].y0_mm >= 0.0, "{boxes:?}");
+    assert!(boxes[0].x1_mm <= page.width_mm, "{boxes:?}");
+}
+
+#[test]
+fn the_operators_stroke_a_box_and_leave_the_state_as_they_found_it() {
+    // Appended to somebody else's content stream, so it has to save and
+    // restore: a stray colour left set would tint everything drawn after it.
+    let page = A4;
+    let ops = Outline::default().ops(&[region(20.0, 20.0, 40.0, 24.0)], page);
+    assert!(ops.contains(" q "), "{ops}");
+    assert!(ops.trim_end().ends_with('Q'), "{ops}");
+    assert!(ops.contains("RG"), "{ops}");
+    assert!(ops.contains(" re"), "{ops}");
+    assert!(ops.contains(" S "), "{ops}");
+    // Nothing at all when there is nothing to mark, rather than an empty path.
+    assert!(Outline::default().ops(&[], page).is_empty());
+}
+
+#[test]
+fn the_delta_gains_ink_when_the_changes_are_outlined() {
+    // The real check: the same delta, once plain and once outlined, and the
+    // outlined one has to actually carry more on the page.
+    let dir = tempfile::tempdir().unwrap();
+    let (width, height) = (40usize, 56usize);
+    let ink: Vec<(usize, usize)> = (10..30).map(|x| (x, 20)).collect();
+    let mut diff = a_diff(&ink, width, height);
+    diff.added_regions = vec![region(20.0, 30.0, 60.0, 34.0)];
+    let rgb = vec![0u8; width * height * 3];
+
+    let plain = dir.path().join("plain.pdf");
+    let marked = dir.path().join("marked.pdf");
+    build_raster_delta(&[diff.clone()], &[Some(rgb.clone())], &plain, "delta", None).unwrap();
+    build_raster_delta(
+        &[diff],
+        &[Some(rgb)],
+        &marked,
+        "delta",
+        Some(Outline::default()),
+    )
+    .unwrap();
+
+    let plain_size = std::fs::metadata(&plain).unwrap().len();
+    let marked_size = std::fs::metadata(&marked).unwrap().len();
+    assert!(
+        marked_size > plain_size,
+        "outlined delta is not bigger: {marked_size} vs {plain_size}"
+    );
 }

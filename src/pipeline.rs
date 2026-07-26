@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::calibrate::{self, Profile};
 use crate::delta::{
-    apply_correction, build_vector_delta, conform_to_source, preview_page, RasterDeltaWriter,
+    apply_correction, build_vector_delta, conform_to_source, preview_page, Outline,
+    RasterDeltaWriter,
 };
 use crate::diff::{diff_page, DiffOptions, PageDiff};
 use crate::geometry::{PageSize, Similarity};
@@ -50,6 +51,13 @@ pub struct Options {
     pub diff: DiffOptions,
     pub pad_mm: f64,
     pub preview_dir: Option<PathBuf>,
+    /// Draw a box round each change as well as printing it.
+    ///
+    /// `None` — the default — prints only the new ink, which is the whole
+    /// point of a delta. Somebody checking an edit wants the boxes; somebody
+    /// producing a finished page does not, and on a delta the difference is
+    /// permanent, because it is printed onto the paper.
+    pub outline: Option<Outline>,
 }
 
 impl Default for Options {
@@ -62,6 +70,7 @@ impl Default for Options {
             diff: DiffOptions::default(),
             pad_mm: 0.3,
             preview_dir: None,
+            outline: None,
         }
     }
 }
@@ -475,7 +484,9 @@ pub fn run_watched(
 
     let staged = work.join("delta-raw.pdf");
     let mut raster = match options.mode {
-        Mode::Raster => Some(RasterDeltaWriter::new(&staged, "Onionskin delta")?),
+        Mode::Raster => {
+            Some(RasterDeltaWriter::new(&staged, "Onionskin delta")?.marking(options.outline))
+        }
         Mode::Vector => None,
     };
 
@@ -549,6 +560,7 @@ pub fn run_watched(
                 &staged,
                 options.pad_mm,
                 "Onionskin delta",
+                options.outline,
             )?;
         }
     }

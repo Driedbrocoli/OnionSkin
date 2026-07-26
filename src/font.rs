@@ -421,6 +421,169 @@ pub fn suggest_system_font() -> Option<PathBuf> {
     CANDIDATES.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
+/// Every folder worth looking in for fonts on this machine.
+///
+/// The user's own folders come first, so a face they installed deliberately
+/// beats one that happened to be on the machine. After those, the places the
+/// system keeps fonts — and the places LibreOffice keeps its own, which are
+/// not the same places and are the reason a document can look right in Writer
+/// and have Onionskin say it has never heard of the font.
+pub fn font_folders() -> Vec<PathBuf> {
+    let mut folders = crate::settings::font_folders();
+
+    const SYSTEM: &[&str] = &[
+        // Linux
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        // LibreOffice, which ships its own and does not install them system-wide
+        "/usr/lib/libreoffice/share/fonts",
+        "/usr/lib64/libreoffice/share/fonts",
+        "/opt/libreoffice/share/fonts",
+        "/snap/libreoffice/current/lib/libreoffice/share/fonts",
+        "/var/lib/flatpak/app/org.libreoffice.LibreOffice/current/active/files/lib/libreoffice/share/fonts",
+        // macOS
+        "/Library/Fonts",
+        "/System/Library/Fonts",
+        "/System/Library/Fonts/Supplemental",
+        "/Applications/LibreOffice.app/Contents/Resources/fonts/truetype",
+        // Windows
+        "C:\\Windows\\Fonts",
+        "C:\\Program Files\\LibreOffice\\share\\fonts\\truetype",
+        "C:\\Program Files (x86)\\LibreOffice\\share\\fonts\\truetype",
+    ];
+    for path in SYSTEM {
+        folders.push(PathBuf::from(path));
+    }
+
+    // And the per-user places, which is where a font somebody installed by
+    // double-clicking it actually lands.
+    let home = crate::install::home();
+    for tail in [
+        ".fonts",
+        ".local/share/fonts",
+        "Library/Fonts",
+        "AppData/Local/Microsoft/Windows/Fonts",
+    ] {
+        folders.push(home.join(tail));
+    }
+
+    let mut seen: Vec<PathBuf> = Vec::new();
+    folders.retain(|folder| {
+        if !folder.is_dir() {
+            return false;
+        }
+        let key = folder.canonicalize().unwrap_or_else(|_| folder.clone());
+        if seen.contains(&key) {
+            return false;
+        }
+        seen.push(key);
+        true
+    });
+    folders
+}
+
+/// A font file found on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    pub path: PathBuf,
+    /// What the font calls itself — "DejaVu Sans", not "DejaVuSans.ttf".
+    pub family: String,
+}
+
+/// Every font file Onionskin can find, named the way its maker named it.
+///
+/// The name is read out of the file rather than taken from the filename,
+/// because the two often disagree and it is the one inside that a person
+/// recognises. Reading every font on a machine takes a moment, so this is for
+/// listing and for matching by name — not for anything on a hot path.
+///
+/// Unreadable files are skipped in silence. A fonts folder with something odd
+/// in it is completely ordinary and is not the user's problem to hear about.
+pub fn installed_fonts() -> Vec<Installed> {
+    let mut found: Vec<Installed> = Vec::new();
+    for folder in font_folders() {
+        collect_fonts(&folder, 0, &mut found);
+    }
+    found.sort_by(|a, b| {
+        a.family
+            .to_lowercase()
+            .cmp(&b.family.to_lowercase())
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    found.dedup_by(|a, b| a.family == b.family);
+    found
+}
+
+/// Walk a folder for font files, a few levels down.
+///
+/// Bounded rather than unlimited: `/usr/share/fonts` is two or three deep, and
+/// a folder somebody names by mistake — their home directory, say — should
+/// cost a moment rather than a walk of the whole disk.
+fn collect_fonts(folder: &Path, depth: usize, found: &mut Vec<Installed>) {
+    const DEEPEST: usize = 4;
+    if depth > DEEPEST {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_fonts(&path, depth + 1, found);
+            continue;
+        }
+        let is_font = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| {
+                let e = e.to_ascii_lowercase();
+                e == "ttf" || e == "otf" || e == "ttc" || e == "otc"
+            })
+            .unwrap_or(false);
+        if !is_font {
+            continue;
+        }
+        if let Ok(font) = EmbeddedFont::load(&path) {
+            found.push(Installed {
+                family: font.name.clone(),
+                path,
+            });
+        }
+    }
+}
+
+/// Find a font by the name somebody would type.
+///
+/// Matched loosely on purpose: "Liberation Serif", "liberationserif" and
+/// "LiberationSerif-Regular" are the same request as far as anybody asking is
+/// concerned, and refusing over a space would be pedantry.
+pub fn find_font(name: &str) -> Option<PathBuf> {
+    let wanted = squash(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    let installed = installed_fonts();
+    // An exact name first, so asking for "Arial" cannot land on "Arial Black".
+    installed
+        .iter()
+        .find(|font| squash(&font.family) == wanted)
+        .or_else(|| {
+            installed
+                .iter()
+                .find(|font| squash(&font.family).contains(&wanted))
+        })
+        .map(|font| font.path.clone())
+}
+
+/// A name with everything that people vary about it taken out.
+fn squash(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -447,6 +610,59 @@ pub(crate) mod tests {
                     .map(|f| f.outlines() == Outlines::PostScript)
                     .unwrap_or(false)
             })
+    }
+
+    #[test]
+    fn a_font_folder_the_user_names_is_searched() {
+        // The point of the setting: a face that is not where the system keeps
+        // fonts — LibreOffice's own, or one somebody bought — is found anyway.
+        let _home = crate::calibrate::borrow_home(
+            &tempfile::tempdir().expect("a temporary home").keep(),
+        );
+        let Some(source) = dejavu_path() else {
+            return;
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let planted = folder.path().join("Planted.ttf");
+        std::fs::copy(&source, &planted).unwrap();
+
+        assert!(
+            !font_folders().contains(&folder.path().to_path_buf()),
+            "the folder should not be searched before it is added"
+        );
+        crate::settings::add_font_folder(folder.path());
+        let searched = font_folders();
+        assert!(
+            searched.iter().any(|f| f.starts_with(folder.path())
+                || folder.path().starts_with(f.as_path())),
+            "the added folder is not being searched: {searched:?}"
+        );
+    }
+
+    #[test]
+    fn a_font_is_found_by_the_name_a_person_would_type() {
+        // "Liberation Serif", "liberationserif" and "LiberationSerif" are the
+        // same request. Refusing over a space would be pedantry.
+        assert_eq!(squash("Liberation Serif"), "liberationserif");
+        assert_eq!(squash("LiberationSerif-Regular"), "liberationserifregular");
+        assert_eq!(squash("  DejaVu  Sans  "), "dejavusans");
+        assert!(squash("").is_empty());
+        // An empty request must not match the first font on the machine.
+        assert!(find_font("").is_none());
+    }
+
+    #[test]
+    fn a_folder_full_of_things_that_are_not_fonts_is_no_trouble() {
+        // A fonts folder with a stray README, a broken file and a directory in
+        // it is completely ordinary, and none of it is the user's problem.
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("README"), b"not a font").unwrap();
+        std::fs::write(folder.path().join("broken.ttf"), b"not a font either").unwrap();
+        std::fs::create_dir(folder.path().join("subfolder")).unwrap();
+
+        let mut found = Vec::new();
+        collect_fonts(folder.path(), 0, &mut found);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]

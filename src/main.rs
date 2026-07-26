@@ -46,7 +46,7 @@ enum Command {
     /// List the scanners this machine can see.
     Scanners,
     /// List the fonts available.
-    Fonts,
+    Fonts(FontsArgs),
 
     /// Start a new document from a blank page.
     New(NewArgs),
@@ -90,6 +90,23 @@ enum Command {
     Uninstall(InstallArgs),
     /// Build the archive people download. For making a release.
     Package(PackageArgs),
+}
+
+#[derive(clap::Args)]
+struct FontsArgs {
+    /// Also list every font file found on this machine, not just the built-ins.
+    #[arg(long)]
+    all: bool,
+    /// Look in this folder for fonts from now on, and remember it. Point it at
+    /// LibreOffice's fonts folder, or wherever you keep the ones you bought.
+    #[arg(long, value_name = "FOLDER")]
+    add_folder: Option<PathBuf>,
+    /// Stop looking in a folder that was added.
+    #[arg(long, value_name = "FOLDER")]
+    forget_folder: Option<PathBuf>,
+    /// List the folders being searched, and stop.
+    #[arg(long)]
+    folders: bool,
 }
 
 #[derive(clap::Args)]
@@ -233,6 +250,14 @@ struct DeltaArgs {
     /// Write proof images here, showing where the new ink lands.
     #[arg(long)]
     preview: Option<PathBuf>,
+    /// Draw a box round every change, so what was added is easy to see. The
+    /// box is printed onto the paper along with the change.
+    #[arg(long)]
+    outline: bool,
+    /// The colour of those boxes: red, green, blue, black, or 'R,G,B' with
+    /// each from 0 to 1.
+    #[arg(long, default_value = "red", requires = "outline")]
+    outline_colour: String,
     /// Write the delta even when a check blocks it.
     #[arg(long)]
     force: bool,
@@ -737,21 +762,7 @@ extern "C" {
 
 fn run() -> Result<ExitCode, String> {
     match Cli::parse().command {
-        Command::Fonts => {
-            println!("Fonts built into every PDF reader:");
-            for font in Font::all() {
-                println!("  {}", font.base_name());
-            }
-            println!(
-                "\nThese cover Western European text only. For any other alphabet, \
-                 pass\n--font-file with a .ttf or .ttc and it will be carried inside \
-                 the delta."
-            );
-            if let Some(path) = suggest_system_font() {
-                println!("\nThere is one on this machine: {}", path.display());
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Fonts(args) => cmd_fonts(args),
         Command::Inspect(args) => cmd_inspect(args),
         Command::Add(args) => cmd_add(args),
         Command::Acquire(args) => cmd_acquire(args),
@@ -1937,6 +1948,7 @@ fn delta_options(
     margin: f64,
     profile: Option<String>,
     preview: Option<PathBuf>,
+    outline: Option<onionskin::delta::Outline>,
 ) -> Result<pipeline::Options, String> {
     let mode = pipeline::Mode::parse(mode)
         .ok_or_else(|| format!("mode must be 'raster' or 'vector', not '{mode}'"))?;
@@ -1946,8 +1958,51 @@ fn delta_options(
         margin_mm: margin,
         profile,
         preview_dir: preview,
+        outline,
         ..Default::default()
     })
+}
+
+/// A colour by name, or as three numbers.
+///
+/// Names first because that is what somebody types, and the three-number form
+/// underneath because somebody marking up a proof in a particular house colour
+/// should not have to settle for approximately red.
+fn parse_colour(text: &str) -> Result<(f64, f64, f64), String> {
+    let text = text.trim();
+    let named = match text.to_ascii_lowercase().as_str() {
+        "red" => Some((0.80, 0.10, 0.10)),
+        "green" => Some((0.00, 0.55, 0.20)),
+        "blue" => Some((0.10, 0.30, 0.85)),
+        "orange" => Some((0.95, 0.45, 0.00)),
+        "magenta" | "pink" => Some((0.85, 0.10, 0.60)),
+        "black" => Some((0.0, 0.0, 0.0)),
+        "grey" | "gray" => Some((0.45, 0.45, 0.45)),
+        _ => None,
+    };
+    if let Some(colour) = named {
+        return Ok(colour);
+    }
+
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    if parts.len() == 3 {
+        let mut channels = [0.0f64; 3];
+        for (slot, part) in channels.iter_mut().zip(&parts) {
+            let value: f64 = part
+                .parse()
+                .map_err(|_| format!("'{part}' is not a number between 0 and 1"))?;
+            if !(0.0..=1.0).contains(&value) {
+                return Err(format!("{value} is outside 0 to 1"));
+            }
+            *slot = value;
+        }
+        return Ok((channels[0], channels[1], channels[2]));
+    }
+
+    Err(format!(
+        "I do not know the colour '{text}'. Try red, green, blue, orange, \
+         magenta, black or grey — or three numbers like '0.8,0.1,0.1'."
+    ))
 }
 
 /// Print the checks. Anything worse than a note goes to stderr, so a script
@@ -2004,12 +2059,22 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         .clone()
         .unwrap_or_else(|| beside(&args.edited, "-delta", "pdf"));
     check_writable(&output, "delta")?;
+    let outline = args
+        .outline
+        .then(|| {
+            parse_colour(&args.outline_colour).map(|colour| onionskin::delta::Outline {
+                colour,
+                ..Default::default()
+            })
+        })
+        .transpose()?;
     let options = delta_options(
         &args.mode,
         args.dpi,
         args.margin,
         args.profile,
         args.preview.clone(),
+        outline,
     )?;
 
     let outcome = pipeline::run_watched(
@@ -2079,7 +2144,7 @@ fn cmd_compare(args: CompareArgs) -> Result<ExitCode, String> {
     // Somewhere to put the delta that is thrown away afterwards, so that
     // "report, write nothing" really does write nothing anyone will find.
     let scratch = onionskin::render::Workspace::new(false).map_err(|e| e.to_string())?;
-    let options = delta_options("raster", args.dpi, args.margin, None, None)?;
+    let options = delta_options("raster", args.dpi, args.margin, None, None, None)?;
 
     let outcome = pipeline::run(
         &args.original,
@@ -2680,6 +2745,86 @@ fn cmd_uninstall(args: InstallArgs) -> Result<ExitCode, String> {
     }
     for note in &report.notes {
         println!("\n{note}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// Fonts
+// ---------------------------------------------------------------------------
+
+fn cmd_fonts(args: FontsArgs) -> Result<ExitCode, String> {
+    // Changing where fonts are looked for is a thing you do once, so it says
+    // what it did and stops rather than also printing a page of font names.
+    if let Some(folder) = &args.add_folder {
+        if !folder.is_dir() {
+            return Err(format!("there is no folder at {}", folder.display()));
+        }
+        let count = onionskin::font::installed_fonts().len();
+        if onionskin::settings::add_font_folder(folder) {
+            let now = onionskin::font::installed_fonts().len();
+            println!("Looking in {} from now on.", folder.display());
+            match now.saturating_sub(count) {
+                0 => println!("  It added no fonts Onionskin could not already see."),
+                1 => println!("  One font more is now available."),
+                more => println!("  {more} fonts more are now available."),
+            }
+        } else {
+            println!("Already looking in {}.", folder.display());
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(folder) = &args.forget_folder {
+        if onionskin::settings::forget_font_folder(folder) {
+            println!("No longer looking in {}.", folder.display());
+        } else {
+            println!(
+                "{} was not one of the folders being searched.",
+                folder.display()
+            );
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.folders {
+        println!("Looking for fonts in:");
+        for folder in onionskin::font::font_folders() {
+            println!("  {}", folder.display());
+        }
+        println!(
+            "\nAdd another with:  onionskin fonts --add-folder <FOLDER>\n\
+             LibreOffice keeps its own fonts inside its installation, which is why\n\
+             a face that works in Writer is not always one Onionskin can see."
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("Fonts built into every PDF reader:");
+    for font in Font::all() {
+        println!("  {}", font.base_name());
+    }
+    println!(
+        "\nThese cover Western European text only, and need nothing installed \
+         anywhere.\nFor any other alphabet, or to match a particular face, pass \
+         --font-file with a\n.ttf or .ttc and it will be carried inside the delta."
+    );
+
+    if args.all {
+        let installed = onionskin::font::installed_fonts();
+        if installed.is_empty() {
+            println!("\nNo font files were found on this machine.");
+        } else {
+            println!("\nFonts on this machine ({}):", installed.len());
+            for font in &installed {
+                println!("  {:-40} {}", font.family, font.path.display());
+            }
+        }
+    } else {
+        let count = onionskin::font::installed_fonts().len();
+        if count > 0 {
+            println!("\n{count} font files were found on this machine.");
+            println!("  onionskin fonts --all        list them");
+            println!("  onionskin fonts --folders    where they were looked for");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

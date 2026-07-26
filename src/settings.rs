@@ -37,6 +37,16 @@ pub struct Settings {
     /// Which of the window's screens was open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_screen: Option<String>,
+    /// Extra folders to look in for fonts.
+    ///
+    /// Onionskin already looks where the system keeps fonts, but a word
+    /// processor does not always put its own there — LibreOffice ships a set
+    /// inside its installation, and somebody who bought a typeface usually
+    /// keeps it in a folder of their own. Naming that folder once means the
+    /// words Onionskin adds can be set in the same face as the page they are
+    /// being added to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub font_folders: Vec<PathBuf>,
 }
 
 /// Where the file lives.
@@ -101,6 +111,49 @@ pub fn remember_folder(chosen: &Path) {
 pub fn remember_output_folder(written: &Path) {
     let folder = folder_of(written);
     remember(|settings| settings.last_output_folder = folder.clone());
+}
+
+/// Remember a folder to look in for fonts.
+///
+/// Returns whether it was added, so a caller can say "already there" rather
+/// than reporting success twice for the same folder. The path is resolved
+/// first, so the same folder named two ways is stored once.
+pub fn add_font_folder(folder: &Path) -> bool {
+    let resolved = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    let mut added = false;
+    remember(|settings| {
+        if !settings.font_folders.contains(&resolved) {
+            settings.font_folders.push(resolved.clone());
+            added = true;
+        }
+    });
+    added
+}
+
+/// Stop looking in a folder for fonts. Returns whether it was there.
+pub fn forget_font_folder(folder: &Path) -> bool {
+    let resolved = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    let mut removed = false;
+    remember(|settings| {
+        let before = settings.font_folders.len();
+        settings
+            .font_folders
+            .retain(|kept| kept != &resolved && kept != folder);
+        removed = settings.font_folders.len() != before;
+    });
+    removed
+}
+
+/// The extra font folders, minus any that have since been deleted.
+///
+/// Filtered on the way out rather than pruned on load: a folder on a drive
+/// that is not plugged in today should still be there tomorrow.
+pub fn font_folders() -> Vec<PathBuf> {
+    load()
+        .font_folders
+        .into_iter()
+        .filter(|folder| folder.is_dir())
+        .collect()
 }
 
 /// The folder a path is in, if it is a folder that exists.

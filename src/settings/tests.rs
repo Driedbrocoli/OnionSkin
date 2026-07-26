@@ -33,6 +33,7 @@ fn what_is_written_comes_back() {
         last_folder: Some(folder.clone()),
         last_output_folder: None,
         last_screen: Some("Compare".into()),
+        font_folders: Vec::new(),
     });
 
     let read = load();
@@ -140,4 +141,70 @@ fn the_file_is_not_readable_by_other_accounts() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o077, 0, "mode {:o}", mode & 0o777);
+}
+
+// ---------------------------------------------------------------------------
+// Font folders
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_fonts_folder_is_remembered_once_however_many_times_it_is_added() {
+    let _home = elsewhere();
+    let folder = tempfile::tempdir().unwrap();
+
+    assert!(add_font_folder(folder.path()), "the first add should take");
+    assert!(
+        !add_font_folder(folder.path()),
+        "the second add should say it was already there"
+    );
+    assert_eq!(font_folders().len(), 1, "{:?}", font_folders());
+}
+
+#[test]
+fn a_fonts_folder_can_be_taken_away_again() {
+    let _home = elsewhere();
+    let folder = tempfile::tempdir().unwrap();
+    add_font_folder(folder.path());
+
+    assert!(forget_font_folder(folder.path()));
+    assert!(font_folders().is_empty());
+    // And forgetting one that was never there is not an error, it is a no.
+    assert!(!forget_font_folder(folder.path()));
+}
+
+#[test]
+fn a_folder_that_has_gone_away_is_not_offered() {
+    // Somebody's fonts on a drive they have unplugged. The folder stays in the
+    // settings — it will be back tomorrow — but nothing should try to read it
+    // today, and nothing should complain about it either.
+    let _home = elsewhere();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().to_path_buf();
+    add_font_folder(&path);
+    assert_eq!(font_folders().len(), 1);
+
+    drop(folder);
+    assert!(font_folders().is_empty(), "a deleted folder was offered");
+    assert_eq!(
+        load().font_folders.len(),
+        1,
+        "the folder should still be remembered, only not offered"
+    );
+}
+
+#[test]
+fn settings_written_by_a_version_that_knew_nothing_of_fonts_still_load() {
+    // The whole reason every field has a default: an older Onionskin wrote
+    // this file, and a person upgrading should not meet an error.
+    let _home = elsewhere();
+    std::fs::create_dir_all(crate::calibrate::home_dir()).unwrap();
+    std::fs::write(
+        crate::calibrate::home_dir().join("settings.json"),
+        r#"{"last_screen":"Compare"}"#,
+    )
+    .unwrap();
+
+    let read = load();
+    assert_eq!(read.last_screen.as_deref(), Some("Compare"));
+    assert!(read.font_folders.is_empty());
 }
