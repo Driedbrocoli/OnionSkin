@@ -41,7 +41,7 @@ struct InspectArgs {
     /// Size of the paper that was scanned.
     #[arg(long, default_value = "a4")]
     page: String,
-    /// The scan is already cropped to the sheet.
+    /// The image is exactly the sheet: skip detection and straightening.
     #[arg(long)]
     cropped: bool,
     /// Do not look for skew; take the sheet as square to the scan.
@@ -82,7 +82,7 @@ struct AddArgs {
     /// Follow the sheet's own skew instead of the paper edges.
     #[arg(long)]
     follow_skew: bool,
-    /// The scan is already cropped to the sheet.
+    /// The image is exactly the sheet: skip detection and straightening.
     #[arg(long)]
     cropped: bool,
     /// Do not look for skew; take the sheet as square to the scan.

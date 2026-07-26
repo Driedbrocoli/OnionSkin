@@ -93,7 +93,7 @@ pub enum ScanError {
 pub struct ScanOptions {
     /// The physical size of the sheet that was scanned.
     pub page: PageSize,
-    /// Skip page detection and treat the whole image as the sheet.
+    /// Take the image to be the sheet exactly: no detection, no straightening.
     pub assume_cropped: bool,
     /// Skip skew estimation and take the sheet as square to the scan.
     pub assume_square: bool,
@@ -155,20 +155,42 @@ pub fn register(
         ));
     }
 
-    // Only when background is visible on every side do we know we are looking
-    // at the whole sheet and can trust its outline. If the sheet runs to the
-    // image edge it may be cropped, and a cropped scan cannot tell us how the
-    // paper was turned — the evidence has been cut off.
-    let framed = bounds.x0 > 0
-        && bounds.y0 > 0
-        && bounds.x1 < width
-        && bounds.y1 < height;
-
-    let skew_deg = if options.assume_square || !framed {
+    // A turned sheet does not fill the box drawn around it, so its four
+    // corners show scanner backing. That, not a gap at the edges of the image,
+    // is the evidence that we are seeing the whole sheet and can measure how
+    // far it is turned: a modest margin plus a few degrees of turn is enough
+    // for the paper to touch every edge, and requiring a visible border there
+    // would silently abandon the correction exactly when it is most needed.
+    // Measure the lean first and judge afterwards. Deciding up front whether
+    // the sheet "looks turned" — by checking whether its corners show backing
+    // — misses small angles entirely, because a sheet a third of a degree off
+    // barely intrudes on its own corners. A third of a degree is still a
+    // millimetre and a half by the foot of an A4 page.
+    let skew_deg = if options.assume_cropped || options.assume_square {
+        // Declaring the scan cropped is a statement that the image *is* the
+        // sheet, so there is nothing to find and nothing to straighten.
         0.0
     } else {
-        estimate_skew(&gray, bounds, options.max_skew_deg)
+        edge_skew(&gray, bounds)
+            .filter(|angle| angle.abs() <= options.max_skew_deg)
+            .unwrap_or(0.0)
     };
+
+    // A turned sheet whose box runs to the edge of the image has had its
+    // corners cut off, and a cut-off outline cannot say how big the paper is.
+    // Guessing from it misplaces every addition by millimetres while looking
+    // perfectly convincing, so this has to be refused rather than estimated.
+    let clipped =
+        bounds.x0 == 0 || bounds.y0 == 0 || bounds.x1 >= width || bounds.y1 >= height;
+    if skew_deg.abs() > 0.05 && clipped {
+        return Err(ScanError::Detection(
+            "the sheet is lying at an angle and runs off the edge of this scan, so \
+             Onionskin cannot tell how big the paper is.\n    Scan it again with a \
+             margin all round, straighten it on the glass, or pass --cropped if the \
+             image really is the sheet."
+                .into(),
+        ));
+    }
 
     let (sheet_w, sheet_h, origin) = sheet_within(bounds, skew_deg);
 
@@ -344,6 +366,133 @@ fn longest_run(length: u32, is_set: impl Fn(u32) -> bool) -> u32 {
         }
     }
     best
+}
+
+/// Estimate how far the sheet is turned, from its own edge.
+///
+/// The left and right edges of the paper are long, straight and high-contrast,
+/// which makes them a far better protractor than the text: they give an answer
+/// for a sheet turned by a tenth of a degree, and for a blank one. Each row
+/// contributes where the paper starts; a straight line through those points
+/// leans by exactly the angle the sheet is lying at.
+pub fn edge_skew(gray: &GrayImage, bounds: Bounds) -> Option<f64> {
+    let threshold = otsu_threshold(gray);
+    let paper_level = threshold.saturating_add((255 - threshold) / 4);
+    let run = (bounds.width() / 50).clamp(3, 40);
+
+    // Skip the top and bottom eighth: those rows hold the corners, where the
+    // edge turns and would drag the fit.
+    let skip = bounds.height() / 8;
+    let (from, to) = (bounds.y0 + skip, bounds.y1.saturating_sub(skip));
+    if to <= from + 8 {
+        return None;
+    }
+
+    let mut left: Vec<(f64, f64)> = Vec::new();
+    let mut right: Vec<(f64, f64)> = Vec::new();
+    for y in from..to {
+        if let Some(x) = first_paper(gray, bounds, y, paper_level, run, true) {
+            left.push((y as f64, x as f64));
+        }
+        if let Some(x) = first_paper(gray, bounds, y, paper_level, run, false) {
+            right.push((y as f64, x as f64));
+        }
+    }
+
+    let angles: Vec<f64> = [left, right]
+        .into_iter()
+        .filter_map(|points| fit_edge_angle(&points))
+        .collect();
+    if angles.is_empty() {
+        return None;
+    }
+    // Both edges belong to the same sheet, so they should agree; if they do
+    // not, the outline is untrustworthy and it is better to say nothing.
+    if angles.len() == 2 && (angles[0] - angles[1]).abs() > 1.0 {
+        return None;
+    }
+    Some(angles.iter().sum::<f64>() / angles.len() as f64)
+}
+
+/// Where paper starts on this row, coming in from one side.
+fn first_paper(
+    gray: &GrayImage,
+    bounds: Bounds,
+    y: u32,
+    paper_level: u8,
+    run: u32,
+    from_left: bool,
+) -> Option<u32> {
+    let mut streak = 0u32;
+    let width = bounds.width();
+    for step in 0..width {
+        let x = if from_left {
+            bounds.x0 + step
+        } else {
+            bounds.x1.saturating_sub(1 + step)
+        };
+        if x >= gray.width() {
+            continue;
+        }
+        if gray.get_pixel(x, y).0[0] >= paper_level {
+            streak += 1;
+            if streak >= run {
+                // Wind back to where the run started.
+                return Some(if from_left {
+                    x.saturating_sub(run - 1)
+                } else {
+                    x + run - 1
+                });
+            }
+        } else {
+            streak = 0;
+        }
+    }
+    None
+}
+
+/// Least-squares lean of a set of edge points, with one outlier pass.
+///
+/// A speck of dust or a torn corner puts a point far off the line; fitting
+/// once, discarding what does not fit, and fitting again keeps those from
+/// tilting the answer.
+fn fit_edge_angle(points: &[(f64, f64)]) -> Option<f64> {
+    if points.len() < 16 {
+        return None;
+    }
+    let slope = |set: &[(f64, f64)]| -> Option<(f64, f64)> {
+        let n = set.len() as f64;
+        let mean_y = set.iter().map(|p| p.0).sum::<f64>() / n;
+        let mean_x = set.iter().map(|p| p.1).sum::<f64>() / n;
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for (y, x) in set {
+            num += (y - mean_y) * (x - mean_x);
+            den += (y - mean_y) * (y - mean_y);
+        }
+        if den.abs() < 1e-9 {
+            return None;
+        }
+        let a = num / den;
+        Some((a, mean_x - a * mean_y))
+    };
+
+    let (a, b) = slope(points)?;
+    let residuals: Vec<f64> = points.iter().map(|(y, x)| (x - (a * y + b)).abs()).collect();
+    let mean_residual = residuals.iter().sum::<f64>() / residuals.len() as f64;
+    let cutoff = (mean_residual * 3.0).max(2.0);
+    let kept: Vec<(f64, f64)> = points
+        .iter()
+        .copied()
+        .zip(residuals.iter())
+        .filter(|(_, r)| **r <= cutoff)
+        .map(|(p, _)| p)
+        .collect();
+
+    let (a, _) = if kept.len() >= 16 { slope(&kept)? } else { (a, b) };
+    // x falls as y rises when the sheet leans clockwise, so the angle is the
+    // negated slope.
+    Some((-a).atan().to_degrees())
 }
 
 /// Estimate how far the sheet is turned, from the text on it.
