@@ -219,7 +219,7 @@ impl Matrix {
 ///
 /// `rotation_deg` is positive **clockwise** as you look at the sheet, which is
 /// what people mean when they say "it came out slightly rotated right".
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Similarity {
     pub dx_mm: f64,
     pub dy_mm: f64,

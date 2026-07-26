@@ -495,12 +495,81 @@ struct Shared(Engine);
 unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
-/// The rendering engine, binding it if this is the first time.
-pub fn engine() -> Result<&'static Engine, RenderError> {
-    match ENGINE.get_or_init(|| Engine::bind().map(Shared).map_err(|e| e.to_string())) {
-        Ok(shared) => Ok(&shared.0),
-        Err(message) => Err(RenderError::Pdfium(message.clone())),
+/// Held for as long as anyone is using the renderer.
+///
+/// The `thread_safe` feature makes each individual call into pdfium safe, and
+/// that is not enough. Rendering a page is a *sequence* of calls — load the
+/// document, take a page, draw it, drop it — and pdfium keeps state across
+/// them. Two threads whose sequences interleave will segfault inside the
+/// library, which is exactly what happened here the first time two documents
+/// were opened at once. So a whole session gets the renderer to itself.
+static IN_USE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    /// How many guards this thread is holding.
+    ///
+    /// The lock has to be re-entrant, because opening the original and the
+    /// edited document at the same time is the ordinary case and a plain mutex
+    /// would deadlock the moment it happened. A thread that already has the
+    /// renderer simply keeps it.
+    static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Exclusive use of the renderer, for as long as this lives.
+pub struct EngineGuard {
+    engine: &'static Engine,
+    /// `None` when this thread already held the lock further up the stack.
+    _lock: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+impl std::ops::Deref for EngineGuard {
+    type Target = Engine;
+    fn deref(&self) -> &Engine {
+        self.engine
     }
+}
+
+impl Drop for EngineGuard {
+    fn drop(&mut self) {
+        DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        // The mutex guard, if this was the outermost one, is released after
+        // this — fields drop last, which is the order we want.
+    }
+}
+
+/// The rendering engine, binding it if this is the first time.
+///
+/// Blocks while another thread is rendering. Hold the guard for as long as any
+/// [`Document`] opened from it is alive — the borrow checker enforces that,
+/// since a `Document` borrows from the guard.
+pub fn engine() -> Result<EngineGuard, RenderError> {
+    let engine = match ENGINE.get_or_init(|| Engine::bind().map(Shared).map_err(|e| e.to_string()))
+    {
+        Ok(shared) => &shared.0,
+        Err(message) => return Err(RenderError::Pdfium(message.clone())),
+    };
+
+    let already_held = DEPTH.with(|depth| {
+        let held = depth.get();
+        depth.set(held + 1);
+        held
+    });
+    let lock = if already_held == 0 {
+        // A panic while rendering poisons the lock. The renderer is not left
+        // in a state that matters — the next caller opens its own document —
+        // so carrying on is better than refusing every later run.
+        Some(
+            IN_USE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    } else {
+        None
+    };
+    Ok(EngineGuard {
+        engine,
+        _lock: lock,
+    })
 }
 
 impl Engine {

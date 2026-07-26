@@ -1,10 +1,13 @@
 pub mod acquire;
+pub mod calibrate;
+pub mod delta;
 pub mod diff;
 pub mod document;
 pub mod font;
 pub mod geometry;
 pub mod letters;
 pub mod pdf;
+pub mod pipeline;
 pub mod render;
 pub mod safety;
 pub mod scan;

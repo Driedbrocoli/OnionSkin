@@ -417,7 +417,7 @@ fn a_word_document_converts_when_libreoffice_is_there() {
 
     let Ok(engine) = engine() else { return };
     let document = engine.open(&pdf).unwrap();
-    assert!(document.len() >= 1);
+    assert!(!document.is_empty());
     let page = document.render(0, 100.0).unwrap();
     assert!(
         page.gray.iter().any(|v| *v < 200),
