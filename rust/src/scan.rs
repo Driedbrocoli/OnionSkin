@@ -187,9 +187,15 @@ pub fn register(
     // corners cut off, and a cut-off outline cannot say how big the paper is.
     // Guessing from it misplaces every addition by millimetres while looking
     // perfectly convincing, so this has to be refused rather than estimated.
-    let clipped =
+    // A sheet turned far enough to be clipped may leave no measurable edge at
+    // all — every row starts already inside the paper — so its lean reads as
+    // zero. The corners of the box give it away instead: on a turned sheet
+    // they show scanner backing, on a square one they show paper.
+    let touches_edge =
         bounds.x0 == 0 || bounds.y0 == 0 || bounds.x1 >= width || bounds.y1 >= height;
-    if skew_deg.abs() > 0.05 && clipped {
+    let looks_turned = skew_deg.abs() > 0.05
+        || (!options.assume_cropped && corners_show_backing(&gray, bounds));
+    if touches_edge && looks_turned {
         return Err(ScanError::Detection(
             "the sheet is lying at an angle and runs off the edge of this scan, so \
              Onionskin cannot tell how big the paper is.\n    Scan it again with a \
@@ -349,19 +355,21 @@ pub fn find_sheet(gray: &GrayImage) -> Option<Bounds> {
     let threshold = otsu_threshold(gray);
     // Paper is the bright side of the split. Bias upward so heavy text does
     // not drag the level into the paper itself.
-    let paper_level = threshold.saturating_add((255 - threshold) / 4);
+    let global_paper = threshold.saturating_add((255 - threshold) / 4);
 
     let min_run_x = (width / 100).max(16).min(width);
     let min_run_y = (height / 100).max(16).min(height);
 
     let row_has_sheet: Vec<bool> = (0..height)
         .map(|y| {
-            longest_run(width, |x| gray.get_pixel(x, y).0[0] >= paper_level) >= min_run_x
+            let level = line_paper_level(gray, global_paper, width, |x| (x, y));
+            longest_run(width, |x| gray.get_pixel(x, y).0[0] >= level) >= min_run_x
         })
         .collect();
     let col_has_sheet: Vec<bool> = (0..width)
         .map(|x| {
-            longest_run(height, |y| gray.get_pixel(x, y).0[0] >= paper_level) >= min_run_y
+            let level = line_paper_level(gray, global_paper, height, |y| (x, y));
+            longest_run(height, |y| gray.get_pixel(x, y).0[0] >= level) >= min_run_y
         })
         .collect();
 
@@ -371,12 +379,85 @@ pub fn find_sheet(gray: &GrayImage) -> Option<Bounds> {
     let y1 = row_has_sheet.iter().rposition(|v| *v)? as u32 + 1;
     let x0 = col_has_sheet.iter().position(|v| *v)? as u32;
     let x1 = col_has_sheet.iter().rposition(|v| *v)? as u32 + 1;
-    let _ = (width, height);
 
     Some(Bounds { x0, y0, x1, y1 })
 }
 
-/// Longest unbroken stretch for which `is_set` holds.
+/// The brightness that separates paper from backing along one line.
+///
+/// Taken from the line's own range wherever the line spans both, so a scan
+/// with the lid ajar — or any photograph, where one side of the page can be
+/// darker than the backing is on the other — is read correctly. A line that is
+/// all one thing has no range to work from and falls back to the level for the
+/// whole image; without that, a row of uniform backing would look like an
+/// unbroken run of paper.
+fn line_paper_level(
+    gray: &GrayImage,
+    global_paper: u8,
+    length: u32,
+    at: impl Fn(u32) -> (u32, u32),
+) -> u8 {
+    // Every pixel, not a sample of them: a line that only clips the corner of
+    // a turned sheet holds a sliver of paper a few pixels wide, and a stride
+    // that steps over it would flip that line's verdict from one row to the
+    // next and make the sheet's measured outline jitter.
+    let (mut low, mut high) = (255u8, 0u8);
+    for step in 0..length {
+        let (x, y) = at(step);
+        let value = gray.get_pixel(x, y).0[0];
+        low = low.min(value);
+        high = high.max(value);
+    }
+
+    const MIN_CONTRAST: u8 = 45;
+    if high.saturating_sub(low) < MIN_CONTRAST {
+        return global_paper;
+    }
+    low + (high - low) / 2
+}
+
+/// Do the corners of the sheet's bounding box show scanner backing?
+///
+/// A sheet lying at an angle meets its bounding box at four corners, leaving
+/// backing in each. A sheet square to the scan fills its box to the corners.
+/// This is the only evidence of a turn that survives when the paper runs off
+/// the edge of the image and its edges cannot be traced.
+fn corners_show_backing(gray: &GrayImage, bounds: Bounds) -> bool {
+    let threshold = otsu_threshold(gray);
+    let paper_level = threshold.saturating_add((255 - threshold) / 4);
+
+    // A patch rather than a single pixel: one speck of dust should not decide.
+    let patch = (bounds.width().min(bounds.height()) / 40).clamp(2, 32);
+    let corners = [
+        (bounds.x0, bounds.y0),
+        (bounds.x1.saturating_sub(patch), bounds.y0),
+        (bounds.x0, bounds.y1.saturating_sub(patch)),
+        (
+            bounds.x1.saturating_sub(patch),
+            bounds.y1.saturating_sub(patch),
+        ),
+    ];
+
+    let dark_corners = corners
+        .iter()
+        .filter(|(cx, cy)| {
+            let (mut dark, mut total) = (0u32, 0u32);
+            for y in *cy..(*cy + patch).min(gray.height()) {
+                for x in *cx..(*cx + patch).min(gray.width()) {
+                    total += 1;
+                    if gray.get_pixel(x, y).0[0] < paper_level {
+                        dark += 1;
+                    }
+                }
+            }
+            total > 0 && dark * 2 > total
+        })
+        .count();
+
+    dark_corners >= 3
+}
+
+/// Longest unbroken stretch for which `is_set` holds./// Longest unbroken stretch for which `is_set` holds.
 fn longest_run(length: u32, is_set: impl Fn(u32) -> bool) -> u32 {
     let (mut best, mut current) = (0u32, 0u32);
     for index in 0..length {
@@ -398,10 +479,6 @@ fn longest_run(length: u32, is_set: impl Fn(u32) -> bool) -> u32 {
 /// contributes where the paper starts; a straight line through those points
 /// leans by exactly the angle the sheet is lying at.
 pub fn edge_skew(gray: &GrayImage, bounds: Bounds) -> Option<f64> {
-    let threshold = otsu_threshold(gray);
-    let paper_level = threshold.saturating_add((255 - threshold) / 4);
-    let run = (bounds.width() / 50).clamp(3, 40);
-
     // Skip the top and bottom eighth: those rows hold the corners, where the
     // edge turns and would drag the fit.
     let skip = bounds.height() / 8;
@@ -413,10 +490,10 @@ pub fn edge_skew(gray: &GrayImage, bounds: Bounds) -> Option<f64> {
     let mut left: Vec<(f64, f64)> = Vec::new();
     let mut right: Vec<(f64, f64)> = Vec::new();
     for y in from..to {
-        if let Some(x) = first_paper(gray, bounds, y, paper_level, run, true) {
+        if let Some(x) = first_paper(gray, bounds, y, true) {
             left.push((y as f64, x as f64));
         }
-        if let Some(x) = first_paper(gray, bounds, y, paper_level, run, false) {
+        if let Some(x) = first_paper(gray, bounds, y, false) {
             right.push((y as f64, x as f64));
         }
     }
@@ -437,37 +514,73 @@ pub fn edge_skew(gray: &GrayImage, bounds: Bounds) -> Option<f64> {
 }
 
 /// Where paper starts on this row, coming in from one side.
-fn first_paper(
-    gray: &GrayImage,
-    bounds: Bounds,
-    y: u32,
-    paper_level: u8,
-    run: u32,
-    from_left: bool,
-) -> Option<u32> {
-    let mut streak = 0u32;
-    let width = bounds.width();
-    for step in 0..width {
-        let x = if from_left {
-            bounds.x0 + step
-        } else {
-            bounds.x1.saturating_sub(1 + step)
-        };
-        if x >= gray.width() {
-            continue;
+///
+/// Found by the steepest step in brightness rather than by crossing a fixed
+/// level. The edge of a sheet is a strong local jump — backing to paper — and
+/// stays one however the lighting falls, whereas a single threshold for the
+/// whole image quietly loses the far side of a scan taken with the lid ajar,
+/// or of any photograph. That failure is silent: the sheet is still found, but
+/// its lean is not, and the additions print a degree out.
+fn first_paper(gray: &GrayImage, bounds: Bounds, y: u32, from_left: bool) -> Option<u32> {
+    // Deliberately narrow. The step at the edge of a sheet is only a pixel or
+    // two wide, and a wide window finds it early: the test fires as soon as the
+    // far sample reaches the paper, so every row within a window's width of the
+    // box boundary reports the same x. That flattens the very lean being
+    // measured — a page a third of a degree off came back as perfectly square.
+    let reach = 3i64;
+    let search = (bounds.width() / 3).max(24);
+    let (low_x, high_x) = (bounds.x0 as i64, bounds.x1 as i64 - 1);
+    if high_x <= low_x {
+        return None;
+    }
+
+    // Average a few pixels so a speck of dust on the glass cannot read as the
+    // edge of the paper.
+    let sample = |x: i64| -> i32 {
+        let mut total = 0i32;
+        for offset in -1..=1i64 {
+            let px = (x + offset).clamp(low_x, high_x) as u32;
+            total += gray.get_pixel(px.min(gray.width() - 1), y).0[0] as i32;
         }
-        if gray.get_pixel(x, y).0[0] >= paper_level {
-            streak += 1;
-            if streak >= run {
-                // Wind back to where the run started.
-                return Some(if from_left {
-                    x.saturating_sub(run - 1)
-                } else {
-                    x + run - 1
-                });
-            }
+        total / 3
+    };
+
+    // The threshold comes from this row's own range, so it means the same on a
+    // bright row as on one lying in shadow.
+    let (mut low, mut high) = (255i32, 0i32);
+    for x in low_x..=high_x {
+        let value = sample(x);
+        low = low.min(value);
+        high = high.max(value);
+    }
+    // A fifth of the row's range. Generous enough that the far side of a scan
+    // taken under a strong light gradient — where the paper may be darker than
+    // the backing is on the near side — still shows an edge, and the averaging
+    // above keeps that from admitting noise.
+    let threshold = (((high - low) * 20) / 100).max(25);
+
+    // Walk inward from the very edge of the box. Starting even a few pixels in
+    // would begin the search past the paper's edge on the rows where the sheet
+    // reaches furthest, and the first strong step found would then be a letter
+    // rather than the edge of the page.
+    //
+    // Take the *first* step that clears the threshold, not the largest: coming
+    // in from outside, the paper's edge is the first thing met, while the
+    // largest step on a row of text is the far side of a letter — ink is darker
+    // than the backing, so it rises higher coming out of it.
+    for step in 0..search as i64 {
+        let x = if from_left {
+            low_x + step
         } else {
-            streak = 0;
+            high_x - step
+        };
+        let (inner, outer) = if from_left {
+            (x + reach, x - reach)
+        } else {
+            (x - reach, x + reach)
+        };
+        if sample(inner) - sample(outer) >= threshold {
+            return Some(x.clamp(low_x, high_x) as u32);
         }
     }
     None

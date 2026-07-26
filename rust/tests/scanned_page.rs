@@ -647,3 +647,99 @@ fn the_wrong_page_size_is_caught_by_the_sheet_shape() {
         assert!(result.is_err(), "{wrong:?} should have been caught");
     }
 }
+
+// --- scans as they actually arrive -----------------------------------------
+
+/// Apply a degradation to a clean scan and check the sheet is still read
+/// correctly. These are the states real scans turn up in: a lid left ajar, a
+/// page photographed under a window, dust on the glass, a cheap sensor.
+fn degraded(name: &str, apply: impl Fn(&mut RgbImage)) {
+    let truth_skew = 1.2;
+    let clean = Scan::build(A4, 200.0, 110, truth_skew, 24);
+    let mut image = clean.image.to_rgb8();
+    apply(&mut image);
+
+    let registration = register(&DynamicImage::ImageRgb8(image), ScanOptions::new(A4))
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+
+    assert!(
+        (registration.dpi() - 200.0).abs() < 6.0,
+        "{name}: {:.0} dpi",
+        registration.dpi()
+    );
+    assert!(
+        (registration.skew_deg - truth_skew).abs() < 0.3,
+        "{name}: skew read as {:.2}",
+        registration.skew_deg
+    );
+}
+
+/// A brightness gradient is what a phone photograph always has, and what a
+/// flatbed produces with the lid ajar. A single threshold for the whole image
+/// loses the far side of the page, and with it the sheet's lean.
+#[test]
+fn an_uneven_light_gradient_is_handled() {
+    for strength in [0.25f64, 0.55] {
+        degraded("gradient", |image| {
+            let (w, h) = (image.width(), image.height());
+            for y in 0..h {
+                for x in 0..w {
+                    let factor = 1.0 - strength * (x as f64 / w as f64);
+                    let pixel = image.get_pixel_mut(x, y);
+                    for channel in 0..3 {
+                        pixel.0[channel] = (pixel.0[channel] as f64 * factor) as u8;
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn a_shadow_down_one_side_is_handled() {
+    degraded("shadow", |image| {
+        let (w, h) = (image.width(), image.height());
+        for y in 0..h {
+            for x in 0..(w / 5) {
+                let factor = 0.45 + 0.55 * (x as f64 / (w as f64 / 5.0));
+                let pixel = image.get_pixel_mut(x, y);
+                for channel in 0..3 {
+                    pixel.0[channel] = (pixel.0[channel] as f64 * factor) as u8;
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn sensor_noise_is_handled() {
+    degraded("noise", |image| {
+        let mut seed = 99u32;
+        for pixel in image.pixels_mut() {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            let jitter = ((seed >> 20) as i32 % 24) - 12;
+            for channel in 0..3 {
+                pixel.0[channel] = (pixel.0[channel] as i32 + jitter).clamp(0, 255) as u8;
+            }
+        }
+    });
+}
+
+#[test]
+fn dust_on_the_glass_is_handled() {
+    degraded("dust", |image| {
+        let (w, h) = (image.width(), image.height());
+        let mut seed = 7u32;
+        for _ in 0..400 {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            let (x, y) = ((seed >> 8) % w, (seed >> 3) % h);
+            for dy in 0..3u32 {
+                for dx in 0..3u32 {
+                    if x + dx < w && y + dy < h {
+                        image.put_pixel(x + dx, y + dy, image::Rgb([255, 255, 255]));
+                    }
+                }
+            }
+        }
+    });
+}

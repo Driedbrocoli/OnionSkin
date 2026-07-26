@@ -32,7 +32,9 @@ onto a straight page. `--follow-skew` if the printing really is askew.
 
 Across 360 combinations of page size, resolution, skew, margin and target
 position, a point picked on the scan lands within **0.30 mm** of where it
-belongs on the paper.
+belongs on the paper. It is also tested against the states real scans turn up
+in — a brightness gradient from a lid left ajar or a photograph taken under a
+window, a shadow down one side, sensor noise, and dust on the glass.
 
 ### What it refuses
 
