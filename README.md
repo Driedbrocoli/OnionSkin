@@ -270,7 +270,10 @@ Either way, put the printed sheet back in the tray and print `delta.pdf` **at
 100% / "Actual size"**, with "Fit to page" turned off.
 
 There is also a browser interface for the two-document workflow, served from
-your own machine: `onionskin serve`, then open <http://127.0.0.1:8737/>.
+your own machine: `onionskin serve`, then open <http://127.0.0.1:8737/>. It
+shows the same checks the command line prints — which engine opened the
+document, how close the new ink lands to the edge, whether the printer has been
+calibrated — before it offers you the delta to download.
 
 ## The thing that will bite you: reflow
 

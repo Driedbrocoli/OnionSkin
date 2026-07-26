@@ -29,7 +29,8 @@ use std::collections::BTreeMap;
 use super::super::unzip::Archive;
 use super::super::xml::{decode, Event, Reader};
 use super::{
-    Align, Block, Cell, Family, Margins, Para, Piece, ReadError, Row, Sheet, Style, Table,
+    letters, roman, Align, Block, Cell, Family, Margins, Para, Piece, ReadError, Row, Sheet, Style,
+    Table,
 };
 use crate::geometry::PageSize;
 
@@ -1039,50 +1040,6 @@ fn render_marker(level: &Level, count: usize, at: usize) -> String {
         return pattern;
     }
     filled
-}
-
-/// 1 → a, 26 → z, 27 → aa, which is how a lettered list counts.
-fn letters(count: usize, upper: bool) -> String {
-    let mut out = String::new();
-    let mut left = count.max(1);
-    while left > 0 {
-        let index = (left - 1) % 26;
-        out.insert(0, (b'a' + index as u8) as char);
-        left = (left - 1) / 26;
-    }
-    if upper {
-        out.to_uppercase()
-    } else {
-        out
-    }
-}
-
-/// Roman numerals, up to the point where a list has gone wrong anyway.
-fn roman(count: usize) -> String {
-    const PARTS: [(usize, &str); 13] = [
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-    let mut left = count.clamp(1, 3999);
-    let mut out = String::new();
-    for (value, numeral) in PARTS {
-        while left >= value {
-            out.push_str(numeral);
-            left -= value;
-        }
-    }
-    out
 }
 
 #[cfg(test)]

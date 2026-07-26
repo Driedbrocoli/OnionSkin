@@ -586,3 +586,67 @@ fn writing_it_with_our_own_writer_and_reading_it_back_keeps_the_words() {
         "expected a bold piece, got {bold_style:?}"
     );
 }
+
+#[test]
+fn a_lettered_or_roman_list_counts_the_way_the_document_asks() {
+    // OpenDocument says which numerals a level uses, and taking every list for
+    // 1, 2, 3 renumbers somebody's appendix.
+    for (format, expected) in [
+        ("a", ["(a)", "(b)"]),
+        ("A", ["(A)", "(B)"]),
+        ("i", ["(i)", "(ii)"]),
+        ("I", ["(I)", "(II)"]),
+        ("1", ["(1)", "(2)"]),
+    ] {
+        let document = flat_document(
+            &format!(
+                "<text:list-style style:name=\"L1\">\
+                 <text:list-level-style-number text:level=\"1\" \
+                 style:num-format=\"{format}\" style:num-prefix=\"(\" \
+                 style:num-suffix=\")\"/></text:list-style>"
+            ),
+            "<text:list text:style-name=\"L1\">\
+             <text:list-item><text:p>one</text:p></text:list-item>\
+             <text:list-item><text:p>two</text:p></text:list-item></text:list>",
+        );
+        let sheet = read_flat(&document).unwrap();
+        let markers: Vec<String> = sheet
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Para(para) => para.marker.clone(),
+                Block::Table(_) => None,
+            })
+            .collect();
+        assert_eq!(markers, expected.to_vec(), "num-format {format:?}");
+    }
+}
+
+#[test]
+fn a_bullet_a_printer_cannot_write_becomes_one_it_can() {
+    // A word processor writes a plain round bullet as a Wingdings code point in
+    // the private-use area, and no font a printer has can draw it — it comes
+    // out as an empty box.
+    let document = flat_document(
+        "<text:list-style style:name=\"L2\">\
+         <text:list-level-style-bullet text:level=\"1\" \
+         text:bullet-char=\"\u{f0b7}\"/></text:list-style>",
+        "<text:list text:style-name=\"L2\">\
+         <text:list-item><text:p>one</text:p></text:list-item></text:list>",
+    );
+    let sheet = read_flat(&document).unwrap();
+    assert_eq!(only_para(&sheet).marker.as_deref(), Some("\u{2022}"));
+}
+
+#[test]
+fn a_bullet_the_document_chose_is_kept() {
+    let document = flat_document(
+        "<text:list-style style:name=\"L3\">\
+         <text:list-level-style-bullet text:level=\"1\" \
+         text:bullet-char=\"\u{2013}\"/></text:list-style>",
+        "<text:list text:style-name=\"L3\">\
+         <text:list-item><text:p>one</text:p></text:list-item></text:list>",
+    );
+    let sheet = read_flat(&document).unwrap();
+    assert_eq!(only_para(&sheet).marker.as_deref(), Some("\u{2013}"));
+}

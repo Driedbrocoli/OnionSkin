@@ -134,7 +134,7 @@ fn the_page_fetches_nothing_from_anywhere() {
     // The promise is that Onionskin never uses the network. A page that pulls a
     // stylesheet from someone else's server breaks that the moment it is
     // opened, silently, and no test of the Rust would notice.
-    let lower = PAGE.to_lowercase();
+    let lower = page().to_lowercase();
     for forbidden in [
         "http://", "https://", "//cdn", "<script", "src=\"//", "@import", "url(http",
     ] {
@@ -148,17 +148,85 @@ fn the_page_fetches_nothing_from_anywhere() {
 #[test]
 fn the_page_says_how_to_print_it() {
     // The commonest way to waste a sheet is "Fit to page".
-    assert!(PAGE.contains("100%"));
-    assert!(PAGE.contains("Fit to page"));
-    assert!(PAGE.contains("never uses the network"));
+    assert!(page().contains("100%"));
+    assert!(page().contains("Fit to page"));
+    assert!(page().contains("never uses the network"));
+}
+
+#[test]
+fn the_results_page_fetches_nothing_from_anywhere_either() {
+    // The same promise, and the same way of breaking it. This page is built
+    // rather than written out whole, so it needs its own check.
+    let page = result_page(&["note: something worth knowing".into()], "abc123");
+    let lower = page.to_lowercase();
+    for forbidden in [
+        "http://", "https://", "//cdn", "<script", "src=\"//", "@import", "url(http",
+    ] {
+        assert!(
+            !lower.contains(forbidden),
+            "the page contains {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn the_results_page_says_what_happened_and_offers_the_delta() {
+    let page = result_page(
+        &[
+            "note: Onionskin read the document itself, without a word processor.\n    \
+             The lines may not break where Word breaks them."
+                .into(),
+            "WARNING [page 1]: ink lands within 3 mm of the edge".into(),
+        ],
+        "tok123",
+    );
+    assert!(page.contains("read the document itself"), "{page}");
+    assert!(page.contains("may not break where Word"), "{page}");
+    assert!(page.contains("ink lands within 3 mm"), "{page}");
+    // The warning is set apart from the note, or the two read alike.
+    assert!(page.contains("class=\"warn\""), "{page}");
+    assert!(page.contains("class=\"note\""), "{page}");
+    assert!(page.contains("href=\"/delta/tok123\""), "{page}");
+    assert!(page.contains("Fit to page"), "{page}");
+}
+
+#[test]
+fn a_document_named_with_a_bracket_cannot_close_a_tag() {
+    let page = result_page(&["note: <b>Smith & Sons</b> was opened".into()], "t");
+    assert!(page.contains("&lt;b&gt;Smith &amp; Sons"), "{page}");
+    assert!(!page.contains("<b>Smith"), "{page}");
+}
+
+#[test]
+fn a_delta_set_aside_is_collected_once_and_then_gone() {
+    let token = set_aside(b"%PDF-1.4 pretend".to_vec());
+    assert_eq!(collect(&token).as_deref(), Some(&b"%PDF-1.4 pretend"[..]));
+    assert!(
+        collect(&token).is_none(),
+        "collecting twice should not hand out the same delta again"
+    );
+}
+
+#[test]
+fn only_the_last_few_deltas_are_kept() {
+    // A person who makes deltas and never collects them should not fill the
+    // machine's memory with documents.
+    let first = set_aside(vec![1u8; 16]);
+    for _ in 0..MOST_WAITING {
+        set_aside(vec![2u8; 16]);
+    }
+    assert!(
+        collect(&first).is_none(),
+        "the oldest should have been dropped"
+    );
 }
 
 #[test]
 fn the_page_asks_for_both_documents() {
-    assert!(PAGE.contains("name=\"original\""));
-    assert!(PAGE.contains("name=\"edited\""));
-    assert!(PAGE.contains("enctype=\"multipart/form-data\""));
-    assert!(PAGE.contains("action=\"/delta\""));
+    assert!(page().contains("name=\"original\""));
+    assert!(page().contains("name=\"edited\""));
+    assert!(page().contains("enctype=\"multipart/form-data\""));
+    assert!(page().contains("action=\"/delta\""));
 }
 
 // ---------------------------------------------------------------------------
@@ -309,10 +377,27 @@ fn two_documents_come_back_as_a_delta() {
     ]);
     let response = post(&address, &content_type, &body);
 
+    // A run nearly always has something worth saying — at the very least that
+    // no calibration profile was used — so what comes back first is the page
+    // that says it, with the delta offered underneath.
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response:.300}");
-    assert!(response.contains("application/pdf"), "{response:.300}");
-    assert!(response.contains("filename=\"delta.pdf\""));
-    assert!(response.contains("%PDF"), "the body is not a PDF");
+    assert!(response.contains("text/html"), "{response:.300}");
+    assert!(response.contains("The delta is ready"), "{response:.400}");
+
+    let link = response
+        .split("href=\"/delta/")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the page should offer the delta");
+
+    let collected = get(&address, &format!("/delta/{link}"));
+    assert!(collected.contains("application/pdf"), "{collected:.300}");
+    assert!(collected.contains("filename=\"delta.pdf\""));
+    assert!(collected.contains("%PDF"), "the body is not a PDF");
+
+    // And only once: the file is handed over, not stored.
+    let again = get(&address, &format!("/delta/{link}"));
+    assert!(again.starts_with("HTTP/1.1 404"), "{again:.200}");
 }
 
 #[test]
@@ -413,8 +498,7 @@ fn a_scan_and_its_font() -> Option<(Vec<u8>, Vec<u8>)> {
                         .collect()
                 })
                 .collect();
-            let (mut x0, mut y0, mut x1, mut y1) =
-                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for contour in &placed {
                 for &(x, y) in contour {
                     x0 = x0.min(x);
@@ -460,8 +544,9 @@ fn a_scan_and_its_font() -> Option<(Vec<u8>, Vec<u8>)> {
 fn the_page_offers_to_read_a_scan() {
     // The HTML is wrapped for reading, so a sentence can straddle a line. What
     // matters is that it is said, not where it breaks.
-    let flowed = PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(PAGE.contains("action=\"/convert\""), "no conversion form");
+    let flowed = page();
+    let flowed = flowed.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(page().contains("action=\"/convert\""), "no conversion form");
     // Somebody has to be told the font is needed and why, or they will pick a
     // scan, see it refused, and conclude the thing does not work.
     assert!(flowed.contains("The font the page was set in"), "{flowed}");
@@ -470,7 +555,7 @@ fn the_page_offers_to_read_a_scan() {
         "the page does not say why the font is needed"
     );
     for offered in ["docx", "odt", "onionskin"] {
-        assert!(PAGE.contains(offered), "{offered} is not offered");
+        assert!(page().contains(offered), "{offered} is not offered");
     }
 }
 
@@ -508,10 +593,8 @@ fn a_scan_with_no_font_is_refused_with_a_reason() {
         return;
     };
     let address = start();
-    let (content_type, body) = multipart(&[
-        ("scan", Some("page.png"), &scan),
-        ("format", None, b"docx"),
-    ]);
+    let (content_type, body) =
+        multipart(&[("scan", Some("page.png"), &scan), ("format", None, b"docx")]);
     let (headers, message) = split_response(&post_to(&address, "/convert", &content_type, &body));
     let message = String::from_utf8_lossy(&message);
 

@@ -40,7 +40,8 @@
 use std::collections::HashMap;
 
 use super::{
-    Align, Block, Cell, Family, Margins, Para, Piece, ReadError, Row, Sheet, Style, Table,
+    letters, roman, Align, Block, Cell, Family, Margins, Para, Piece, ReadError, Row, Sheet, Style,
+    Table,
 };
 use crate::geometry::{mm_to_pt, PageSize};
 use crate::office::unzip::Archive;
@@ -334,10 +335,41 @@ struct ListStyle {
     levels: HashMap<u32, ListKind>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ListKind {
-    Bullet,
-    Number,
+    Bullet(String),
+    /// Numbered, and how: which numerals, and what goes either side of them.
+    Number {
+        numerals: String,
+        before: String,
+        after: String,
+    },
+}
+
+impl ListKind {
+    /// The marker for the `count`-th item at this level.
+    fn marker(&self, count: usize) -> String {
+        match self {
+            ListKind::Bullet(glyph) => glyph.clone(),
+            ListKind::Number {
+                numerals,
+                before,
+                after,
+            } => {
+                // The same five kinds Word writes, and the same rule: anything
+                // unrecognised counts in ordinary numbers, which is what every
+                // reader falls back to.
+                let figure = match numerals.as_str() {
+                    "a" => letters(count, false),
+                    "A" => letters(count, true),
+                    "i" => roman(count).to_lowercase(),
+                    "I" => roman(count),
+                    _ => count.to_string(),
+                };
+                format!("{before}{figure}{after}")
+            }
+        }
+    }
 }
 
 impl StyleTable {
@@ -484,12 +516,36 @@ fn read_list_style(reader: &mut xml::Reader) -> ListStyle {
         match event {
             xml::Event::Start(tag) if tag.name == "list-level-style-bullet" => {
                 if let Some(level) = tag.number("level").map(|value| value as u32) {
-                    list.levels.insert(level, ListKind::Bullet);
+                    // The character the document asks for, unless it is one of
+                    // the Wingdings code points a word processor writes for a
+                    // plain round bullet — those have no glyph in any font a
+                    // printer will have, and print as an empty box.
+                    let glyph = tag
+                        .get("bullet-char")
+                        .map(str::to_string)
+                        .filter(|glyph| {
+                            !glyph.is_empty()
+                                && !glyph
+                                    .chars()
+                                    .any(|ch| ('\u{e000}'..='\u{f8ff}').contains(&ch))
+                        })
+                        .unwrap_or_else(|| "\u{2022}".to_string());
+                    list.levels.insert(level, ListKind::Bullet(glyph));
                 }
             }
             xml::Event::Start(tag) if tag.name == "list-level-style-number" => {
                 if let Some(level) = tag.number("level").map(|value| value as u32) {
-                    list.levels.insert(level, ListKind::Number);
+                    list.levels.insert(
+                        level,
+                        ListKind::Number {
+                            numerals: tag.get("num-format").unwrap_or("1").to_string(),
+                            before: tag.get("num-prefix").unwrap_or("").to_string(),
+                            // A full stop is what a numbered list looks like
+                            // when the document does not say otherwise, and
+                            // "1 2 3" running into the text does not.
+                            after: tag.get("num-suffix").unwrap_or(".").to_string(),
+                        },
+                    );
                 }
             }
             xml::Event::End(name) if name == "list-style" => break,
@@ -898,22 +954,19 @@ fn read_list(
     // under a *different* style name would look up the wrong level; the
     // fallback to a bullet below means that mistake is never worse than a
     // list that looks like a plainer one, not lost or wrong content.
-    let numbered = tag
+    let kind = tag
         .get("style-name")
         .and_then(|name| table.lists.get(name))
         .and_then(|list| list.levels.get(&level))
-        .is_some_and(|kind| *kind == ListKind::Number);
+        .cloned()
+        .unwrap_or_else(|| ListKind::Bullet("\u{2022}".to_string()));
 
-    let mut counter = 0u32;
+    let mut counter = 0usize;
     while let Some(event) = reader.next() {
         match event {
             xml::Event::Start(item) if item.name == "list-item" => {
                 counter += 1;
-                let marker = if numbered {
-                    format!("{counter}.")
-                } else {
-                    "•".to_string()
-                };
+                let marker = kind.marker(counter);
                 if !item.empty {
                     read_list_item(reader, table, sheet, level, &marker, blocks);
                 }

@@ -407,8 +407,16 @@ ruled borders; page and line breaks; the paper size and its margins.
 Not images, footnotes, columns, or headers and footers. Every one of those comes
 back as a sentence in `Sheet::notes`, which `render::to_pdf_noting` passes to the
 pipeline, which turns it into a `safety::Check` at `Severity::Note` — so the
-command line, the window and the JSON all say the same thing without any of them
-knowing where it came from.
+command line, the window, the browser page and the JSON all say the same thing
+without any of them knowing where it came from.
+
+The browser page is the one that had to change shape for it. It used to hand
+back the delta as a download and nothing else, which silently threw away every
+warning the run produced — the margins, the coverage, the missing calibration,
+and now which engine opened the document. A browser can be told one thing per
+response, so a run with anything to say now answers with a page that says it and
+offers the file underneath; the delta waits in memory for the second request and
+is handed over once. A run with nothing to say still downloads straight away.
 
 ### Three traps worth writing down
 
@@ -450,42 +458,27 @@ compression methods it will not read rather than reading them wrongly. The XML
 scanner resolves no external entities and follows no DTD, so there is nothing to
 point at `/etc/passwd` and no entity expansion to run away with.
 
-## Port status
+## Where it came from
 
-| module | ported | verified against Python |
-|---|---|---|
-| `geometry` — units, page sizes, the calibration transform | yes | 582 values, identical to 5e-10 |
-| `pdf` — writing the delta | yes | ink measured in place, 0.2 mm |
-| `scan` — registering a scanned sheet | yes | new; no Python counterpart |
-| `font` — embedding a font to write any alphabet | yes | new; no Python counterpart |
-| `acquire` — driving the scanner | yes | new; no Python counterpart |
-| `render` — LibreOffice conversion, page frames, rasterising | no | |
-| `diff` — added/removed masks, region labelling | no | |
-| `delta` — raster and vector writers, calibration, frame conforming | no | |
-| `compose` — text placement with wrapping and alignment | no | |
-| `safety` — the checks that stop wasted paper | no | |
-| `calibrate` — target, profiles, solving | no | |
-| `pipeline`, `web` | no | |
+Onionskin began as Python and was ported module by module. The Python is gone,
+and so is the harness that checked the two agreed while both existed — each
+module printed its results as JSON and a script recomputed the same numbers the
+other way round. It earned its keep: the subtle parts here are exactly where a
+rewrite encodes the same misunderstanding twice, and a clockwise page rotation
+becoming a counter-clockwise PDF rotation is not the kind of thing a unit test
+written by the same hand catches.
 
-The Python version stays authoritative for the two-document and typed-page
-workflows until every row says yes.
+The printing half of it is still here — `examples/dump_geometry.rs` and
+`examples/dump_pdf.rs` — because dumping a module's numbers is the quickest way
+to see what a change did to them, with or without anything to compare against.
 
-## How this port is kept honest
+What it settled, and what the tests now hold on their own:
 
-A rewrite earns trust by agreeing with the implementation it replaces. Its own
-unit tests cannot do that on their own — they can encode the same
-misunderstanding twice, and the subtle parts here (a clockwise page rotation
-becoming a counter-clockwise PDF rotation, the y-axis flip, the inverse of a
-similarity) are exactly where that happens.
-
-So each module gets an `examples/dump_*.rs` that prints its results as JSON, and
-`tools/diff_check.py` recomputes the same values in Python and compares:
-
-```bash
-cargo run --quiet --example dump_geometry | python3 tools/diff_check.py geometry
-```
-
-Any new mismatch fails the check.
+| | |
+|---|---|
+| `geometry` — units, page sizes, the calibration transform | 582 values, identical to 5e-10 |
+| `pdf` — writing the delta | ink measured in place, within 0.2 mm |
+| `scan`, `font`, `acquire`, `letters`, `office`, `printer` | new here; there was never a Python counterpart |
 
 ## Dependencies
 
