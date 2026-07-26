@@ -121,18 +121,42 @@ checked against a hash somebody else published. It refuses to put a Linux binary
 in a Windows archive, which is the mistake that produces a download that looks
 completely normal and cannot run.
 
-### The one other thing
+### Word documents, with or without LibreOffice
 
-**LibreOffice** opens everything that is not already a PDF or an image — `.docx`,
-`.odt`, `.rtf`, `.xlsx`, `.ods`, `.pptx`, `.odp`, `.vsdx` and the rest of the
-list in `render::CONVERTIBLE` ([download](https://www.libreoffice.org/download/)).
-PDFs and scans need it not at all, and *writing* `.docx` and `.odt` needs
-nothing installed — Onionskin writes those itself.
+Nothing else has to be installed. The readers are Rust, like everything else
+here — a zip reader, an XML scanner and a page-layout engine, and no new
+dependency for any of them. Onionskin opens these by itself:
 
-It is deliberately not bundled: it is under the MPL, which would put obligations
-on anyone passing the archive on. Onionskin looks for it wherever it installs —
-package manager, Snap, Flatpak, `/Applications`, `Program Files` — and
-`ONIONSKIN_SOFFICE` points at it if it is somewhere else.
+| | |
+|---|---|
+| `.pdf`, and any image | directly |
+| `.docx`, `.docm`, `.dotx` | Word, in the format it has written since 2007 |
+| `.odt`, `.ott`, `.fodt` | OpenDocument text |
+| `.txt`, `.md` | plain text |
+
+It reads the words, the headings, the lists, the tables, the alignment, the
+indents, the bold and italic and colour, and the paper size — and it says what
+it left out. It is not a word processor: it does not lay out images, footnotes,
+columns, or headers and footers, and its lines will not break exactly where
+Word breaks them.
+
+**LibreOffice** ([download](https://www.libreoffice.org/download/)) is used
+whenever it is installed, because it lays a document out the way the program
+that wrote it would. It is also the only way to open the older and stranger
+formats — `.doc`, `.rtf`, `.xlsx`, `.ods`, `.pptx`, `.odp`, `.vsdx` and the
+rest of the list in `render::CONVERTIBLE`.
+
+**Which one matters when.** If you are adding words to a sheet you printed from
+Onionskin, either is exact. If the sheet in your tray came out of Word, Word's
+line breaks are on it — so use LibreOffice, or export the document to PDF from
+Word and use that. Onionskin says which opener it used in the checks it prints
+before anything reaches a printer. `ONIONSKIN_OFFICE=onionskin` forces the
+built-in reader, which is how to see what somebody without LibreOffice gets.
+
+LibreOffice is deliberately not bundled: it is under the MPL, which would put
+obligations on anyone passing the archive on. Onionskin looks for it wherever it
+installs — package manager, Snap, Flatpak, `/Applications`, `Program Files` —
+and `ONIONSKIN_SOFFICE` points at it if it is somewhere else.
 
 ## Four ways to work
 

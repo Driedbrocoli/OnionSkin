@@ -29,6 +29,10 @@ use crate::document::{Document, Item, Shape, ShapeKind};
 use crate::geometry::PageSize;
 use crate::package::{zip, Entry};
 
+pub mod read;
+pub mod unzip;
+pub mod xml;
+
 /// Which word-processor format to write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

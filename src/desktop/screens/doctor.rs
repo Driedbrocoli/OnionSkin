@@ -105,10 +105,12 @@ fn look() -> Vec<Check> {
         },
         None => Check {
             what: "Opening Word and OpenDocument files".into(),
-            verdict: Verdict::Caution,
-            detail: "LibreOffice is not installed, so .docx and .odt cannot be opened.\n\
-                     PDFs and scans work without it, and Onionskin still writes .docx\n\
-                     and .odt itself. Get it from libreoffice.org/download."
+            verdict: Verdict::Works,
+            detail: "LibreOffice is not installed, so Onionskin reads .docx, .odt and\n\
+                     plain text itself. The words, tables and lists are all there;\n\
+                     lines may not break exactly where Word does.\n\
+                     Older formats — .doc, .rtf, spreadsheets, slides — still need\n\
+                     LibreOffice: libreoffice.org/download."
                 .into(),
         },
     });

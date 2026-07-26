@@ -71,6 +71,17 @@ impl Check {
         self
     }
 
+    /// Something worth knowing that no check went looking for.
+    ///
+    /// Other parts of the program find things a person ought to be told — how
+    /// a document was opened, what a reader could not do — and this is how they
+    /// join the list. One list means one place for every interface to read
+    /// from, rather than the command line printing something the window does
+    /// not.
+    pub fn note(code: &'static str, message: String, detail: String) -> Check {
+        Check::new(Severity::Note, code, message).with_detail(detail)
+    }
+
     pub fn format(&self) -> String {
         let where_ = match self.page {
             Some(page) => format!(" [page {page}]"),

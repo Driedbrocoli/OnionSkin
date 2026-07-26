@@ -1,10 +1,22 @@
 //! Turning source documents into PDFs, and PDFs into rasters.
 //!
-//! Word documents go through LibreOffice in headless mode. That matters more
-//! than it looks: both the original and the edited file must be laid out by the
-//! *same* engine at the *same* version, or the two renders will disagree about
-//! kerning and line breaks and every glyph on the page will show up as a
-//! difference.
+//! Word documents go through LibreOffice in headless mode where it is
+//! installed. That matters more than it looks: both the original and the
+//! edited file must be laid out by the *same* engine at the *same* version, or
+//! the two renders will disagree about kerning and line breaks and every glyph
+//! on the page will show up as a difference. Since both files go through this
+//! module in the same run, that holds by construction.
+//!
+//! # When LibreOffice is not there
+//!
+//! It used to be the end of the matter: no LibreOffice, no `.docx`. That is a
+//! fair thing to ask of somebody who already has it and an unreasonable thing
+//! to ask of everybody else, so Onionskin now reads `.docx`, `.odt` and plain
+//! text itself — see [`crate::office::read`]. It is not as good: it sets the
+//! text, the tables and the lists, and it will not match Word to the
+//! millimetre. Which engine did the work comes back with the PDF, because the
+//! difference matters when the sheet already in the tray was printed from
+//! Word.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,17 +35,15 @@ use crate::geometry::PageSize;
 /// written when the only thing being tested was Word.
 pub const CONVERTIBLE: &[&str] = &[
     // Word processors.
-    "doc", "docx", "docm", "dot", "dotx", "dotm", "odt", "ott", "fodt", "sxw", "stw", "rtf",
-    "wpd", "wps", "abw", "lwp", "uot", "hwp",
-    // Spreadsheets.
-    "xls", "xlsx", "xlsm", "xlt", "xltx", "ods", "ots", "fods", "sxc", "csv", "tsv", "dif",
-    "slk", "dbf", "numbers",
-    // Presentations.
+    "doc", "docx", "docm", "dot", "dotx", "dotm", "odt", "ott", "fodt", "sxw", "stw", "rtf", "wpd",
+    "wps", "abw", "lwp", "uot", "hwp", // Spreadsheets.
+    "xls", "xlsx", "xlsm", "xlt", "xltx", "ods", "ots", "fods", "sxc", "csv", "tsv", "dif", "slk",
+    "dbf", "numbers", // Presentations.
     "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx", "odp", "otp", "fodp", "sxi", "key",
     // Drawings.
     "odg", "otg", "fodg", "sxd", "vsd", "vsdx", "pub", "cdr", "wmf", "emf",
     // Plain and marked-up text.
-    "txt", "text", "html", "htm", "xhtml", "xml", "md",
+    "txt", "text", "html", "htm", "xhtml", "xml", "md", "markdown",
 ];
 
 /// Formats that need no conversion at all.
@@ -160,8 +170,50 @@ fn file_url(path: &Path) -> String {
     url
 }
 
-/// A PDF for `source`, converting through LibreOffice if it is not one already.
+/// Which of the two ways of opening a document was used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opener {
+    /// It was already a PDF.
+    Already,
+    /// LibreOffice laid it out.
+    LibreOffice,
+    /// Onionskin read it itself.
+    Onionskin,
+}
+
+/// Which opener to use, when both are possible.
+///
+/// `ONIONSKIN_OFFICE=onionskin` forces the built-in reader — useful for seeing
+/// what somebody without LibreOffice will get, and for a machine where the
+/// installed LibreOffice is broken or too slow to wait for.
+fn preference() -> Option<Opener> {
+    match std::env::var("ONIONSKIN_OFFICE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "onionskin" | "native" | "builtin" | "self" => Some(Opener::Onionskin),
+        "libreoffice" | "soffice" | "lo" => Some(Opener::LibreOffice),
+        _ => None,
+    }
+}
+
+/// A PDF for `source`, converting it if it is not one already.
 pub fn to_pdf(source: &Path, workdir: &Path, timeout_secs: u64) -> Result<PathBuf, RenderError> {
+    to_pdf_noting(source, workdir, timeout_secs).map(|(path, _, _)| path)
+}
+
+/// The same, saying who did the work and what they had to approximate.
+///
+/// The notes are not decoration. Onionskin's own reader will not put a line
+/// break exactly where Word does, and the person about to feed a printed sheet
+/// back into a printer is the one who needs to know that.
+pub fn to_pdf_noting(
+    source: &Path,
+    workdir: &Path,
+    timeout_secs: u64,
+) -> Result<(PathBuf, Opener, Vec<String>), RenderError> {
     if !source.is_file() {
         return Err(RenderError::Document(format!(
             "no such file: {}",
@@ -174,7 +226,7 @@ pub fn to_pdf(source: &Path, workdir: &Path, timeout_secs: u64) -> Result<PathBu
         .unwrap_or_default();
 
     if PASSTHROUGH.contains(&suffix.as_str()) {
-        return Ok(source.to_path_buf());
+        return Ok((source.to_path_buf(), Opener::Already, Vec::new()));
     }
     if !CONVERTIBLE.contains(&suffix.as_str()) {
         let mut supported: Vec<String> = CONVERTIBLE
@@ -189,14 +241,23 @@ pub fn to_pdf(source: &Path, workdir: &Path, timeout_secs: u64) -> Result<PathBu
         )));
     }
 
-    let Some(soffice) = find_soffice() else {
-        return Err(RenderError::Conversion(
-            "LibreOffice was not found, so Word documents cannot be converted.\n\
-             Install it (https://www.libreoffice.org/download/) or set \
-             ONIONSKIN_SOFFICE to the soffice binary.\n\
-             You can also export both documents to PDF yourself and pass those."
-                .into(),
-        ));
+    let ourselves = crate::office::read::can_read(&suffix);
+    let soffice = find_soffice();
+    // LibreOffice first where it is there, because it lays a document out the
+    // way the program that wrote it would. Ours is the answer for a machine
+    // that has not got it, not a replacement for it.
+    let use_ourselves = match preference() {
+        Some(Opener::Onionskin) => ourselves,
+        Some(Opener::LibreOffice) => false,
+        _ => ourselves && soffice.is_none(),
+    };
+
+    if use_ourselves {
+        return open_ourselves(source, workdir);
+    }
+
+    let Some(soffice) = soffice else {
+        return Err(RenderError::Conversion(refuse_without_libreoffice(&suffix)));
     };
 
     std::fs::create_dir_all(workdir).map_err(|source| RenderError::Io {
@@ -266,7 +327,64 @@ pub fn to_pdf(source: &Path, workdir: &Path, timeout_secs: u64) -> Result<PathBu
         }));
     }
     let _ = timeout_secs;
-    Ok(produced.remove(0))
+    Ok((produced.remove(0), Opener::LibreOffice, Vec::new()))
+}
+
+/// Open a document with Onionskin's own reader.
+fn open_ourselves(
+    source: &Path,
+    workdir: &Path,
+) -> Result<(PathBuf, Opener, Vec<String>), RenderError> {
+    std::fs::create_dir_all(workdir).map_err(|error| RenderError::Io {
+        path: workdir.to_path_buf(),
+        source: error,
+    })?;
+    let stem = source
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document".into());
+    let into = workdir.join(format!("{stem}-{}.pdf", unique_tag()));
+
+    let mut notes = crate::office::read::to_pdf(source, &into)
+        .map_err(|error| RenderError::Conversion(error.to_string()))?;
+
+    // No file name in it, so that two documents opened the same way say this
+    // once between them rather than twice. And the reason has to be the real
+    // one: saying LibreOffice is missing on a machine where it is installed
+    // and was simply not asked for is a small lie that costs somebody an
+    // afternoon.
+    let instead = if find_soffice().is_some() {
+        "unset ONIONSKIN_OFFICE so LibreOffice is used"
+    } else {
+        "install LibreOffice (libreoffice.org/download)"
+    };
+    notes.insert(
+        0,
+        format!(
+            "Onionskin read the document itself, without a word processor. The \
+             words, the tables and the lists are all there, but the lines may not \
+             break exactly where Word or Writer would break them. If the sheet in \
+             your tray was printed from one of those, {instead}, or export the \
+             document to PDF from the program that wrote it."
+        ),
+    );
+    Ok((into, Opener::Onionskin, notes))
+}
+
+/// What to say when a document needs LibreOffice and it is not there.
+fn refuse_without_libreoffice(suffix: &str) -> String {
+    let readable: Vec<String> = crate::office::read::READABLE
+        .iter()
+        .map(|kind| format!(".{kind}"))
+        .collect();
+    format!(
+        "a '.{suffix}' needs LibreOffice, and it was not found.\n\
+         Install it (https://www.libreoffice.org/download/) or set \
+         ONIONSKIN_SOFFICE to the soffice binary.\n\
+         You can also export the document to PDF yourself and use that.\n\
+         Onionskin opens {} without any of that.",
+        readable.join(", ")
+    )
 }
 
 /// A name nothing else will pick, without a random number generator.

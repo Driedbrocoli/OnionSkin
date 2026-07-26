@@ -39,6 +39,17 @@ impl Default for State {
     }
 }
 
+/// What the file browser will show.
+///
+/// The first five need nothing installed. The rest go through LibreOffice, and
+/// offering them here rather than hiding them is right: somebody with
+/// LibreOffice can use them, and somebody without gets a sentence saying so
+/// rather than a file browser that pretends their document does not exist.
+const DOCUMENT_KINDS: &[&str] = &[
+    "pdf", "docx", "odt", "txt", "md", "doc", "rtf", "docm", "dotx", "ott", "fodt", "xlsx", "ods",
+    "pptx", "odp", "html",
+];
+
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
@@ -51,14 +62,14 @@ pub fn show(state: &mut State, room: &mut Room) {
         room.picker,
         "The document as it was printed",
         &mut state.original,
-        &["pdf", "docx", "odt", "rtf", "txt"],
+        DOCUMENT_KINDS,
     );
     widgets::file_row(
         room.ui,
         room.picker,
         "The edited copy",
         &mut state.edited,
-        &["pdf", "docx", "odt", "rtf", "txt"],
+        DOCUMENT_KINDS,
     );
 
     room.ui.add_space(6.0);

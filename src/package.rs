@@ -250,7 +250,12 @@ pub fn zip(entries: &[Entry]) -> Vec<u8> {
 }
 
 /// The CRC-32 a zip uses, computed without a table.
-fn crc32(bytes: &[u8]) -> u32 {
+///
+/// Shared with the zip *reader* in [`crate::office::unzip`], which checks
+/// entries against it — two implementations of one checksum would be one too
+/// many, and the one that drifted would be found by a document that would not
+/// open.
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for byte in bytes {
         crc ^= *byte as u32;
@@ -514,12 +519,13 @@ pub fn third_party_licences() -> String {
      Not bundled\n\
      -----------\n\
      \n\
-     LibreOffice converts Word documents, and Onionskin uses it if it is\n\
-     installed. It is deliberately not included here: it is under the Mozilla\n\
-     Public License 2.0, which would oblige anyone redistributing this archive\n\
-     to offer LibreOffice's source as well. Onionskin detects it instead and\n\
-     points at https://www.libreoffice.org/download/ when it is missing.\n\
-     PDFs need it not at all.\n"
+     LibreOffice converts documents Onionskin cannot read by itself, and it\n\
+     is used if it is installed. It is deliberately not included here: it is\n\
+     under the Mozilla Public License 2.0, which would oblige anyone\n\
+     redistributing this archive to offer LibreOffice's source as well.\n\
+     Onionskin detects it instead and points at\n\
+     https://www.libreoffice.org/download/ when a document needs it.\n\
+     PDFs, images, plain text, .docx and .odt need it not at all.\n"
         .to_string()
 }
 

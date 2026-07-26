@@ -2245,13 +2245,16 @@ fn cmd_doctor() -> Result<ExitCode, String> {
         );
     }
 
-    // LibreOffice: needed only for Word documents.
+    // LibreOffice: an improvement rather than a requirement, since Onionskin
+    // reads the common formats itself.
     match onionskin::render::find_soffice() {
         Some(path) => println!("  Word documents  ok ({})", path.display()),
         None => println!(
-            "  Word documents  not available\n      LibreOffice was not found. PDFs \
-             still work; .docx and .odt do not.\n      Install it from \
-             https://www.libreoffice.org/download/"
+            "  Word documents  ok, read by Onionskin itself\n      LibreOffice was \
+             not found, so .docx, .odt and plain text are opened here instead.\n      \
+             The words, tables and lists are all there; lines may not break exactly \
+             where\n      Word does. Older formats (.doc, .rtf, spreadsheets, slides) \
+             still need it:\n      https://www.libreoffice.org/download/"
         ),
     }
 

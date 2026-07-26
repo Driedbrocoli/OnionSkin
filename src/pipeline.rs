@@ -200,6 +200,29 @@ pub fn guard_output(output: &Path, inputs: &[&Path]) -> Result<(), PipelineError
     Ok(())
 }
 
+/// Turn what the document opener had to say into checks.
+///
+/// The two documents nearly always produce the same sentences — they went
+/// through the same opener — so a repeat is dropped rather than printed twice.
+fn opening_notes(original: &[String], edited: &[String]) -> Vec<safety::Check> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut checks = Vec::new();
+    for note in original.iter().chain(edited.iter()) {
+        if seen.contains(&note.as_str()) {
+            continue;
+        }
+        seen.push(note);
+        // The first sentence is the message and the rest is the detail, which
+        // is how every other check in this program reads.
+        let (message, detail) = match note.split_once(". ") {
+            Some((first, rest)) => (format!("{first}."), rest.to_string()),
+            None => (note.clone(), String::new()),
+        };
+        checks.push(safety::Check::note("opened-by", message, detail));
+    }
+    checks
+}
+
 fn blank_gray(size: PageSize, dpi: f64) -> Vec<u8> {
     let (w, h) = size.px_size(dpi);
     vec![255u8; (w as usize) * (h as usize)]
@@ -237,7 +260,7 @@ pub fn compose_run(
     let workspace = Workspace::new(false)?;
     let work = &workspace.path;
 
-    let source_pdf = render::to_pdf(source, work, 180)?;
+    let (source_pdf, _, source_notes) = render::to_pdf_noting(source, work, 180)?;
     let doc = engine.open(&source_pdf)?;
     let sizes = doc.page_sizes.clone();
 
@@ -305,7 +328,7 @@ pub fn compose_run(
         diffs.push(diff);
     }
 
-    let mut checks = Vec::new();
+    let mut checks = opening_notes(&source_notes, &[]);
     for diff in &diffs {
         checks.extend(safety::check_margins(diff, options.margin_mm));
         checks.extend(safety::check_coverage(diff));
@@ -386,13 +409,16 @@ pub fn run(
     let workspace = Workspace::new(false)?;
     let work = &workspace.path;
 
-    let original_pdf = render::to_pdf(original, work, 180)?;
-    let edited_pdf = render::to_pdf(edited, work, 180)?;
+    let (original_pdf, _, original_notes) = render::to_pdf_noting(original, work, 180)?;
+    let (edited_pdf, _, edited_notes) = render::to_pdf_noting(edited, work, 180)?;
 
     let old_doc = engine.open(&original_pdf)?;
     let new_doc = engine.open(&edited_pdf)?;
 
     let mut checks = safety::check_documents(&old_doc.page_sizes, &new_doc.page_sizes);
+    // Both documents go through the same opener in the same run, so anything
+    // it had to say applies to both and is worth saying once.
+    checks.extend(opening_notes(&original_notes, &edited_notes));
 
     let staged = work.join("delta-raw.pdf");
     let mut raster = match options.mode {
