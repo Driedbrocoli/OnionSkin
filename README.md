@@ -35,6 +35,37 @@ Unpack it, open a terminal in that folder, and run one line:
 ./onionskin install          # Windows: onionskin.exe install
 ```
 
+#### Or from the terminal, on Linux and macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Driedbrocoli/OnionSkin/main/install.sh | sh
+```
+
+That works out which machine this is, fetches the right archive, and runs the
+same `onionskin install`. No `sudo` anywhere.
+
+Piping a script from the internet into a shell is a reasonable thing to refuse.
+These are the two commands it runs, if you would rather type them yourself:
+
+```bash
+curl -fL -O https://github.com/Driedbrocoli/OnionSkin/releases/latest/download/onionskin-linux-x64.tar.gz
+tar -xzf onionskin-linux-x64.tar.gz && ./onionskin install
+```
+
+Swap `linux-x64` for `macos-arm64` or `macos-x64` on a Mac. Those names have no
+version in them on purpose, so the URL keeps working after the next release.
+
+On Debian, Ubuntu or Mint, the `.deb` is the tidier route:
+
+```bash
+curl -fL -O https://github.com/Driedbrocoli/OnionSkin/releases/latest/download/onionskin-linux-x64.deb
+sudo apt install ./onionskin-linux-x64.deb
+```
+
+**`sudo apt install onionskin` does not work**, and will not for a long while:
+that means being in Debian's own archive, which takes a sponsor and months. The
+`.deb` above is the same package, installed from a file instead of a mirror.
+
 That copies both programs and the PDF renderer into your own account, puts
 `onionskin` on your path, and — on Linux and Windows — adds a menu entry that
 opens the window. **Nothing asks for an administrator password.** Then open the

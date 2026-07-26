@@ -78,24 +78,28 @@ jobs:
             library: lib/libpdfium.so
             beside: libpdfium.so
             exe: ""
+            stable: linux-x64
           - os: windows-latest
             platform: windows
             pdfium: pdfium-win-x64.tgz
             library: bin/pdfium.dll
             beside: pdfium.dll
             exe: ".exe"
+            stable: windows-x64
           - os: macos-14
             platform: macos
             pdfium: pdfium-mac-arm64.tgz
             library: lib/libpdfium.dylib
             beside: libpdfium.dylib
             exe: ""
+            stable: macos-arm64
           - os: macos-13
             platform: macos
             pdfium: pdfium-mac-x64.tgz
             library: lib/libpdfium.dylib
             beside: libpdfium.dylib
             exe: ""
+            stable: macos-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -147,6 +151,24 @@ jobs:
           for file in dist/*; do
             mv "$file" "${file%.tar.gz}-$chip.tar.gz"
           done
+
+      # A second copy of each, named without the version. GitHub serves the
+      # newest release at /releases/latest/download/<exact name>, so a name
+      # with a version in it cannot be written down in a README or a script —
+      # it stops working the day there is a 0.1.1. Both are uploaded: the
+      # versioned name is the nicer thing to find in a Downloads folder, and
+      # the plain one is what `curl` can be pointed at forever.
+      - name: Add a copy with a name that never changes
+        shell: bash
+        run: |
+          for file in dist/*; do
+            case "$file" in
+              *.tar.gz) cp "$file" "dist/onionskin-${{ matrix.stable }}.tar.gz" ;;
+              *.zip)    cp "$file" "dist/onionskin-${{ matrix.stable }}.zip" ;;
+              *.deb)    cp "$file" "dist/onionskin-${{ matrix.stable }}.deb" ;;
+            esac
+          done
+          ls -l dist
 
       - name: Attach them to the release
         shell: bash
