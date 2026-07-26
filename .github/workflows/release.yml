@@ -31,7 +31,7 @@ permissions:
 jobs:
   # Made once, before the builds, so four jobs uploading at the same time are
   # not four jobs racing to create the same release.
-  draft:
+  open:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.name.outputs.tag }}
@@ -50,7 +50,13 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
-      - name: Open the release, empty
+      # Published straight away, not as a draft. A draft release is invisible
+      # and its files are not downloadable, so drafting until every runner has
+      # finished means nothing can be downloaded while the slowest one is
+      # still queued — and macOS runners queue for a long time. Each archive
+      # becomes available the moment its own job uploads it, which is worth
+      # more than the few minutes where the release is half full.
+      - name: Open the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -59,13 +65,14 @@ jobs:
             echo "$tag already exists; the archives will be replaced."
           else
             gh release create "$tag" \
-              --draft \
               --title "Onionskin ${{ steps.name.outputs.version }}" \
               --notes "Download the file for your machine, unpack it, and run \`onionskin install\`. Nothing asks for an administrator password."
           fi
+          # And if a previous run left it as a draft, take it out of one.
+          gh release edit "$tag" --draft=false
 
   build:
-    needs: draft
+    needs: open
     strategy:
       # One platform failing should not stop the others from being built:
       # three archives and a note about the fourth beats no archives.
@@ -137,7 +144,7 @@ jobs:
         run: |
           ./target/release/onionskin${{ matrix.exe }} package \
             --platform ${{ matrix.platform }} \
-            --version "${{ needs.draft.outputs.version }}" \
+            --version "${{ needs.open.outputs.version }}" \
             --out dist
 
       # macOS is built twice, for two different chips, and both produce an
@@ -174,14 +181,4 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.draft.outputs.tag }}" dist/* --clobber
-
-  publish:
-    needs: [draft, build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Take it out of draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "${{ needs.draft.outputs.tag }}" --draft=false
+        run: gh release upload "${{ needs.open.outputs.tag }}" dist/* --clobber
