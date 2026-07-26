@@ -10,7 +10,8 @@ readme = "../README.md"
 [dependencies]
 # PDF structure: read boxes and rotation, transform content, write pages.
 lopdf = "0.32"
-# Same rendering engine as the Python version, so rasters match bit for bit.
+# Drawing PDF pages to pixels. `thread_safe` is not optional: `render::Shared`
+# relies on it to serialise every call into the library.
 pdfium-render = { version = "0.8", features = ["thread_safe"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp"] }
 clap = { version = "4", features = ["derive"] }
