@@ -464,14 +464,34 @@ pub fn third_party_licences() -> String {
      \x20   0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,\n\
      \x20   BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense, Zlib\n\
      \n\
-     There is no copyleft anywhere in that list — no GPL, LGPL, MPL or AGPL.\n\
-     That is deliberate, and it is what lets you pass this binary on, changed\n\
-     or not, under whatever terms you like.\n\
+     One crate — self_cell, which the window toolkit uses — is offered as\n\
+     'Apache-2.0 OR GPL-2.0-only'. That is a choice, not a condition: Onionskin\n\
+     takes the Apache-2.0 side, and no GPL obligation reaches this program or\n\
+     anything built on it.\n\
+     \n\
+     Nothing else in the tree is copyleft. That is deliberate, and it is what\n\
+     lets you pass this binary on, changed or not, under whatever terms you\n\
+     like.\n\
      \n\
      The full text of each licence is in the crate it belongs to. The list can\n\
      be checked against the source at any time with:\n\
      \n\
      \x20   cargo tree --format '{p} {l}'\n\
+     \n\
+     The typefaces in the window\n\
+     ---------------------------\n\
+     \n\
+     The desktop window draws its own text, so it carries its own fonts:\n\
+     Ubuntu Light, Hack, Noto Emoji and Emoji Icon Font, by way of the\n\
+     epaint_default_fonts crate.\n\
+     \n\
+     \x20   Ubuntu Light  — Ubuntu Font Licence 1.0  (Ubuntu-font-1.0)\n\
+     \x20   the others    — SIL Open Font Licence 1.1  (OFL-1.1)\n\
+     \n\
+     Both allow the fonts to be bundled and passed on. Both ask that the font\n\
+     files keep their own licence and that a modified font be renamed, which\n\
+     is nothing to do with Onionskin's own terms and places no condition on\n\
+     your use of the program.\n\
      \n\
      Bundled alongside the binary\n\
      ----------------------------\n\

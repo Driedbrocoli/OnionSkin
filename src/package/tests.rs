@@ -580,25 +580,69 @@ fn the_licence_list_matches_what_cargo_actually_reports() {
 
     let notice = third_party_licences().to_ascii_lowercase();
     let listed = String::from_utf8_lossy(&output.stdout);
-    for name in listed
-        .split(['\n', '/'])
-        .flat_map(|field| field.split(" OR ").flat_map(|f| f.split(" AND ")))
-        .map(|name| name.trim().trim_matches(['(', ')']).trim())
-        .filter(|name| !name.is_empty())
-    {
+
+    for expression in listed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        // Every licence named has to be somewhere in the notice, whether it is
+        // one we take or one we decline — a reader comparing the two should
+        // not find a name in `cargo tree` that the notice never mentions.
+        for name in names_in(expression) {
+            assert!(
+                notice.contains(&name.to_ascii_lowercase()),
+                "a dependency is offered under {name}, which THIRD-PARTY-LICENCES \
+                 does not mention (from {expression:?})"
+            );
+        }
+
+        // And the claim that no copyleft obligation reaches this program has
+        // to stay true. `A OR B` is a choice, not a requirement: a crate
+        // offered as "Apache-2.0 OR GPL-2.0-only" is taken under Apache and
+        // carries no GPL obligation at all. Reading it as a requirement is
+        // what the first version of this test did, and it would have failed
+        // the whole tree over a crate that is perfectly fine.
         assert!(
-            notice.contains(&name.to_ascii_lowercase()),
-            "a dependency is {name}, which THIRD-PARTY-LICENCES does not mention"
-        );
-        // And the claim that there is no copyleft has to stay true.
-        let lower = name.to_ascii_lowercase();
-        assert!(
-            !["gpl", "mpl", "epl", "cddl"]
-                .iter()
-                .any(|bad| lower.contains(bad)),
-            "{name} is copyleft, and the notice says there is none"
+            permissive(expression),
+            "{expression:?} leaves no permissive way to use the crate, and the \
+             notice says every one of them has one"
         );
     }
+}
+
+/// Is there a way to take this licence expression that carries no copyleft?
+///
+/// `AND` binds every part: all of them must be satisfiable. `OR` offers a
+/// choice: one satisfiable part is enough.
+fn permissive(expression: &str) -> bool {
+    // Split on AND first, since it is the weaker binding of the two here.
+    expression
+        .split(" AND ")
+        .map(|part| part.trim().trim_matches(['(', ')']).trim())
+        .all(|part| {
+            part.split(" OR ")
+                // The old slash form, which a few crates still use.
+                .flat_map(|one| one.split('/'))
+                .any(|one| !is_copyleft(one.trim()))
+        })
+}
+
+fn is_copyleft(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    // A font licence is not code copyleft. OFL and the Ubuntu font licence
+    // govern the typeface files and ask that a modified font be renamed; they
+    // place no condition on the program that draws with them.
+    ["gpl", "mpl", "epl", "cddl", "sspl"]
+        .iter()
+        .any(|bad| lower.contains(bad))
+}
+
+/// Every licence named in an expression, however it is joined.
+fn names_in(expression: &str) -> Vec<String> {
+    expression
+        .split([',', '/'])
+        .flat_map(|part| part.split(" AND "))
+        .flat_map(|part| part.split(" OR "))
+        .map(|name| name.trim().trim_matches(['(', ')']).trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 #[test]
