@@ -90,6 +90,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         "The scan",
         &mut state.scan,
         &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+        room.dropped,
     );
 
     room.ui.horizontal(|ui| {
@@ -108,6 +109,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         "The font the page was set in",
         &mut state.font_file,
         &["ttf", "otf", "ttc"],
+        room.dropped,
     );
     widgets::hint(
         room.ui,

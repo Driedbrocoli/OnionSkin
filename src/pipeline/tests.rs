@@ -374,9 +374,10 @@ fn a_vector_delta_keeps_the_text_as_text() {
 fn a_calibration_profile_moves_the_ink_and_is_reported() {
     let Ok(_) = render::engine() else { return };
     let dir = tempfile::tempdir().unwrap();
-    // Keep profiles out of the real home directory.
+    // Keep profiles out of the real home directory, and out of the way of any
+    // other test doing the same thing at the same time.
     let home = dir.path().join("home");
-    std::env::set_var("ONIONSKIN_HOME", &home);
+    let _home = calibrate::borrow_home(&home);
 
     calibrate::save_profile(&Profile {
         name: "testprinter".into(),
@@ -429,7 +430,7 @@ fn a_calibration_profile_moves_the_ink_and_is_reported() {
 fn a_profile_that_does_not_exist_says_so_rather_than_running_uncalibrated() {
     let Ok(_) = render::engine() else { return };
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("ONIONSKIN_HOME", dir.path().join("home"));
+    let _home = calibrate::borrow_home(&dir.path().join("home"));
     let original = a_pdf(dir.path(), "before.pdf", &[("Report", 40.0)]);
     let edited = a_pdf(dir.path(), "after.pdf", &[("Report", 40.0)]);
 
@@ -729,4 +730,72 @@ fn typing_in_another_alphabet_works_with_a_supplied_font() {
     .unwrap();
     assert!(!outcome.blocked(), "{:?}", outcome.checks);
     assert!(outcome.total_regions() >= 1, "nothing was drawn");
+}
+
+// ---------------------------------------------------------------------------
+// Saying where it has got to
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_run_says_where_it_has_got_to() {
+    let Ok(_) = render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let original = pages(
+        dir.path(),
+        "before.pdf",
+        &[&[("One", 40.0)], &[("Two", 40.0)], &[("Three", 40.0)]],
+    );
+    let edited = pages(
+        dir.path(),
+        "after.pdf",
+        &[
+            &[("One", 40.0)],
+            &[("Two", 40.0), ("added", 90.0)],
+            &[("Three", 40.0)],
+        ],
+    );
+
+    let mut seen: Vec<Step> = Vec::new();
+    let outcome = run_watched(
+        &original,
+        &edited,
+        &dir.path().join("delta.pdf"),
+        &quick(),
+        &mut |step| seen.push(step),
+    )
+    .unwrap();
+    assert_eq!(outcome.total_regions(), 1);
+
+    // Every page is accounted for, in order, and the count it reports is the
+    // count there actually is.
+    let compared: Vec<usize> = seen
+        .iter()
+        .filter(|step| step.doing == "Comparing")
+        .map(|step| step.page)
+        .collect();
+    assert_eq!(compared, vec![1, 2, 3], "{seen:?}");
+    assert!(seen.iter().all(|step| step.pages == 0 || step.pages == 3));
+    assert!(seen.iter().any(|step| step.doing == "Writing the delta"));
+}
+
+#[test]
+fn a_step_describes_itself_the_way_a_person_reads_it() {
+    let page = Step {
+        doing: "Comparing",
+        page: 3,
+        pages: 40,
+    };
+    assert_eq!(page.describe(), "Comparing — page 3 of 40");
+    assert_eq!(page.fraction(), Some(3.0 / 40.0));
+
+    // Nothing to count: a bar that sits at nothing is worse than no bar.
+    let whole = Step {
+        doing: "Opening both documents",
+        page: 0,
+        pages: 0,
+    };
+    assert_eq!(whole.describe(), "Opening both documents");
+    assert_eq!(whole.fraction(), None);
 }

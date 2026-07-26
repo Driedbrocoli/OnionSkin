@@ -6,6 +6,24 @@ use super::job::Outcome;
 use super::picker::Picker;
 use super::theme;
 
+/// Take the first dropped file this control can use, if any.
+///
+/// A row that accepts anything takes the first file outright. A row with a
+/// list of kinds only takes one it recognises, so a scan dropped on a screen
+/// that wants a document is left for the control that wants a scan.
+fn claim(dropped: &mut Vec<std::path::PathBuf>, kinds: &[&str]) -> Option<std::path::PathBuf> {
+    let at = dropped.iter().position(|path| {
+        if kinds.is_empty() {
+            return true;
+        }
+        path.extension()
+            .and_then(|kind| kind.to_str())
+            .map(|kind| kinds.iter().any(|wanted| wanted.eq_ignore_ascii_case(kind)))
+            .unwrap_or(false)
+    })?;
+    Some(dropped.remove(at))
+}
+
 /// A screen's title and the sentence under it.
 pub fn title(ui: &mut egui::Ui, heading: &str, lede: &str) {
     ui.add_space(4.0);
@@ -65,8 +83,11 @@ pub fn outcome(ui: &mut egui::Ui, outcome: &Outcome) -> bool {
             for path in wrote {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(path.display().to_string()).monospace());
-                    // Showing a file in its folder is what a person does next,
-                    // and hunting for it by hand is the tax for not offering.
+                    // Looking at what came out is what a person does next, and
+                    // hunting for it by hand is the tax for not offering.
+                    if ui.button("Open it").clicked() {
+                        onionskin::install::open_with_desktop(path);
+                    }
                     if ui.button("Show the folder").clicked() {
                         show_in_folder(path);
                     }
@@ -93,24 +114,35 @@ pub fn outcome(ui: &mut egui::Ui, outcome: &Outcome) -> bool {
 ///
 /// The browser is drawn by the window itself, so the answer comes back a frame
 /// or two later rather than from the call that asked for it.
+///
+/// It also claims a file dropped on the window: each row takes the first one it
+/// can use and leaves the rest, so two documents dropped on the comparing
+/// screen fill both slots in the order the rows are drawn.
 pub fn file_row(
     ui: &mut egui::Ui,
     picker: &mut Picker,
     label: &str,
     slot: &mut Option<std::path::PathBuf>,
     kinds: &[&str],
+    dropped: &mut Vec<std::path::PathBuf>,
 ) -> bool {
     let mut changed = false;
     let who = ui.make_persistent_id(("file-row", label));
     if let Some(chosen) = picker.taken(who) {
+        onionskin::settings::remember_folder(&chosen);
         *slot = Some(chosen);
+        changed = true;
+    }
+    if let Some(claimed) = claim(dropped, kinds) {
+        *slot = Some(claimed);
         changed = true;
     }
 
     ui.label(egui::RichText::new(label).strong());
     ui.horizontal(|ui| {
         if ui.button("Choose…").clicked() {
-            picker.open(who, label, kinds, slot.as_deref());
+            let start = onionskin::settings::start_in(slot.as_deref());
+            picker.open(who, label, kinds, Some(&start));
         }
         match slot {
             Some(path) => {
@@ -153,13 +185,20 @@ pub fn save_row(
 ) {
     let who = ui.make_persistent_id(("save-row", label));
     if let Some(chosen) = picker.taken(who) {
+        onionskin::settings::remember_output_folder(&chosen);
         *slot = Some(chosen);
     }
 
     ui.label(egui::RichText::new(label).strong());
     ui.horizontal(|ui| {
         if ui.button("Save as…").clicked() {
-            picker.save(who, label, kinds, slot.as_deref(), suggested);
+            // Where the last result went, which is nearly always where the
+            // next one should go too.
+            let start = slot
+                .clone()
+                .or_else(|| onionskin::settings::load().last_output_folder)
+                .unwrap_or_else(|| onionskin::settings::start_in(None));
+            picker.save(who, label, kinds, Some(&start), suggested);
         }
         match slot {
             Some(path) => {
@@ -176,17 +215,12 @@ pub fn save_row(
 
 /// Open the folder a file is in, using whatever the desktop provides.
 ///
-/// Best effort by design: on a machine with no desktop session there is
-/// nothing to open, and failing quietly is right — the path is on screen
-/// beside the button, so nothing is lost.
+/// The work is in [`onionskin::install::open_with_desktop`], which the command
+/// line uses too — "which command opens a file on this operating system" is
+/// not a question worth answering twice.
 pub fn show_in_folder(path: &std::path::Path) {
-    let folder = path.parent().unwrap_or(path);
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(windows) {
-        "explorer"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(opener).arg(folder).spawn();
+    onionskin::install::open_with_desktop(path.parent().unwrap_or(path));
 }
+
+#[cfg(test)]
+mod tests;

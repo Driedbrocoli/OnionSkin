@@ -15,6 +15,11 @@ pub struct Onionskin {
     previews: Previews,
     picker: picker::Picker,
 
+    /// Files dropped on the window, held until a control claims them.
+    dropped: Vec<std::path::PathBuf>,
+    /// Something to say along the bottom, and when it was said.
+    said: Option<(String, f64)>,
+
     compare: screens::compare::State,
     scan: screens::scan::State,
     document: screens::document::State,
@@ -28,11 +33,20 @@ pub struct Onionskin {
 impl Onionskin {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Onionskin {
         theme::apply(&cc.egui_ctx);
+        // Where somebody was last time. Opening on the screen they left is a
+        // small thing that makes the program feel like it was waiting.
+        let screen = onionskin::settings::load()
+            .last_screen
+            .as_deref()
+            .and_then(Screen::from_key)
+            .unwrap_or(Screen::Compare);
         Onionskin {
-            screen: Screen::Compare,
+            screen,
             jobs: Jobs::new(&cc.egui_ctx),
             previews: Previews::default(),
             picker: picker::Picker::default(),
+            dropped: Vec::new(),
+            said: None,
             compare: Default::default(),
             scan: Default::default(),
             document: Default::default(),
@@ -48,6 +62,7 @@ impl Onionskin {
 impl eframe::App for Onionskin {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.jobs.poll();
+        self.take_dropped_files(ui.ctx());
 
         // Panels are nested outermost-first, and the central one comes last.
         egui::Panel::left("what-to-do")
@@ -70,6 +85,7 @@ impl eframe::App for Onionskin {
                         picker: &mut self.picker,
                         jobs: &mut self.jobs,
                         previews: &mut self.previews,
+                        dropped: &mut self.dropped,
                         ui,
                     };
                     match self.screen {
@@ -94,10 +110,95 @@ impl eframe::App for Onionskin {
         // Drawn last and over everything, because it is a question that has to
         // be answered before anything else can be got on with.
         self.picker.show(ui.ctx());
+
+        // A file nothing on this screen could use is dropped — but silently
+        // dropping it after saying "drop it to use it here" is a small lie, so
+        // it is said out loud along the bottom instead.
+        if !self.dropped.is_empty() {
+            let names: Vec<String> = self
+                .dropped
+                .iter()
+                .filter_map(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect();
+            self.said = Some((
+                format!(
+                    "Nothing on this screen can use {}",
+                    if names.is_empty() {
+                        "that".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                ),
+                ui.ctx().input(|input| input.time),
+            ));
+            // Neither of these happens by itself: the window only redraws when
+            // something arrives, and nothing arrives to take a message away.
+            ui.ctx().request_repaint();
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(SAY_FOR_SECONDS as u64 + 1));
+        }
+        self.dropped.clear();
     }
 }
 
+/// How long a passing message stays along the bottom. Long enough to read
+/// twice, short enough not to be mistaken for the state of the program.
+const SAY_FOR_SECONDS: f64 = 6.0;
+
 impl Onionskin {
+    /// Whatever is worth saying along the bottom just now, if anything.
+    fn something_to_say(&self, ctx: &egui::Context) -> Option<String> {
+        let (said, at) = self.said.as_ref()?;
+        let now = ctx.input(|input| input.time);
+        (now - at < SAY_FOR_SECONDS).then(|| said.clone())
+    }
+
+    /// Collect anything dropped on the window, and say so while it is hovering.
+    ///
+    /// Dragging a file onto a program is how most people would rather open one,
+    /// and it costs nothing here: the window is already watching for it, and a
+    /// dropped path is the same thing the file browser hands back.
+    fn take_dropped_files(&mut self, ctx: &egui::Context) {
+        let (dropped, hovering) = ctx.input(|input| {
+            (
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect::<Vec<_>>(),
+                input.raw.hovered_files.len(),
+            )
+        });
+        if !dropped.is_empty() {
+            if let Some(first) = dropped.first() {
+                onionskin::settings::remember_folder(first);
+            }
+            self.dropped = dropped;
+        }
+
+        // While something is over the window, say what will happen. Silence
+        // here reads as "this program does not take dropped files".
+        if hovering > 0 {
+            egui::Area::new(egui::Id::new("drop-hint"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 24.0))
+                .order(egui::Order::Tooltip)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(if hovering == 1 {
+                                "Drop it to use it here".to_string()
+                            } else {
+                                format!("Drop {hovering} files to use them here")
+                            })
+                            .strong(),
+                        );
+                    });
+                });
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         ui.heading("Onionskin");
@@ -113,6 +214,10 @@ impl Onionskin {
             let response = ui.selectable_label(chosen, egui::RichText::new(screen.name()).strong());
             if response.clicked() {
                 self.screen = *screen;
+                let key = screen.key();
+                onionskin::settings::remember(|settings| {
+                    settings.last_screen = Some(key.to_string())
+                });
             }
             // The sentence beneath is what lets somebody pick the right screen
             // without opening all six to find out what they do. Wrapped, or
@@ -160,9 +265,14 @@ impl Onionskin {
                     ui.add(egui::ProgressBar::new(fraction).desired_width(150.0));
                 }
             }
-            None => {
-                ui.label(egui::RichText::new("Ready").small().weak());
-            }
+            None => match self.something_to_say(ui.ctx()) {
+                Some(said) => {
+                    ui.label(egui::RichText::new(said).small().color(theme::CAUTION));
+                }
+                None => {
+                    ui.label(egui::RichText::new("Ready").small().weak());
+                }
+            },
         });
         ui.add_space(3.0);
     }

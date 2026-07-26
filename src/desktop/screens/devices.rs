@@ -90,7 +90,9 @@ pub fn show(state: &mut State, room: &mut Room) {
     // --------------------------------------------------------------- print
     room.ui.add_space(10.0);
     room.ui.label(egui::RichText::new("Send a PDF to print").strong());
-    widgets::file_row(room.ui, room.picker, "The PDF", &mut state.to_print, &["pdf"]);
+    widgets::file_row(room.ui, room.picker, "The PDF", &mut state.to_print, &["pdf"],
+        room.dropped,
+    );
     room.ui.horizontal(|ui| {
         ui.label("Printer");
         ui.text_edit_singleline(&mut state.printer_uri);

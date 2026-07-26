@@ -67,6 +67,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         "The scan",
         &mut state.scan,
         &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+        room.dropped,
     );
 
     room.ui.horizontal(|ui| {
@@ -110,7 +111,8 @@ pub fn show(state: &mut State, room: &mut Room) {
             "Font file, for another alphabet",
             &mut state.font_file,
             &["ttf", "otf", "ttc"],
-        );
+        room.dropped,
+    );
         widgets::hint(
             ui,
             "Optional. Overrides the font above, and is carried inside the \

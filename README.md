@@ -102,6 +102,11 @@ Nothing on the command line needs any of it.
 On **Windows** and **macOS** there is nothing to install: both ship their own
 graphics and keyboard handling.
 
+**Drag a file onto the window** and it goes into the first box that can use it —
+drop two documents on the comparing screen and they fill both, in order. The
+window opens on the screen you were last using, and the file browser opens in
+the folder you last chose something from.
+
 `onionskin uninstall` removes exactly what was put there and says what it
 removed. It leaves your calibration profiles alone, and says so.
 
@@ -261,12 +266,16 @@ lands within **0.30 mm** of where it belongs on the paper.
 Edit in Word as you normally would, and let Onionskin work out what is new:
 
 ```bash
-onionskin delta report.docx report-edited.docx -o delta.pdf
+onionskin delta report.docx report-edited.docx        # writes report-edited-delta.pdf
 onionskin compare report.docx report-edited.docx      # report, write nothing
 onionskin delta a.docx b.docx -o delta.pdf --preview ./proof
+onionskin delta a.docx b.docx --open                  # and open it when it is done
 ```
 
-Either way, put the printed sheet back in the tray and print `delta.pdf` **at
+`-o` is optional: without it the result goes beside the edited copy, named after
+it. Same for `add` and `print`.
+
+Either way, put the printed sheet back in the tray and print the delta **at
 100% / "Actual size"**, with "Fit to page" turned off.
 
 There is also a browser interface for the two-document workflow, served from

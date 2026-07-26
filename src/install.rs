@@ -513,6 +513,39 @@ pub fn uninstall(options: &Options) -> Result<Report, InstallError> {
     Ok(report)
 }
 
+/// Hand a file or a folder to whatever this desktop opens it with.
+///
+/// Returns whether anything was launched, so a caller can say "it is at ..."
+/// instead when nothing was. Best effort by design: on a server, in a
+/// container, or over SSH there is nothing to open, and failing quietly is
+/// right — the path has just been printed, so nothing is lost.
+///
+/// Lives here rather than in the window because both want it, and two copies
+/// of "which command opens a file on this operating system" is one too many.
+pub fn open_with_desktop(path: &Path) -> bool {
+    // The one on Windows is a shell built-in rather than a program, which is
+    // why it is spelled as an argument to the shell.
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(path);
+        command
+    } else if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    // Its output is not ours: a viewer that writes a warning to the terminal
+    // would otherwise appear in the middle of Onionskin's own report.
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command.spawn().is_ok()
+}
+
 /// Where an installed copy would be, and whether it is there.
 pub fn status(options: &Options) -> (PathBuf, bool) {
     let prefix = options.prefix.clone().unwrap_or_else(default_prefix);

@@ -200,6 +200,43 @@ pub fn guard_output(output: &Path, inputs: &[&Path]) -> Result<(), PipelineError
     Ok(())
 }
 
+/// How far along a job is, for whoever is watching it.
+///
+/// A hundred-page delta takes minutes, and a program that says nothing for
+/// minutes looks like a program that has stopped. This is what it says
+/// instead — and it is a callback rather than a print so that the window, the
+/// command line and a test can each do something different with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Step {
+    /// What is happening, in words.
+    pub doing: &'static str,
+    /// Which page, counted from 1. Zero when it is not about a page.
+    pub page: usize,
+    /// How many pages there are, or zero when that is not known yet.
+    pub pages: usize,
+}
+
+impl Step {
+    /// How far through, between nothing and one — or `None` when there is no
+    /// honest answer, which is better than a bar that sits at nothing.
+    pub fn fraction(&self) -> Option<f32> {
+        (self.pages > 0 && self.page > 0)
+            .then(|| (self.page as f32 / self.pages as f32).clamp(0.0, 1.0))
+    }
+
+    /// The line to show somebody.
+    pub fn describe(&self) -> String {
+        if self.pages > 0 && self.page > 0 {
+            format!("{} — page {} of {}", self.doing, self.page, self.pages)
+        } else {
+            self.doing.to_string()
+        }
+    }
+}
+
+/// Nothing is watching. The ordinary case for a library caller.
+fn unwatched(_: Step) {}
+
 /// Turn what the document opener had to say into checks.
 ///
 /// The two documents nearly always produce the same sentences — they went
@@ -389,6 +426,17 @@ pub fn run(
     output: &Path,
     options: &Options,
 ) -> Result<Outcome, PipelineError> {
+    run_watched(original, edited, output, options, &mut unwatched)
+}
+
+/// The same, saying how far along it is as it goes.
+pub fn run_watched(
+    original: &Path,
+    edited: &Path,
+    output: &Path,
+    options: &Options,
+    watch: &mut dyn FnMut(Step),
+) -> Result<Outcome, PipelineError> {
     options.validate()?;
     guard_output(output, &[original, edited])?;
 
@@ -409,6 +457,11 @@ pub fn run(
     let workspace = Workspace::new(false)?;
     let work = &workspace.path;
 
+    watch(Step {
+        doing: "Opening both documents",
+        page: 0,
+        pages: 0,
+    });
     let (original_pdf, _, original_notes) = render::to_pdf_noting(original, work, 180)?;
     let (edited_pdf, _, edited_notes) = render::to_pdf_noting(edited, work, 180)?;
 
@@ -431,6 +484,11 @@ pub fn run(
     let mut sizes: Vec<PageSize> = Vec::new();
 
     for index in 0..new_doc.len() {
+        watch(Step {
+            doing: "Comparing",
+            page: index + 1,
+            pages: new_doc.len(),
+        });
         let new_page = new_doc.render(index, options.dpi)?;
         sizes.push(new_page.size);
 
@@ -475,6 +533,11 @@ pub fn run(
         diffs.push(diff);
     }
 
+    watch(Step {
+        doing: "Writing the delta",
+        page: 0,
+        pages: 0,
+    });
     match raster {
         Some(writer) => {
             writer.close()?;
@@ -490,6 +553,11 @@ pub fn run(
         }
     }
 
+    watch(Step {
+        doing: "Checking it is safe to print",
+        page: 0,
+        pages: 0,
+    });
     for diff in &diffs {
         checks.extend(safety::check_reflow(diff));
         checks.extend(safety::check_margins(diff, options.margin_mm));

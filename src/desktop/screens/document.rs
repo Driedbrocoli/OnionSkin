@@ -183,7 +183,9 @@ pub fn show(state: &mut State, room: &mut Room) {
 
 fn show_picker(state: &mut State, room: &mut Room) {
     room.ui.label(egui::RichText::new("Open a document already started").strong());
-    if widgets::file_row(room.ui, room.picker, "Document", &mut state.open_pick, &["onionskin"]) {
+    if widgets::file_row(room.ui, room.picker, "Document", &mut state.open_pick, &["onionskin"],
+        room.dropped,
+    ) {
         match state.open_pick.clone() {
             Some(path) => match Document::load(&path) {
                 Ok(doc) => {
@@ -1380,6 +1382,7 @@ mod tests {
                 picker: &mut crate::picker::Picker::default(),
                 jobs: &mut jobs,
                 previews: &mut previews,
+                dropped: &mut Vec::new(),
             };
             show(state, &mut room);
         });

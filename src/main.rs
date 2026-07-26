@@ -206,9 +206,12 @@ struct DeltaArgs {
     original: PathBuf,
     /// The edited copy.
     edited: PathBuf,
-    /// Delta PDF to write.
+    /// Delta PDF to write. Without it, beside the edited copy as NAME-delta.pdf.
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
 
     /// How to build it: 'raster' prints exactly the new pixels and can never
     /// re-print existing ink; 'vector' keeps the text as text but clips to
@@ -456,9 +459,12 @@ struct EraseArgs {
 struct PrintArgs {
     /// The document to print.
     document: PathBuf,
-    /// PDF to write.
+    /// PDF to write. Without it, beside the document, named after it.
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+    /// Open the PDF when it is written.
+    #[arg(long)]
+    open: bool,
     /// Print only what has been added since the sheet was last printed, so it
     /// can go back through the printer onto the same paper.
     #[arg(long)]
@@ -513,6 +519,9 @@ struct ReadArgs {
     /// where it was found on the paper.
     #[arg(long)]
     flow: bool,
+    /// Open what was written, when --to wrote something.
+    #[arg(long)]
+    open: bool,
 }
 
 #[derive(clap::Args)]
@@ -557,9 +566,12 @@ struct InspectArgs {
 struct AddArgs {
     /// The scan: PNG, JPEG, TIFF or BMP.
     scan: PathBuf,
-    /// Delta PDF to write.
+    /// Delta PDF to write. Without it, beside the scan as NAME-delta.pdf.
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
 
     /// Words to place, positioned by where they appear in the SCAN, in pixels:
     /// 'X,Y:the words'. This is what you read off an image viewer.
@@ -980,10 +992,49 @@ fn cmd_erase(args: EraseArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Where a result goes when nobody says where.
+///
+/// Beside the file it came from, named after it, with what it is on the end.
+/// That is where a person looks for it and roughly what they would have called
+/// it — and it removes the one flag that had to be typed every single time.
+fn beside(source: &Path, tail: &str, extension: &str) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "onionskin".to_string());
+    // A bare file name has an *empty* parent rather than none, and joining
+    // onto an empty path gives back a bare name — so "scan.png" becomes
+    // "scan-delta.pdf" and not "./scan-delta.pdf".
+    let folder = source.parent().unwrap_or(Path::new(""));
+    folder.join(format!("{stem}{tail}.{extension}"))
+}
+
+/// Open a finished file, if asked and if there is anything here to open it.
+fn open_if_asked(asked: bool, path: &Path) {
+    if !asked {
+        return;
+    }
+    if !onionskin::install::open_with_desktop(path) {
+        // Not an error. There is no desktop on a server or over SSH, and the
+        // path has just been printed anyway.
+        eprintln!(
+            "note: nothing on this machine would open {}",
+            path.display()
+        );
+    }
+}
+
 fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
     let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
-    check_writable(&args.output, "PDF")?;
-    refuse_to_clobber(&args.output, "PDF", &[(&args.document, "document")])?;
+    let output = args.output.clone().unwrap_or_else(|| {
+        beside(
+            &args.document,
+            if args.delta { "-delta" } else { "" },
+            "pdf",
+        )
+    });
+    check_writable(&output, "PDF")?;
+    refuse_to_clobber(&output, "PDF", &[(&args.document, "document")])?;
 
     let font = load_font(args.font_file.as_deref(), args.font_index)?;
 
@@ -1028,7 +1079,7 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
     }
 
     onionskin::pdf::write_page_content(
-        &args.output,
+        &output,
         &document.page_sizes(),
         &pages,
         &drawings,
@@ -1039,7 +1090,7 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
 
     println!(
         "{}: {} page{}, {written} line{}{}.",
-        args.output.display(),
+        output.display(),
         document.pages,
         if document.pages == 1 { "" } else { "s" },
         if written == 1 { "" } else { "s" },
@@ -1054,13 +1105,14 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
         document.mark_printed();
         document.save(&args.document).map_err(|e| e.to_string())?;
         println!(
-            "Noted as printed. Add more words, then:\n  onionskin print {} -o delta.pdf --delta",
+            "Noted as printed. Add more words, then:\n  onionskin print {} --delta",
             args.document.display()
         );
     }
     if args.delta {
         println!("\n{PRINT_INSTRUCTIONS}");
     }
+    open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1225,6 +1277,7 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
 
     if let Some(destination) = &args.to {
         export_page(&text, page, destination, args.flow, font.is_some())?;
+        open_if_asked(args.open, destination);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1646,14 +1699,18 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
 
     // Check the destinations before doing any work, so a mistake costs a
     // message rather than the scan.
-    check_writable(&args.output, "delta")?;
-    refuse_to_clobber(&args.output, "delta", &[(&args.scan, "scan")])?;
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.scan, "-delta", "pdf"));
+    check_writable(&output, "delta")?;
+    refuse_to_clobber(&output, "delta", &[(&args.scan, "scan")])?;
     if let Some(preview) = &args.preview {
         check_writable(preview, "proof")?;
         refuse_to_clobber(
             preview,
             "proof",
-            &[(&args.scan, "scan"), (&args.output, "delta")],
+            &[(&args.scan, "scan"), (&output, "delta")],
         )?;
     }
 
@@ -1705,7 +1762,7 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     }
 
     write_delta(
-        &args.output,
+        &output,
         &[page],
         &[lines.clone()],
         "Onionskin delta",
@@ -1727,7 +1784,7 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         }
     })?;
 
-    println!("Wrote {}", args.output.display());
+    println!("Wrote {}", output.display());
     println!("  paper      : {}", page.describe());
     if let Some(font) = &embedded {
         println!(
@@ -1797,6 +1854,7 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     }
 
     println!("\n{PRINT_INSTRUCTIONS}");
+    open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1890,8 +1948,49 @@ fn report_checks(checks: &[onionskin::safety::Check]) {
     }
 }
 
+/// Say where a long job has got to, on one line that rewrites itself.
+///
+/// Only when there is a terminal to draw on. Piped into a file or another
+/// program, a carriage return every page turns the output into a single
+/// unreadable line — so a script gets nothing extra and a person gets a
+/// program that is visibly still working.
+fn progress_on_a_terminal() -> impl FnMut(pipeline::Step) {
+    use std::io::{IsTerminal, Write};
+    let live = std::io::stderr().is_terminal();
+    let mut widest = 0usize;
+    move |step: pipeline::Step| {
+        if !live {
+            return;
+        }
+        let line = step.describe();
+        // Padded to the longest line so far, or the tail of a longer previous
+        // line stays on screen after a shorter one is written over it.
+        widest = widest.max(line.chars().count());
+        let mut err = std::io::stderr();
+        let _ = write!(err, "\r{line:<widest$}");
+        let _ = err.flush();
+    }
+}
+
+/// Take the progress line off the screen before anything else is printed.
+fn clear_progress() {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    let mut err = std::io::stderr();
+    let _ = write!(err, "\r{:<72}\r", "");
+    let _ = err.flush();
+}
+
 fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
-    check_writable(&args.output, "delta")?;
+    // Beside the edited copy, because that is the document somebody was just
+    // looking at and where they will look for what came out.
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.edited, "-delta", "pdf"));
+    check_writable(&output, "delta")?;
     let options = delta_options(
         &args.mode,
         args.dpi,
@@ -1900,8 +1999,16 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         args.preview.clone(),
     )?;
 
-    let outcome = pipeline::run(&args.original, &args.edited, &args.output, &options)
-        .map_err(|e| e.to_string())?;
+    let outcome = pipeline::run_watched(
+        &args.original,
+        &args.edited,
+        &output,
+        &options,
+        &mut progress_on_a_terminal(),
+    )
+    .map_err(|e| e.to_string());
+    clear_progress();
+    let outcome = outcome?;
 
     if args.json {
         println!(
@@ -1925,7 +2032,7 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
             "\nBlocked. '{}' was written, but printing it onto the existing sheet \
              will not line up.\nPrint the affected pages fresh, or --force if you \
              know better.",
-            args.output.display()
+            output.display()
         );
         return Ok(ExitCode::from(2));
     }
@@ -1933,7 +2040,7 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
     let pages = outcome.pages_with_additions();
     println!(
         "\n{}: {} addition{} on page{} {}.",
-        args.output.display(),
+        output.display(),
         outcome.total_regions(),
         if outcome.total_regions() == 1 {
             ""
@@ -1951,6 +2058,7 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         println!("proof: {}", path.display());
     }
     println!("\n{PRINT_INSTRUCTIONS}");
+    open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2042,7 +2150,11 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
                 .into(),
         );
     }
-    check_writable(&args.output, "delta")?;
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.scan, "-delta", "pdf"));
+    check_writable(&output, "delta")?;
     let font = load_font(args.font_file.as_deref(), args.font_index)?;
     let face = if font.is_some() {
         "file".to_string()
@@ -2073,7 +2185,7 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
         preview_dir: args.preview.clone(),
         ..Default::default()
     };
-    let outcome = pipeline::compose_run(&args.scan, &items, &args.output, font.as_ref(), &options)
+    let outcome = pipeline::compose_run(&args.scan, &items, &output, font.as_ref(), &options)
         .map_err(|e| e.to_string())?;
 
     report_checks(&outcome.checks);
@@ -2083,7 +2195,7 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
     }
     println!(
         "\n{}: {} addition{}.",
-        args.output.display(),
+        output.display(),
         outcome.total_regions(),
         if outcome.total_regions() == 1 {
             ""
@@ -2095,6 +2207,7 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
         println!("proof: {}", path.display());
     }
     println!("\n{PRINT_INSTRUCTIONS}");
+    open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2678,5 +2791,48 @@ fn human_size(bytes: u64) -> String {
         format!("{} kB", bytes / 1024)
     } else {
         format!("{bytes} bytes")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_result_goes_beside_the_file_it_came_from() {
+        // The commonest command should not need a flag typed every time.
+        assert_eq!(
+            beside(Path::new("/work/report-v2.docx"), "-delta", "pdf"),
+            PathBuf::from("/work/report-v2-delta.pdf")
+        );
+        assert_eq!(
+            beside(Path::new("scan.png"), "-delta", "pdf"),
+            PathBuf::from("scan-delta.pdf")
+        );
+        // Printing a document whole keeps its own name.
+        assert_eq!(
+            beside(Path::new("/work/order.onionskin"), "", "pdf"),
+            PathBuf::from("/work/order.pdf")
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_name_still_gets_one() {
+        // Nothing sensible to name it after, and refusing would be worse than
+        // a dull name.
+        let named = beside(Path::new("/"), "-delta", "pdf");
+        assert!(
+            named.to_string_lossy().ends_with("onionskin-delta.pdf"),
+            "{}",
+            named.display()
+        );
+    }
+
+    #[test]
+    fn a_name_with_dots_in_it_keeps_all_but_the_last() {
+        assert_eq!(
+            beside(Path::new("minutes.2026.03.docx"), "-delta", "pdf"),
+            PathBuf::from("minutes.2026.03-delta.pdf")
+        );
     }
 }

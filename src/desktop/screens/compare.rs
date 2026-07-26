@@ -63,6 +63,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         "The document as it was printed",
         &mut state.original,
         DOCUMENT_KINDS,
+        room.dropped,
     );
     widgets::file_row(
         room.ui,
@@ -70,6 +71,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         "The edited copy",
         &mut state.edited,
         DOCUMENT_KINDS,
+        room.dropped,
     );
 
     room.ui.add_space(6.0);
@@ -172,8 +174,14 @@ fn start(state: &mut State, room: &mut Room) {
     room.previews.forget(&output);
     let target = output.clone();
     room.jobs.start("Making the delta", move |report| {
-        report.saying("Opening both documents…");
-        match pipeline::run(&original, &edited, &target, &options) {
+        // The pipeline says where it has got to, and a hundred-page delta
+        // takes minutes — long enough that a still spinner reads as a program
+        // that has stopped.
+        let mut say = |step: pipeline::Step| match step.fraction() {
+            Some(fraction) => report.part_way(step.describe(), fraction),
+            None => report.saying(step.describe()),
+        };
+        match pipeline::run_watched(&original, &edited, &target, &options, &mut say) {
             Ok(outcome) => {
                 // A delta that is blocked is not a success with a warning on
                 // it. Ink does not come off paper, and printing this one would

@@ -15,4 +15,5 @@ pub mod printer;
 pub mod render;
 pub mod safety;
 pub mod scan;
+pub mod settings;
 pub mod web;

@@ -27,6 +27,12 @@ pub struct Room<'a> {
     pub ui: &'a mut egui::Ui,
     pub jobs: &'a mut Jobs,
     pub previews: &'a mut Previews,
+    /// Files dropped onto the window this frame, waiting to be claimed.
+    ///
+    /// A control takes the first one it can use and leaves the rest, so
+    /// dropping two documents on the comparing screen fills both slots in the
+    /// order they are drawn — which is the order they are asked for.
+    pub dropped: &'a mut Vec<std::path::PathBuf>,
 }
 
 /// Which screen the window is on.
@@ -55,6 +61,27 @@ impl Screen {
         Screen::Calibrate,
         Screen::Doctor,
     ];
+
+    /// A short name to write in the settings file — the visible one is a
+    /// sentence, and a sentence in a settings file is a sentence somebody will
+    /// eventually reword.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Screen::Compare => "compare",
+            Screen::Scan => "scan",
+            Screen::Document => "document",
+            Screen::Draw => "draw",
+            Screen::Read => "read",
+            Screen::Devices => "devices",
+            Screen::Calibrate => "calibrate",
+            Screen::Doctor => "doctor",
+        }
+    }
+
+    /// The screen a key names, or nothing if it names none.
+    pub fn from_key(key: &str) -> Option<Screen> {
+        Screen::ALL.iter().copied().find(|screen| screen.key() == key)
+    }
 
     pub fn name(&self) -> &'static str {
         match self {

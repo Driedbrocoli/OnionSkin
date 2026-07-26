@@ -28,6 +28,7 @@ went with it.
 | `acquire`  | Driving a scanner through SANE |
 | `web`      | A local HTTP server with no dependency and no external asset |
 | `install`  | Putting the program where the operating system can find it |
+| `settings` | The few things worth remembering between one run and the next |
 | `package`  | Building the archive people download |
 
 And a second binary, `src/desktop/`, which is the window.
@@ -71,6 +72,15 @@ operating system offers to kill the program. So every slow thing runs on a
 thread of its own and reports back through `desktop::job`, and the window keeps
 drawing, says what it is doing, and counts the seconds — which is what tells
 somebody it is working rather than stuck.
+
+A hundred-page delta takes minutes, which is long enough that "working" is not
+enough to say. `pipeline::run_watched` takes a callback and reports a
+`pipeline::Step` — what it is doing and which page of how many — so the window
+shows a bar that moves and the command line rewrites one line as it goes.
+`pipeline::run` is the same thing with the callback thrown away, because most
+callers do not want one. The command line only draws that line when there is a
+terminal to draw on: piped into a file, a carriage return every page turns the
+output into one unreadable line.
 
 There is exactly one worker, on purpose. pdfium serialises individual calls but
 not the *sequence* of calls that makes up one document, so two renders at once
