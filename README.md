@@ -65,19 +65,42 @@ cd target/release
 ./onionskin install          # Windows: onionskin.exe install
 ```
 
-That copies the program and the renderer into `~/.local/bin` (or
-`%LOCALAPPDATA%\Onionskin`), adds an applications-menu entry, and puts that
-folder on your path. **Nothing asks for an administrator password**: it installs
-into your own account, and a program that demands a password to put a file on
-your own computer teaches people to give passwords to programs.
+That copies both programs and the renderer into `~/.local/bin` (or
+`%LOCALAPPDATA%\Onionskin`), adds an applications-menu entry that opens the
+window, and puts that folder on your path. **Nothing asks for an administrator
+password**: it installs into your own account, and a program that demands a
+password to put a file on your own computer teaches people to give passwords to
+programs.
 
 Open a new terminal, and:
 
 ```bash
 onionskin doctor             # what works on this machine, and what is missing
 onionskin --help             # everything it can do
-onionskin serve              # the browser interface, on this machine only
+onionskin-desktop            # the window
 ```
+
+`onionskin uninstall` removes exactly what was put there and says what it
+removed.
+
+### The window
+
+There are two programs. `onionskin` is the command line; `onionskin-desktop` is
+a window, and on Linux it is what the applications menu opens.
+
+It is a real window — egui draws every widget itself onto an OpenGL surface.
+There is no web view and no browser engine inside it, which is what keeps the
+whole thing one file that runs on a machine with nothing installed.
+
+On **Linux** the window needs the display and graphics libraries every desktop
+already has: X11 or Wayland, xkbcommon, and OpenGL. A desktop machine has them.
+A server, a container or a minimal virtual machine may not, and then the window
+quits with a line about a file nobody has heard of. `onionskin doctor` checks
+for them and prints the one command that installs them for your distribution.
+Nothing on the command line needs any of it.
+
+On **Windows** and **macOS** there is nothing to install: both ship their own
+graphics and keyboard handling.
 
 `onionskin uninstall` removes exactly what was put there and says what it
 removed. It leaves your calibration profiles alone, and says so.

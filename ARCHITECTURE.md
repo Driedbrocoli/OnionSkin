@@ -30,6 +30,60 @@ went with it.
 | `install`  | Putting the program where the operating system can find it |
 | `package`  | Building the archive people download |
 
+And a second binary, `src/desktop/`, which is the window.
+
+## Two programs, one library
+
+`onionskin` is the command line. `onionskin-desktop` is a window. Everything
+either of them can do lives in the library; neither has any logic of its own
+beyond arranging it.
+
+They are two executables rather than one because **Windows decides at link time
+whether a program owns a console**. A window built as a console program flashes
+a black box behind itself on every launch; a console program built as a window
+prints to nowhere. One file cannot be both.
+
+### Why not a web view
+
+The obvious way to build a desktop application now is to wrap a browser engine.
+It is the wrong answer here twice over. It would add something like a hundred
+megabytes to a five-megabyte download, and it would put a full network stack
+inside a program whose central claim is that it never uses the network — a claim
+that would then be impossible to verify by reading the code.
+
+So the window is [egui](https://github.com/emilk/egui), which draws every widget
+itself onto an OpenGL surface. No web view, no system toolkit, no C++ library.
+The binary links against nothing but libc; X11, xkbcommon and OpenGL are opened
+when it starts.
+
+That last detail is worth knowing, because it decides the failure mode. On a
+machine without those libraries — a server, a container, a minimal virtual
+machine — the window quits with a line about a file nobody has heard of.
+`install::desktop_needs` looks for them and `onionskin doctor` prints the one
+command that installs them for whichever package manager is actually present.
+Nothing on the command line needs any of it.
+
+### Slow work
+
+Making a delta takes seconds and reading a page of letters takes about one.
+Either between two frames freezes the window: the title bar greys out and the
+operating system offers to kill the program. So every slow thing runs on a
+thread of its own and reports back through `desktop::job`, and the window keeps
+drawing, says what it is doing, and counts the seconds — which is what tells
+somebody it is working rather than stuck.
+
+There is exactly one worker, on purpose. pdfium serialises individual calls but
+not the *sequence* of calls that makes up one document, so two renders at once
+will eventually read one another's state and crash.
+
+### How it is tested
+
+By running it. There is no display in the build environment, so it runs under
+Xvfb against Mesa's software rasteriser and is screenshotted. Compiling proves
+nothing about a window: the first run found the sidebar text running off the
+edge of the panel and losing its last word, which was the word that
+distinguished one screen from the next.
+
 ## Making a document, and adding to it after it is printed
 
 This is Onionskin's own idea applied to its own documents, and it is the one

@@ -85,6 +85,85 @@ pub fn outcome(ui: &mut egui::Ui, outcome: &Outcome) -> bool {
     dismissed
 }
 
+/// A labelled row with the chosen file and a button to change it.
+///
+/// Returns true when the choice changed, so a screen can throw away whatever
+/// it worked out about the file it was looking at before.
+pub fn file_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    slot: &mut Option<std::path::PathBuf>,
+    kinds: &[&str],
+) -> bool {
+    let mut changed = false;
+    ui.label(egui::RichText::new(label).strong());
+    ui.horizontal(|ui| {
+        if ui.button("Choose…").clicked() {
+            if let Some(picked) = rfd::FileDialog::new()
+                .add_filter("Files Onionskin reads", kinds)
+                .pick_file()
+            {
+                *slot = Some(picked);
+                changed = true;
+            }
+        }
+        match slot {
+            Some(path) => {
+                ui.label(
+                    egui::RichText::new(
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                    )
+                    .monospace(),
+                )
+                .on_hover_text(path.display().to_string());
+                if ui.small_button("✕").clicked() {
+                    *slot = None;
+                    changed = true;
+                }
+            }
+            None => hint(ui, "nothing chosen"),
+        }
+    });
+    ui.add_space(6.0);
+    changed
+}
+
+/// Where a result should be written, with a Save-as button.
+pub fn save_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    slot: &mut Option<std::path::PathBuf>,
+    suggested: &str,
+    kinds: &[&str],
+) {
+    ui.label(egui::RichText::new(label).strong());
+    ui.horizontal(|ui| {
+        if ui.button("Save as…").clicked() {
+            if let Some(picked) = rfd::FileDialog::new()
+                .add_filter("Files Onionskin writes", kinds)
+                .set_file_name(suggested)
+                .save_file()
+            {
+                *slot = Some(picked);
+            }
+        }
+        match slot {
+            Some(path) => {
+                ui.label(egui::RichText::new(path.display().to_string()).monospace());
+                if ui.small_button("✕").clicked() {
+                    *slot = None;
+                }
+            }
+            // Saying where it will go by default is what stops somebody
+            // hunting for a file they were never told the name of.
+            None => hint(ui, &format!("beside the original, as {suggested}")),
+        }
+    });
+    ui.add_space(6.0);
+}
+
 /// Open the folder a file is in, using whatever the desktop provides.
 ///
 /// Best effort by design: on a machine with no desktop session there is

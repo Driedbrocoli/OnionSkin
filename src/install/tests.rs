@@ -294,18 +294,94 @@ fn the_path_line_is_added_once_and_taken_out_cleanly() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_menu_entry_is_a_valid_desktop_file() {
-    let entry = desktop_entry(Path::new("/home/someone/.local/bin/onionskin"));
+fn the_menu_entry_opens_the_window_when_there_is_one() {
+    // A menu entry is what somebody clicks expecting an application. If it
+    // launches the command line program instead, they get a terminal — or, if
+    // it launches one with no visible output, they get nothing at all and
+    // conclude the thing is broken.
+    let entry = desktop_entry(
+        Path::new("/home/someone/.local/bin/onionskin"),
+        Some(Path::new("/home/someone/.local/bin/onionskin-desktop")),
+    );
     assert!(entry.starts_with("[Desktop Entry]"), "{entry}");
     assert!(entry.contains("Type=Application"));
     assert!(entry.contains("Name=Onionskin"));
     assert!(
+        entry.contains("Exec=/home/someone/.local/bin/onionskin-desktop"),
+        "{entry}"
+    );
+    assert!(
+        entry.contains("Terminal=false"),
+        "a window does not want a terminal behind it: {entry}"
+    );
+    assert!(
+        !entry.contains("serve"),
+        "it should not fall back to the browser interface: {entry}"
+    );
+}
+
+#[test]
+fn the_menu_entry_falls_back_to_the_browser_interface() {
+    // Somebody who built only the command line program still gets a working
+    // menu entry — and that one does need a terminal, to show the address the
+    // browser interface is running at.
+    let entry = desktop_entry(Path::new("/home/someone/.local/bin/onionskin"), None);
+    assert!(
         entry.contains("Exec=/home/someone/.local/bin/onionskin serve"),
         "{entry}"
     );
-    // It opens the browser interface, which needs a terminal to show the
-    // address it is running at.
-    assert!(entry.contains("Terminal=true"));
+    assert!(entry.contains("Terminal=true"), "{entry}");
+}
+
+#[test]
+fn the_window_is_installed_and_removed_with_the_program() {
+    // The window is three times the size of the command line program. Leaving
+    // it behind after an uninstall is the sort of thing that gets noticed.
+    let download = tempfile::tempdir().unwrap();
+    let prefix = tempfile::tempdir().unwrap();
+    a_download(download.path());
+    let window = download.path().join(desktop_name());
+    std::fs::write(&window, b"pretend window").unwrap();
+
+    let target = prefix.path().join(desktop_name());
+    place(&window, &target).unwrap();
+    assert!(target.is_file());
+
+    let options = Options {
+        prefix: Some(prefix.path().to_path_buf()),
+        keep_path: true,
+        no_menu: true,
+    };
+    let removed = uninstall(&options).unwrap();
+    assert_eq!(
+        removed.desktop.as_deref(),
+        Some(target.as_path()),
+        "the window was left behind"
+    );
+    assert!(!target.exists());
+}
+
+#[test]
+fn what_the_window_needs_is_asked_for_by_name() {
+    // On a machine that has everything this is empty, which is the ordinary
+    // case and says nothing useful. What matters is that when something *is*
+    // missing, the answer is a command somebody can run rather than a list of
+    // filenames they must work out for themselves.
+    let missing = desktop_needs();
+    for name in &missing {
+        assert!(
+            name.contains(".so"),
+            "{name} is not the name of a library the loader would look for"
+        );
+    }
+    let how = how_to_install_desktop_needs();
+    if cfg!(target_os = "linux") {
+        assert!(!how.is_empty(), "no advice at all on Linux");
+        assert!(
+            how.contains("install"),
+            "that is not an install command: {how}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

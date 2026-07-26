@@ -835,3 +835,168 @@ fn the_same_input_builds_the_same_bytes_twice() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The window in the archive
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_window_goes_in_the_archive_beside_the_command_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let licence = licence_file(dir.path());
+    let cli = binary_for(dir.path(), Platform::Linux);
+    let window = dir.path().join("onionskin-desktop");
+    std::fs::write(&window, b"\x7fELF pretend window").unwrap();
+
+    let entries =
+        contents_with_window(Platform::Linux, &cli, Some(&window), None, &licence).unwrap();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"onionskin"), "{names:?}");
+    assert!(names.contains(&"onionskin-desktop"), "{names:?}");
+
+    // Both have to be executable, or somebody unpacks the archive and is told
+    // permission denied by a program that is sitting right there.
+    for wanted in ["onionskin", "onionskin-desktop"] {
+        let entry = entries.iter().find(|e| e.name == wanted).unwrap();
+        assert!(
+            entry.mode & 0o111 != 0,
+            "{wanted} is not executable: {:o}",
+            entry.mode
+        );
+    }
+}
+
+#[test]
+fn a_window_for_the_wrong_platform_is_refused_too() {
+    // The same trap as the command line program, and just as invisible: an
+    // archive with a Linux window renamed to .exe looks entirely normal.
+    let dir = tempfile::tempdir().unwrap();
+    let licence = licence_file(dir.path());
+    let cli = binary_for(dir.path(), Platform::Windows);
+    let window = dir.path().join("wrong-desktop");
+    std::fs::write(&window, b"\x7fELF a Linux window").unwrap();
+
+    let error = contents_with_window(Platform::Windows, &cli, Some(&window), None, &licence)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(error.to_string().contains("Linux program"), "{error}");
+}
+
+#[test]
+fn the_mac_archive_is_an_application_bundle() {
+    // A bare executable on macOS is a terminal command: double-clicking it
+    // opens Terminal, with no icon and no name in the Dock. An application is
+    // a folder of a particular shape, and the Finder treats it as one thing.
+    let dir = tempfile::tempdir().unwrap();
+    let licence = licence_file(dir.path());
+    let cli = binary_for(dir.path(), Platform::MacOs);
+    let window = dir.path().join("onionskin-desktop");
+    std::fs::write(&window, b"\xcf\xfa\xed\xfe pretend window").unwrap();
+
+    let entries =
+        contents_with_window(Platform::MacOs, &cli, Some(&window), None, &licence).unwrap();
+    let bundle = mac_bundle(&entries, "0.1.0");
+    let names: Vec<&str> = bundle.iter().map(|e| e.name.as_str()).collect();
+
+    for wanted in [
+        "Onionskin.app/",
+        "Onionskin.app/Contents/",
+        "Onionskin.app/Contents/MacOS/",
+        "Onionskin.app/Contents/Info.plist",
+        "Onionskin.app/Contents/PkgInfo",
+        "Onionskin.app/Contents/MacOS/Onionskin",
+    ] {
+        assert!(
+            names.iter().any(|n| *n == wanted || *n == wanted.trim_end_matches('/')),
+            "{wanted} is not in the bundle: {names:?}"
+        );
+    }
+    // The command line program stays outside the bundle: a path buried inside
+    // one is not a path anybody types.
+    assert!(names.contains(&"onionskin"), "{names:?}");
+
+    let plist = bundle
+        .iter()
+        .find(|e| e.name.ends_with("Info.plist"))
+        .expect("no Info.plist");
+    let text = String::from_utf8_lossy(&plist.bytes);
+    // The executable named in the plist has to be the one that is actually
+    // there, or macOS reports the application as damaged.
+    assert!(
+        text.contains("<key>CFBundleExecutable</key><string>Onionskin</string>"),
+        "{text}"
+    );
+    assert!(text.contains("<string>0.1.0</string>"), "{text}");
+    // Without this, macOS runs the window at half resolution and scales it up,
+    // and every letter is soft.
+    assert!(text.contains("NSHighResolutionCapable"), "{text}");
+}
+
+#[test]
+fn a_debian_package_with_a_window_gets_a_menu_entry() {
+    // A package that installs a window and no menu entry has installed
+    // something invisible: people look in the applications menu, not in
+    // /usr/bin.
+    let dir = tempfile::tempdir().unwrap();
+    let licence = licence_file(dir.path());
+    let cli = binary_for(dir.path(), Platform::Linux);
+    let window = dir.path().join("onionskin-desktop");
+    std::fs::write(&window, b"\x7fELF pretend window").unwrap();
+
+    let entries =
+        contents_with_window(Platform::Linux, &cli, Some(&window), None, &licence).unwrap();
+    let laid_out = deb_contents(&entries);
+    let names: Vec<&str> = laid_out.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"./usr/bin/onionskin-desktop"), "{names:?}");
+    assert!(
+        names.contains(&"./usr/share/applications/onionskin.desktop"),
+        "{names:?}"
+    );
+
+    let entry = laid_out
+        .iter()
+        .find(|e| e.name.ends_with("onionskin.desktop"))
+        .unwrap();
+    let text = String::from_utf8_lossy(&entry.bytes);
+    assert!(text.contains("Exec=onionskin-desktop"), "{text}");
+    assert!(text.contains("Terminal=false"), "{text}");
+
+    // And a package without a window gets no menu entry, because there would
+    // be nothing for it to open.
+    let plain = deb_contents(&contents(Platform::Linux, &cli, None, &licence).unwrap());
+    assert!(
+        !plain.iter().any(|e| e.name.ends_with("onionskin.desktop")),
+        "a menu entry with nothing to launch"
+    );
+}
+
+#[test]
+fn dpkg_reads_a_package_that_has_a_window_in_it() {
+    if !have("dpkg-deb") {
+        eprintln!("no dpkg-deb on this machine; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let licence = licence_file(dir.path());
+    let cli = binary_for(dir.path(), Platform::Linux);
+    let window = dir.path().join("onionskin-desktop");
+    std::fs::write(&window, b"\x7fELF pretend window").unwrap();
+
+    let entries =
+        contents_with_window(Platform::Linux, &cli, Some(&window), None, &licence).unwrap();
+    let package = dir.path().join("onionskin_0.1.0_amd64.deb");
+    std::fs::write(
+        &package,
+        deb("0.1.0", "amd64", &deb_contents(&entries)).unwrap(),
+    )
+    .unwrap();
+
+    let out = dir.path().join("root");
+    std::fs::create_dir_all(&out).unwrap();
+    run(
+        "dpkg-deb",
+        &["--extract", package.to_str().unwrap(), out.to_str().unwrap()],
+    );
+    assert!(out.join("usr/bin/onionskin-desktop").is_file());
+    assert!(out.join("usr/share/applications/onionskin.desktop").is_file());
+}

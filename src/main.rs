@@ -100,6 +100,10 @@ struct PackageArgs {
     /// The compiled binary to package. The default is the running one.
     #[arg(long)]
     binary: Option<PathBuf>,
+    /// The desktop window to package. The default is whatever sits beside the
+    /// command line program.
+    #[arg(long)]
+    desktop: Option<PathBuf>,
     /// The PDF renderer to bundle. The default is whatever sits beside it.
     #[arg(long)]
     library: Option<PathBuf>,
@@ -2223,6 +2227,24 @@ fn cmd_doctor() -> Result<ExitCode, String> {
         }
     }
 
+    // The window. Not needed by anything on the command line, so a machine
+    // without it is not broken — but somebody who double-clicks the desktop
+    // program and gets nothing deserves to be told why here.
+    let missing = onionskin::install::desktop_needs();
+    if missing.is_empty() {
+        println!("  The window      ok — run onionskin-desktop");
+    } else {
+        println!(
+            "  The window      not available\n      \
+             The desktop window needs {} from this system, which {} not here.\n    \
+             Everything on the command line works without {}.\n      {}",
+            missing.join(", "),
+            if missing.len() == 1 { "is" } else { "are" },
+            if missing.len() == 1 { "it" } else { "them" },
+            onionskin::install::how_to_install_desktop_needs()
+        );
+    }
+
     // LibreOffice: needed only for Word documents.
     match onionskin::render::find_soffice() {
         Some(path) => println!("  Word documents  ok ({})", path.display()),
@@ -2481,6 +2503,9 @@ fn cmd_install(args: InstallArgs) -> Result<ExitCode, String> {
     if let Some(binary) = &report.binary {
         println!("Installed to {}", binary.display());
     }
+    if let Some(window) = &report.desktop {
+        println!("  with the window: {}", window.display());
+    }
     if let Some(library) = &report.library {
         println!("  with the PDF renderer: {}", library.display());
     }
@@ -2513,6 +2538,7 @@ fn cmd_uninstall(args: InstallArgs) -> Result<ExitCode, String> {
     let report = install::uninstall(&options).map_err(|e| e.to_string())?;
     for (what, path) in [
         ("removed", report.binary.as_ref()),
+        ("removed", report.desktop.as_ref()),
         ("removed", report.library.as_ref()),
         ("removed", report.menu_entry.as_ref()),
         ("tidied", report.profile.as_ref()),
@@ -2577,9 +2603,31 @@ fn cmd_package(args: PackageArgs) -> Result<ExitCode, String> {
         ));
     }
 
-    let written = package::build(
+    // The window, if one was built. Looked for beside the command line program
+    // by the name cargo gives it, so the ordinary case needs no arguments.
+    let desktop = match args.desktop {
+        Some(path) => {
+            if !path.is_file() {
+                return Err(format!("There is no file at {}.", path.display()));
+            }
+            Some(path)
+        }
+        None => binary
+            .parent()
+            .map(|dir| {
+                dir.join(if platform == package::Platform::Windows {
+                    "onionskin-desktop.exe"
+                } else {
+                    "onionskin-desktop"
+                })
+            })
+            .filter(|path| path.is_file()),
+    };
+
+    let written = package::build_with_window(
         platform,
         &binary,
+        desktop.as_deref(),
         library.as_deref(),
         &licence,
         &args.version,

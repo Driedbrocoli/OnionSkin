@@ -46,13 +46,13 @@ pub fn show(state: &mut State, room: &mut Room) {
         "Print only what changed, onto the sheet you already have.",
     );
 
-    file_row(
+    widgets::file_row(
         room.ui,
         "The document as it was printed",
         &mut state.original,
         &["pdf", "docx", "odt", "rtf", "txt"],
     );
-    file_row(
+    widgets::file_row(
         room.ui,
         "The edited copy",
         &mut state.edited,
@@ -202,41 +202,6 @@ fn start(state: &mut State, room: &mut Room) {
             Err(e) => Outcome::refused(e.to_string()),
         }
     });
-}
-
-/// A labelled row with the chosen file and a button to change it.
-fn file_row(ui: &mut egui::Ui, label: &str, slot: &mut Option<PathBuf>, kinds: &[&str]) {
-    ui.label(egui::RichText::new(label).strong());
-    ui.horizontal(|ui| {
-        if ui.button("Choose…").clicked() {
-            if let Some(picked) = rfd::FileDialog::new()
-                .add_filter("Documents", kinds)
-                .pick_file()
-            {
-                *slot = Some(picked);
-            }
-        }
-        match slot {
-            Some(path) => {
-                ui.label(
-                    egui::RichText::new(
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                    )
-                    .monospace(),
-                )
-                .on_hover_text(path.display().to_string());
-                if ui.small_button("✕").clicked() {
-                    *slot = None;
-                }
-            }
-            None => {
-                widgets::hint(ui, "nothing chosen");
-            }
-        }
-    });
-    ui.add_space(6.0);
 }
 
 /// One safety check, as a sentence a person can act on.
