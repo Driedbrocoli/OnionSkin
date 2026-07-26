@@ -15,7 +15,9 @@ use onionskin::calibrate;
 use onionskin::document::{Document, Item};
 use onionskin::font::{suggest_system_font, EmbeddedFont};
 use onionskin::geometry::{parse_page, PageSize};
+use onionskin::install;
 use onionskin::letters;
+use onionskin::package;
 use onionskin::pdf::{write_delta, Font, LineFont, PlacedLine};
 use onionskin::pipeline;
 use onionskin::printer;
@@ -79,6 +81,48 @@ enum Command {
     Send(SendArgs),
     /// Scan a sheet from a multifunction printer over the network.
     Fetch(FetchArgs),
+
+    /// Put Onionskin somewhere your computer can find it.
+    Install(InstallArgs),
+    /// Take it off again.
+    Uninstall(InstallArgs),
+    /// Build the archive people download. For making a release.
+    Package(PackageArgs),
+}
+
+#[derive(clap::Args)]
+struct PackageArgs {
+    /// Which platform the binary is for. The default is this machine's.
+    #[arg(long)]
+    platform: Option<String>,
+    /// The compiled binary to package. The default is the running one.
+    #[arg(long)]
+    binary: Option<PathBuf>,
+    /// The PDF renderer to bundle. The default is whatever sits beside it.
+    #[arg(long)]
+    library: Option<PathBuf>,
+    /// The licence text. The default is LICENSE in the current directory.
+    #[arg(long)]
+    licence: Option<PathBuf>,
+    /// The version to name the archive after.
+    #[arg(long, default_value = env!("CARGO_PKG_VERSION"))]
+    version: String,
+    /// Where to write the archives.
+    #[arg(long, default_value = "dist")]
+    out: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct InstallArgs {
+    /// Install here instead of the usual per-user place.
+    #[arg(long)]
+    prefix: Option<PathBuf>,
+    /// Do not touch any shell profile.
+    #[arg(long)]
+    keep_path: bool,
+    /// Do not add an applications-menu entry.
+    #[arg(long)]
+    no_menu: bool,
 }
 
 #[derive(clap::Args)]
@@ -628,6 +672,9 @@ fn run() -> Result<ExitCode, String> {
         Command::Printers(args) => cmd_printers(args),
         Command::Send(args) => cmd_send(args),
         Command::Fetch(args) => cmd_fetch(args),
+        Command::Install(args) => cmd_install(args),
+        Command::Uninstall(args) => cmd_uninstall(args),
+        Command::Package(args) => cmd_package(args),
     }
 }
 
@@ -2083,4 +2130,172 @@ fn cmd_fetch(args: FetchArgs) -> Result<ExitCode, String> {
         args.page
     );
     Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// Installing
+// ---------------------------------------------------------------------------
+
+fn install_options(args: &InstallArgs) -> install::Options {
+    install::Options {
+        prefix: args.prefix.clone(),
+        keep_path: args.keep_path,
+        no_menu: args.no_menu,
+    }
+}
+
+fn cmd_install(args: InstallArgs) -> Result<ExitCode, String> {
+    let options = install_options(&args);
+    let report = install::install(&options).map_err(|e| e.to_string())?;
+
+    if let Some(binary) = &report.binary {
+        println!("Installed to {}", binary.display());
+    }
+    if let Some(library) = &report.library {
+        println!("  with the PDF renderer: {}", library.display());
+    }
+    if let Some(entry) = &report.menu_entry {
+        println!("  and a menu entry: {}", entry.display());
+    }
+    if let Some(profile) = &report.profile {
+        println!("  and a line in {}", profile.display());
+        println!("\nOpen a new terminal, or run:  . {}", profile.display());
+    } else if report.already_on_path {
+        println!("\nThat folder is already on your path, so it is ready to use.");
+    }
+    for note in &report.notes {
+        println!("\n{note}");
+    }
+
+    println!("\nTry it:\n  onionskin doctor");
+    println!("\nTo remove it later:  onionskin uninstall");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_uninstall(args: InstallArgs) -> Result<ExitCode, String> {
+    let options = install_options(&args);
+    let (binary, installed) = install::status(&options);
+    if !installed {
+        println!("Nothing installed at {}.", binary.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let report = install::uninstall(&options).map_err(|e| e.to_string())?;
+    for (what, path) in [
+        ("removed", report.binary.as_ref()),
+        ("removed", report.library.as_ref()),
+        ("removed", report.menu_entry.as_ref()),
+        ("tidied", report.profile.as_ref()),
+    ] {
+        if let Some(path) = path {
+            println!("{what} {}", path.display());
+        }
+    }
+    for note in &report.notes {
+        println!("\n{note}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// Packaging
+// ---------------------------------------------------------------------------
+
+fn cmd_package(args: PackageArgs) -> Result<ExitCode, String> {
+    let platform = match &args.platform {
+        Some(text) => package::Platform::parse(text)
+            .ok_or_else(|| format!("I do not know the platform '{text}'. Try linux, macos or windows."))?,
+        None => this_platform(),
+    };
+
+    // The running binary, unless told otherwise. Packaging on the machine that
+    // built it is the ordinary case, and asking for a path there would only be
+    // a chance to give the wrong one.
+    let binary = match args.binary {
+        Some(path) => path,
+        None => std::env::current_exe().map_err(|e| format!("could not find this program: {e}"))?,
+    };
+    if !binary.is_file() {
+        return Err(format!("There is no file at {}.", binary.display()));
+    }
+
+    // The renderer, if it is to hand. Not finding one is worth saying out loud
+    // rather than shipping an archive that quietly cannot compare documents.
+    let library = match args.library {
+        Some(path) => {
+            if !path.is_file() {
+                return Err(format!("There is no file at {}.", path.display()));
+            }
+            Some(path)
+        }
+        None => binary
+            .parent()
+            .map(|dir| dir.join(platform.library_name()))
+            .filter(|path| path.is_file()),
+    };
+
+    // The licence has to travel with the binary — that is the whole reason
+    // this command exists rather than a shell script somebody runs by hand.
+    let licence = args.licence.unwrap_or_else(|| PathBuf::from("LICENSE"));
+    if !licence.is_file() {
+        return Err(format!(
+            "I could not find the licence at {}.\n\
+             Onionskin is MIT and the licence must ship with it, so I will not \
+             build an archive without one.\n\
+             Run this from the source directory, or say --licence <path>.",
+            licence.display()
+        ));
+    }
+
+    let written = package::build(
+        platform,
+        &binary,
+        library.as_deref(),
+        &licence,
+        &args.version,
+        &args.out,
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("Packaged Onionskin {} for {}:", args.version, platform.name());
+    for path in &written {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        println!("  {}  ({})", path.display(), human_size(size));
+    }
+    match &library {
+        Some(path) => println!("\nWith the PDF renderer from {}.", path.display()),
+        None => println!(
+            "\nWithout a PDF renderer: none was beside the binary.\n\
+             Everything works except comparing two documents. Put {} next to the \
+             binary, or say --library <path>.",
+            platform.library_name()
+        ),
+    }
+    println!(
+        "\nInside each: the program, LICENCE, THIRD-PARTY-LICENCES and a README\n\
+         saying to run '{} install'.",
+        platform.binary_name()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The platform this copy was compiled for.
+fn this_platform() -> package::Platform {
+    if cfg!(windows) {
+        package::Platform::Windows
+    } else if cfg!(target_os = "macos") {
+        package::Platform::MacOs
+    } else {
+        package::Platform::Linux
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} kB", bytes / 1024)
+    } else {
+        format!("{bytes} bytes")
+    }
 }

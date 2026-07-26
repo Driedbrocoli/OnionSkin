@@ -572,6 +572,20 @@ pub fn engine() -> Result<EngineGuard, RenderError> {
     })
 }
 
+/// Where a system package puts the renderer.
+///
+/// A `.deb` cannot drop a private library into `/usr/bin` beside the binary —
+/// Debian puts it in a directory of the package's own — so the packager's
+/// layout and this list have to agree. When they do not, an installed copy
+/// loses PDF rendering and nothing says why. There is a test in
+/// [`crate::package`] holding the two together.
+pub const PACKAGED_LIBRARY_PATHS: &[&str] = &[
+    "/usr/lib/onionskin/libpdfium.so",
+    "/usr/local/lib/onionskin/libpdfium.so",
+    "/usr/lib/onionskin/libpdfium.dylib",
+    "/usr/local/lib/onionskin/libpdfium.dylib",
+];
+
 impl Engine {
     /// Find and bind pdfium.
     ///
@@ -597,6 +611,9 @@ impl Engine {
                     candidates.push(dir.join(name));
                 }
             }
+        }
+        for path in PACKAGED_LIBRARY_PATHS {
+            candidates.push(PathBuf::from(*path));
         }
         for path in [
             "/usr/lib/libpdfium.so",

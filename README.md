@@ -16,18 +16,44 @@ Linux, Windows and macOS.
 
 ## Install
 
+Download the archive for your machine, unpack it, and run the program once with
+`install`. It copies itself somewhere your computer looks for programs, brings
+the PDF renderer along, and adds a menu entry. There is no separate setup
+program, and nothing asks for an administrator password — it installs into your
+own account.
+
 ```bash
-cargo build --release        # the binary lands in target/release/onionskin
+./onionskin install          # Windows: onionskin.exe install
 onionskin doctor             # what works on this machine, and what is missing
 ```
+
+`onionskin uninstall` removes exactly what was put there and says what it
+removed. On Debian, Ubuntu and Mint the `.deb` works too: `sudo dpkg -i
+onionskin_*.deb`.
 
 Two things are needed beyond the binary itself, and `doctor` will tell you if
 either is absent:
 
-* **pdfium** draws PDF pages. Put `libpdfium` beside the binary, or point
-  `ONIONSKIN_PDFIUM` at it.
+* **pdfium** draws PDF pages. It is inside the archive, and `install` puts it
+  where the program looks. Building from source, put `libpdfium` beside the
+  binary or point `ONIONSKIN_PDFIUM` at it.
 * **LibreOffice** converts Word documents, and only those — PDFs work without it
-  ([download](https://www.libreoffice.org/download/)).
+  ([download](https://www.libreoffice.org/download/)). It is deliberately *not*
+  bundled: it is under the MPL, which would put obligations on anyone passing
+  the archive on. See `THIRD-PARTY-LICENCES` in the download.
+
+### From source
+
+```bash
+cargo build --release        # the binary lands in target/release/onionskin
+cargo run --release -- package --out dist/   # build the archives yourself
+```
+
+`package` writes a `.tar.gz` and a `.deb` on Linux, a `.tar.gz` on macOS and a
+`.zip` on Windows, each holding the binary, the renderer, both licence files and
+a README. Built from the same input twice it produces the same bytes, so a
+download can be checked against a hash somebody else published. It refuses to
+put a Linux binary in a Windows archive.
 
 ## Four ways to work
 

@@ -1,0 +1,353 @@
+//! Tests for installing and uninstalling.
+
+use super::*;
+
+/// A pretend Onionskin binary, and a pretend rendering library beside it.
+fn a_download(dir: &Path) -> PathBuf {
+    let binary = dir.join(binary_name());
+    std::fs::write(&binary, b"pretend onionskin").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for name in library_names() {
+        std::fs::write(dir.join(name), b"pretend pdfium").unwrap();
+    }
+    binary
+}
+
+// ---------------------------------------------------------------------------
+// Where things go
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_default_place_needs_no_administrator() {
+    // A program that asks for a password to put a file on your own computer
+    // teaches people to give passwords to programs.
+    let prefix = default_prefix();
+    let text = prefix.to_string_lossy();
+    assert!(
+        !text.starts_with("/usr/") && !text.starts_with("/opt/"),
+        "{text} would need a password"
+    );
+    assert!(
+        prefix.starts_with(home()),
+        "{text} is not inside the home directory"
+    );
+}
+
+#[test]
+fn the_binary_is_named_for_the_platform() {
+    let name = binary_name();
+    if cfg!(windows) {
+        assert_eq!(name, "onionskin.exe");
+    } else {
+        assert_eq!(name, "onionskin");
+    }
+}
+
+#[test]
+fn a_directory_already_on_the_path_is_recognised() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!on_path(dir.path()), "a fresh directory is not on the path");
+
+    // Put it on, and it should be found — including through a different but
+    // equivalent spelling of the same directory.
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut entries: Vec<PathBuf> = std::env::split_paths(&existing).collect();
+    entries.push(dir.path().to_path_buf());
+    let joined = std::env::join_paths(entries).unwrap();
+    std::env::set_var("PATH", &joined);
+
+    assert!(on_path(dir.path()));
+    let roundabout = dir.path().join("sub/..");
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    assert!(on_path(&roundabout), "the same directory written another way");
+
+    std::env::set_var("PATH", existing);
+}
+
+// ---------------------------------------------------------------------------
+// Installing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn installing_puts_the_program_and_its_library_in_place() {
+    let download = tempfile::tempdir().unwrap();
+    let prefix = tempfile::tempdir().unwrap();
+    a_download(download.path());
+
+    // `install` copies the *running* program, so drive the pieces directly
+    // with the download standing in for it.
+    let target = prefix.path().join(binary_name());
+    place(&download.path().join(binary_name()), &target).unwrap();
+    assert!(target.is_file());
+    assert_eq!(std::fs::read(&target).unwrap(), b"pretend onionskin");
+
+    for name in library_names() {
+        let from = download.path().join(name);
+        if from.is_file() {
+            let to = prefix.path().join(name);
+            place(&from, &to).unwrap();
+            assert!(to.is_file(), "{name} was not brought along");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn what_is_installed_can_actually_be_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let download = tempfile::tempdir().unwrap();
+    let prefix = tempfile::tempdir().unwrap();
+    a_download(download.path());
+
+    let target = prefix.path().join(binary_name());
+    place(&download.path().join(binary_name()), &target).unwrap();
+
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+    assert!(mode & 0o100 != 0, "not executable by its owner: {mode:o}");
+}
+
+#[test]
+fn installing_over_itself_does_not_empty_the_file() {
+    // Running `onionskin install` from the very place it installs to is an
+    // easy thing to do by accident, and a plain copy truncates the file first.
+    let dir = tempfile::tempdir().unwrap();
+    let binary = a_download(dir.path());
+
+    place(&binary, &binary).unwrap();
+    assert_eq!(
+        std::fs::read(&binary).unwrap(),
+        b"pretend onionskin",
+        "the program deleted itself"
+    );
+}
+
+#[test]
+fn a_real_install_and_uninstall_leaves_nothing_behind() {
+    let prefix = tempfile::tempdir().unwrap();
+    let options = Options {
+        prefix: Some(prefix.path().to_path_buf()),
+        keep_path: true,
+        no_menu: true,
+    };
+
+    let report = install(&options).unwrap();
+    let binary = report.binary.expect("nothing was installed");
+    assert!(binary.is_file());
+    // It is this very program, so it must still be the real thing.
+    assert!(std::fs::metadata(&binary).unwrap().len() > 1000);
+
+    let (where_it_is, installed) = status(&options);
+    assert!(installed);
+    assert_eq!(where_it_is, binary);
+
+    let removed = uninstall(&options).unwrap();
+    assert_eq!(removed.binary.as_deref(), Some(binary.as_path()));
+    assert!(!binary.exists(), "the binary is still there");
+    assert!(!status(&options).1);
+}
+
+#[test]
+fn installing_twice_is_the_same_as_installing_once() {
+    let prefix = tempfile::tempdir().unwrap();
+    let options = Options {
+        prefix: Some(prefix.path().to_path_buf()),
+        keep_path: true,
+        no_menu: true,
+    };
+    let first = install(&options).unwrap();
+    let second = install(&options).unwrap();
+    assert_eq!(first.binary, second.binary);
+    let _ = uninstall(&options);
+}
+
+#[test]
+fn a_missing_rendering_library_is_said_rather_than_hidden() {
+    let prefix = tempfile::tempdir().unwrap();
+    let options = Options {
+        prefix: Some(prefix.path().to_path_buf()),
+        keep_path: true,
+        no_menu: true,
+    };
+    let report = install(&options).unwrap();
+
+    // This binary is built by cargo, so nothing is beside it — which is
+    // exactly the case that has to be reported instead of failing quietly.
+    if report.library.is_none() {
+        assert!(
+            report.notes.iter().any(|n| n.contains("rendering library")),
+            "{:?}",
+            report.notes
+        );
+        assert!(
+            report.notes.iter().any(|n| n.contains("doctor")),
+            "it should say how to check: {:?}",
+            report.notes
+        );
+    }
+    let _ = uninstall(&options);
+}
+
+// ---------------------------------------------------------------------------
+// The path, and the shell profile
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_path_line_is_written_in_the_shells_own_syntax() {
+    let bash = path_line(Path::new("/home/someone/.local/bin"), Path::new("/home/x/.profile"));
+    assert!(bash.starts_with("export PATH="), "{bash}");
+    assert!(bash.contains("/home/someone/.local/bin"));
+
+    let fish = path_line(
+        Path::new("/home/someone/.local/bin"),
+        Path::new("/home/x/.config/fish/config.fish"),
+    );
+    assert!(fish.starts_with("fish_add_path"), "{fish}");
+}
+
+#[test]
+fn every_line_written_is_marked_so_it_can_be_found_again() {
+    // A profile is somebody's own file. Anything put in it has to be
+    // identifiable, or it can never be taken out safely.
+    for profile in ["/home/x/.profile", "/home/x/.config/fish/config.fish"] {
+        let line = path_line(Path::new("/somewhere"), Path::new(profile));
+        assert!(line.contains(MARKER), "{line}");
+    }
+}
+
+#[test]
+fn the_profile_chosen_is_the_one_the_shell_reads() {
+    let before = std::env::var("SHELL").ok();
+
+    std::env::set_var("SHELL", "/bin/zsh");
+    assert!(shell_profile().ends_with(".zprofile"));
+
+    std::env::set_var("SHELL", "/usr/bin/fish");
+    assert!(shell_profile().to_string_lossy().contains("fish"));
+
+    std::env::set_var("SHELL", "/bin/sh");
+    let plain = shell_profile();
+    assert!(
+        plain.ends_with(".profile") || plain.ends_with(".bash_profile"),
+        "{plain:?}"
+    );
+
+    match before {
+        Some(shell) => std::env::set_var("SHELL", shell),
+        None => std::env::remove_var("SHELL"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_path_line_is_added_once_and_taken_out_cleanly() {
+    let fake_home = tempfile::tempdir().unwrap();
+    let prefix = tempfile::tempdir().unwrap();
+    let before_home = std::env::var("HOME").ok();
+    let before_shell = std::env::var("SHELL").ok();
+    std::env::set_var("HOME", fake_home.path());
+    std::env::set_var("SHELL", "/bin/sh");
+
+    // Something already in the profile, which must survive untouched.
+    let profile = fake_home.path().join(".profile");
+    std::fs::write(&profile, "export EDITOR=vi\n").unwrap();
+
+    let options = Options {
+        prefix: Some(prefix.path().to_path_buf()),
+        keep_path: false,
+        no_menu: true,
+    };
+    install(&options).unwrap();
+    install(&options).unwrap(); // twice, on purpose
+
+    let text = std::fs::read_to_string(&profile).unwrap();
+    assert_eq!(
+        text.matches(MARKER).count(),
+        1,
+        "the line was added twice:\n{text}"
+    );
+    assert!(text.contains("export EDITOR=vi"), "it ate the existing line");
+
+    uninstall(&options).unwrap();
+    let after = std::fs::read_to_string(&profile).unwrap();
+    assert!(!after.contains(MARKER), "the line was left behind:\n{after}");
+    assert!(
+        after.contains("export EDITOR=vi"),
+        "uninstalling ate somebody else's line:\n{after}"
+    );
+
+    match before_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+    match before_shell {
+        Some(shell) => std::env::set_var("SHELL", shell),
+        None => std::env::remove_var("SHELL"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The menu entry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_menu_entry_is_a_valid_desktop_file() {
+    let entry = desktop_entry(Path::new("/home/someone/.local/bin/onionskin"));
+    assert!(entry.starts_with("[Desktop Entry]"), "{entry}");
+    assert!(entry.contains("Type=Application"));
+    assert!(entry.contains("Name=Onionskin"));
+    assert!(
+        entry.contains("Exec=/home/someone/.local/bin/onionskin serve"),
+        "{entry}"
+    );
+    // It opens the browser interface, which needs a terminal to show the
+    // address it is running at.
+    assert!(entry.contains("Terminal=true"));
+}
+
+// ---------------------------------------------------------------------------
+// Uninstalling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn uninstalling_says_what_it_left_alone() {
+    let prefix = tempfile::tempdir().unwrap();
+    let options = Options {
+        prefix: Some(prefix.path().to_path_buf()),
+        keep_path: true,
+        no_menu: true,
+    };
+    install(&options).unwrap();
+
+    // Somebody's calibration profiles are their own work and are not the
+    // installer's to delete.
+    let profiles = crate::calibrate::profiles_dir().unwrap();
+    std::fs::write(profiles.join("keepme.json"), b"{}").unwrap();
+
+    let report = uninstall(&options).unwrap();
+    assert!(
+        report.notes.iter().any(|n| n.contains("calibration")),
+        "{:?}",
+        report.notes
+    );
+    assert!(
+        profiles.join("keepme.json").is_file(),
+        "it deleted the profiles"
+    );
+    let _ = std::fs::remove_file(profiles.join("keepme.json"));
+}
+
+#[test]
+fn uninstalling_what_was_never_installed_is_not_an_error() {
+    let prefix = tempfile::tempdir().unwrap();
+    let options = Options {
+        prefix: Some(prefix.path().to_path_buf()),
+        keep_path: true,
+        no_menu: true,
+    };
+    let report = uninstall(&options).unwrap();
+    assert_eq!(report.binary, None);
+}

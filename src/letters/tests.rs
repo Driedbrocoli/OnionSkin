@@ -937,3 +937,237 @@ fn recognition_without_a_usable_alphabet_leaves_the_marks_alone() {
     assert_eq!(page.letter_count(), 2);
     assert_eq!(page.read_count(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Small ink: punctuation, accents, and dust
+//
+// All three are marks too small to be a letter, and for a long time all three
+// were thrown away together by a single minimum height. What separates them is
+// not their size but what is around them, and every test here is a case where
+// judging by size alone gave the wrong answer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_full_stop_survives_at_the_size_people_actually_print() {
+    // At 10 pt a full stop is a third of a millimetre across — well under the
+    // half-millimetre floor that keeps dust out. Applying that floor before the
+    // lines were grouped silently deleted the punctuation from every page of
+    // body text that was ever scanned.
+    let Some(font) = dejavu() else { return };
+    for size in [8.0, 10.0, 11.0, 12.0] {
+        let mut sheet = Sheet::new(A4, 300.0);
+        sheet.text(&font, "End of report.", 30.0, 100.0, size);
+        let page = read_sheet_with(&sheet, &font, None);
+        let said = page.text_lossy();
+        assert!(
+            said.contains('.'),
+            "the full stop went missing at {size} pt: {said:?}"
+        );
+    }
+}
+
+#[test]
+fn a_colon_is_one_character_and_not_two_dots() {
+    // Neither dot of a colon is a base for the other, so the accent merge can
+    // never join them. Left apart, the upper dot is close enough to the letter
+    // before it to be taken for an accent on it, and "Date:" reads as "Daté".
+    let Some(font) = dejavu() else { return };
+    for size in [9.0, 11.0, 14.0] {
+        let mut sheet = Sheet::new(A4, 300.0);
+        sheet.text(&font, "Date: 4 June", 30.0, 100.0, size);
+        let page = read_sheet_with(&sheet, &font, None);
+        let said = page.text_lossy();
+        assert!(said.contains(':'), "no colon at {size} pt: {said:?}");
+        assert!(
+            said.starts_with("Date"),
+            "the colon's dot was eaten by the word at {size} pt: {said:?}"
+        );
+    }
+}
+
+#[test]
+fn an_i_keeps_its_dot_at_body_text_size() {
+    // The tittle of an `i` at 11 pt is under half a millimetre. Judged against
+    // the minimum letter height before it could be merged, it was thrown away,
+    // and the bare stem left behind matches a dotless `ı` better than an `i`.
+    let Some(font) = dejavu() else { return };
+    for size in [9.0, 11.0, 14.0] {
+        let mut sheet = Sheet::new(A4, 300.0);
+        sheet.text(&font, "the individual jumps", 30.0, 100.0, size);
+        let page = read_sheet_with(&sheet, &font, None);
+        let said = page.text_lossy();
+        assert!(
+            !said.contains('\u{131}') && !said.contains('\u{237}'),
+            "a dotless letter came back at {size} pt: {said:?}"
+        );
+        assert!(said.contains('i'), "no `i` at all at {size} pt: {said:?}");
+    }
+}
+
+#[test]
+fn dust_on_the_glass_is_still_thrown_away() {
+    // The other half of the bargain. Small ink is kept because it might be
+    // punctuation, so something has to stop a speck on the scanner from being
+    // reported as a letter — and what stops it is having no writing around it.
+    let Some(font) = dejavu() else { return };
+    let mut sheet = Sheet::new(A4, 300.0);
+    sheet.text(&font, "Report", 30.0, 100.0, 12.0);
+    // Three specks, well away from the writing.
+    sheet.box_mm(120.0, 40.0, 0.25, 0.25);
+    sheet.box_mm(60.0, 200.0, 0.3, 0.2);
+    sheet.box_mm(150.0, 250.0, 0.2, 0.3);
+
+    let page = read_sheet_with(&sheet, &font, None);
+    assert_eq!(page.lines.len(), 1, "the dust made lines: {:?}", page.text_lossy());
+    assert_eq!(
+        page.letter_count(),
+        6,
+        "Report is six letters, and the dust is not letters: {:?}",
+        page.text_lossy()
+    );
+}
+
+#[test]
+fn two_lines_of_writing_are_never_joined_into_one_character() {
+    // The rule that assembles a colon looks for two small marks one above the
+    // other. Two full stops at the end of consecutive lines are exactly that
+    // shape, and joining them would invent a character and destroy two.
+    let Some(font) = dejavu() else { return };
+    let mut sheet = Sheet::new(A4, 300.0);
+    // Single-spaced, which is the hard case: the closer the lines, the more
+    // the two full stops look like one colon. 11 pt set on 4.6 mm is about
+    // what a word processor calls single spacing.
+    sheet.text(&font, "first line.", 30.0, 100.0, 11.0);
+    sheet.text(&font, "second line.", 30.0, 104.6, 11.0);
+
+    let page = read_sheet_with(&sheet, &font, None);
+    assert_eq!(page.lines.len(), 2, "{:?}", page.text_lossy());
+    let said = page.text_lossy();
+    assert_eq!(said.matches('.').count(), 2, "{said:?}");
+    assert!(!said.contains(':'), "two full stops became a colon: {said:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Telling apart letters that are drawn the same
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_capital_i_and_a_lowercase_l_both_stay_in_the_alphabet() {
+    // In most sans-serif faces these are one rectangle, and a pass that drops
+    // characters drawn the same dropped one of them. Whichever went could then
+    // never be read, on any page, however clear the scan — and the page gave no
+    // sign of it. They differ in height, which is something that gets measured,
+    // so the matcher can tell them apart and must be given the chance.
+    let Some(font) = dejavu() else { return };
+    let alphabet = alphabet_of(&font);
+    let candidates = build_candidates(&font, &alphabet);
+    for want in ['I', 'l', '1', '0', 'O', 'o'] {
+        assert!(
+            candidates.iter().any(|c| c.ch == want),
+            "{want:?} is not in the alphabet at all"
+        );
+    }
+}
+
+#[test]
+fn a_hyphen_is_not_a_macron() {
+    // Every bar in Unicode is the same drawing once it is squared off to a
+    // stamp: hyphen, macron, underscore, overline. Only where it sits against
+    // the baseline separates them, and measuring that against the mark's own
+    // height — a third of a millimetre — saturates and tells you nothing.
+    let Some(font) = dejavu() else { return };
+    for size in [10.0, 12.0, 16.0] {
+        let mut sheet = Sheet::new(A4, 300.0);
+        sheet.text(&font, "part-time work", 30.0, 100.0, size);
+        let page = read_sheet_with(&sheet, &font, None);
+        let said = page.text_lossy();
+        assert!(
+            said.contains('-') || said.contains('\u{2010}'),
+            "no hyphen at {size} pt: {said:?}"
+        );
+        assert!(
+            !said.contains('\u{00af}') && !said.contains('_') && !said.contains('\u{2550}'),
+            "the hyphen came back as an overline or a rule at {size} pt: {said:?}"
+        );
+    }
+}
+
+#[test]
+fn the_type_size_is_measured_and_not_assumed() {
+    // A line of prose is mostly lowercase, so its tallest quarter are the
+    // ascenders of `b d f h k l` — which stand taller than a capital. Reading
+    // that height as a cap height makes every letter measure about a sixth
+    // shorter than it is, and then an `l` is exactly as tall as a dotless `ı`.
+    //
+    // The `ı` is what this checks, and not the `I`. A capital `I` and a
+    // lowercase `l` are the same rectangle in DejaVu and differ by three
+    // hundredths of an em — one and a half pixels at 11 pt on a 300 dpi scan —
+    // so which of the two comes back is not something the ink can settle and
+    // not something to write a test about. A dotless `ı` is nearly half an em
+    // shorter, and getting *that* wrong means the scale is wrong.
+    let Some(font) = dejavu() else { return };
+    let mut sheet = Sheet::new(A4, 300.0);
+    sheet.text(&font, "all the little bells", 30.0, 100.0, 11.0);
+
+    let page = read_sheet_with(&sheet, &font, None);
+    let said = page.text_lossy();
+    assert!(
+        !said.contains('\u{131}'),
+        "an `l` came back as a dotless `ı`: {said:?}"
+    );
+    let bars = said.matches('l').count() + said.matches('I').count();
+    assert_eq!(bars, 6, "six tall bars, however they were named: {said:?}");
+}
+
+#[test]
+fn a_page_of_ordinary_prose_is_read_almost_perfectly() {
+    // The whole of it, end to end, at the sizes people actually print. This is
+    // the test that would have caught every bug the ones above describe, and it
+    // is here so that a change which trades one of them for another shows up.
+    let Some(font) = dejavu() else { return };
+    let lines = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Invoice 2026-114: amount due 1,240.50 (net 30 days).",
+        "Item 7b - lithium cell, 3.7V, qty 18 @ 4.95 = 89.10",
+    ];
+    for size in [10.0, 11.0, 12.0] {
+        let mut sheet = Sheet::new(A4, 300.0);
+        for (index, line) in lines.iter().enumerate() {
+            sheet.text(&font, line, 15.0, 40.0 + index as f64 * size * 0.6, size);
+        }
+        let page = read_sheet_with(&sheet, &font, None);
+
+        let wanted: String = lines.concat().chars().filter(|c| !c.is_whitespace()).collect();
+        let got: String = page.text_lossy().chars().filter(|c| !c.is_whitespace()).collect();
+
+        // Counted as a subsequence, so one dropped letter costs one and does
+        // not shift everything after it into disagreement.
+        let right = common_run(&wanted, &got);
+        let share = right as f64 / wanted.chars().count() as f64;
+        assert!(
+            share >= 0.97,
+            "only {:.1}% right at {size} pt\n want: {wanted}\n  got: {got}",
+            share * 100.0
+        );
+    }
+}
+
+/// How many characters of `wanted` appear in `got`, in order.
+fn common_run(wanted: &str, got: &str) -> usize {
+    let a: Vec<char> = wanted.chars().collect();
+    let b: Vec<char> = got.chars().collect();
+    let mut row = vec![0usize; b.len() + 1];
+    for &x in &a {
+        let mut diagonal = 0;
+        for j in 0..b.len() {
+            let above = row[j + 1];
+            row[j + 1] = if x == b[j] {
+                diagonal + 1
+            } else {
+                row[j + 1].max(row[j])
+            };
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}

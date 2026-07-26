@@ -525,16 +525,31 @@ fn a_file_that_is_not_a_document_is_reported_cleanly() {
     assert!(err.contains("unsupported file type"), "{err}");
 }
 
+/// Every `onionskin-` scratch directory in the shared temp directory, by name.
+fn workspaces_now() -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(std::env::temp_dir())
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("onionskin-"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[test]
 fn the_workspace_does_not_survive_the_run() {
     let Ok(_) = render::engine() else { return };
-    let before = std::fs::read_dir(std::env::temp_dir())
-        .map(|d| {
-            d.filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().starts_with("onionskin-"))
-                .count()
-        })
-        .unwrap_or(0);
+    // The temp directory is shared with every other test in this binary, and
+    // they run at the same time as this one. Counting what is in it therefore
+    // says nothing on its own: another test's workspace, alive for the moment
+    // the second count is taken, reads exactly like a leak.
+    //
+    // What distinguishes the two is time. A workspace somebody else is using
+    // goes away when they finish with it; one this run leaked never does. So
+    // the directories that appeared are watched until they go, and only a
+    // directory that stays is a leak.
+    let before = workspaces_now();
 
     let dir = tempfile::tempdir().unwrap();
     let original = a_pdf(dir.path(), "before.pdf", &[("Report", 40.0)]);
@@ -545,14 +560,15 @@ fn the_workspace_does_not_survive_the_run() {
     );
     run(&original, &edited, &dir.path().join("delta.pdf"), &quick()).unwrap();
 
-    let after = std::fs::read_dir(std::env::temp_dir())
-        .map(|d| {
-            d.filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().starts_with("onionskin-"))
-                .count()
-        })
-        .unwrap_or(0);
-    assert!(after <= before, "a workspace was left behind");
+    let mut lingering: Vec<String> = Vec::new();
+    for _ in 0..100 {
+        lingering = workspaces_now().difference(&before).cloned().collect();
+        if lingering.is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("a workspace was left behind: {lingering:?}");
 }
 
 // ---------------------------------------------------------------------------

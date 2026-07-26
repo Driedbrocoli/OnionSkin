@@ -598,6 +598,7 @@ dependencies = [
  "anyhow",
  "approx",
  "clap",
+ "flate2",
  "image",
  "lopdf",
  "pdfium-render",

@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.75"
 description = "Add words to a page that is already printed."
 license = "MIT"
-readme = "../README.md"
+readme = "README.md"
 
 [dependencies]
 # PDF structure: read boxes and rotation, transform content, write pages.
@@ -22,6 +22,10 @@ anyhow = "1"
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 ttf-parser = "0.25.1"
+# Compressing the download. `rust_backend` is not optional: it is miniz_oxide,
+# which is Rust — the zlib backend would link a C library. Already in the tree
+# by way of `image`, so this costs no new dependency.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 approx = "0.5"
