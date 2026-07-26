@@ -696,10 +696,33 @@ impl Engine {
         } else {
             format!("\n    Tried: {}", tried.join("\n           "))
         };
+        // Naming the download matters. "Put libpdfium next to the binary" is
+        // useless advice to somebody who has never heard of pdfium and has no
+        // idea where one comes from, and that is most people who will read it.
+        let file = if cfg!(windows) {
+            "pdfium.dll"
+        } else if cfg!(target_os = "macos") {
+            "libpdfium.dylib"
+        } else {
+            "libpdfium.so"
+        };
+        let build = if cfg!(windows) {
+            "pdfium-win-x64.tgz"
+        } else if cfg!(target_os = "macos") {
+            "pdfium-mac-arm64.tgz (or -mac-x64 on an Intel Mac)"
+        } else {
+            "pdfium-linux-x64.tgz"
+        };
         Err(RenderError::Pdfium(format!(
-            "the PDF rendering library was not found. Onionskin draws pages with \
-             pdfium.\n    Put libpdfium next to the onionskin binary, or set \
-             ONIONSKIN_PDFIUM to it.{detail}"
+            "the PDF rendering library was not found.\n    \
+             Onionskin draws PDF pages with pdfium, which is Google's renderer \
+             from Chromium.\n    Everything works without it except comparing \
+             two documents.\n\n    \
+             Get it from https://github.com/bblanchon/pdfium-binaries/releases\n    \
+             — download {build}, and put the {file} inside it next to the\n      \
+             onionskin program. Or set ONIONSKIN_PDFIUM to wherever you keep it.\n\n    \
+             It is BSD and Apache licensed, like Onionskin itself, so there is \
+             nothing to agree to.{detail}"
         )))
     }
 

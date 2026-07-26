@@ -16,52 +16,100 @@ Linux, Windows and macOS.
 
 ## Install
 
-Download the archive for your machine, unpack it, and run the program once with
-`install`. It copies itself somewhere your computer looks for programs, brings
-the PDF renderer along, and adds a menu entry. There is no separate setup
-program, and nothing asks for an administrator password — it installs into your
-own account.
+**There is no published release yet, so this is built from source.** It takes
+about five minutes, most of it waiting. The steps below are the ones that were
+actually run on a clean clone, in this order, and they work.
+
+### 1. Rust
+
+If `cargo --version` says nothing, get it from [rustup.rs](https://rustup.rs) —
+one command on every platform, and it installs into your own account.
+
+### 2. Build it
 
 ```bash
+git clone https://github.com/driedbrocoli/onionskin
+cd onionskin
+cargo build --release        # about two minutes
+```
+
+The program is now `target/release/onionskin`. It already works:
+
+```bash
+./target/release/onionskin doctor
+```
+
+### 3. The PDF renderer
+
+`doctor` will say `PDF rendering MISSING`, and tell you what to do about it.
+Onionskin draws PDF pages with **pdfium**, Google's renderer from Chromium. It
+is not on crates.io because it is a C++ library, so it is fetched once:
+
+```bash
+# Linux — on macOS use pdfium-mac-arm64.tgz, on Windows pdfium-win-x64.tgz
+curl -L -o pdfium.tgz \
+  https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz
+tar -xzf pdfium.tgz lib/libpdfium.so
+cp lib/libpdfium.so target/release/          # beside the binary is where it looks
+```
+
+It is BSD and Apache licensed, like Onionskin, so there is nothing to agree to.
+**Everything works without it except comparing two documents** — writing on a
+scan, typing onto a form, drawing, reading letters and printing all need
+nothing installed.
+
+### 4. Install it
+
+```bash
+cd target/release
 ./onionskin install          # Windows: onionskin.exe install
+```
+
+That copies the program and the renderer into `~/.local/bin` (or
+`%LOCALAPPDATA%\Onionskin`), adds an applications-menu entry, and puts that
+folder on your path. **Nothing asks for an administrator password**: it installs
+into your own account, and a program that demands a password to put a file on
+your own computer teaches people to give passwords to programs.
+
+Open a new terminal, and:
+
+```bash
 onionskin doctor             # what works on this machine, and what is missing
+onionskin --help             # everything it can do
+onionskin serve              # the browser interface, on this machine only
 ```
 
 `onionskin uninstall` removes exactly what was put there and says what it
-removed. On Debian, Ubuntu and Mint the `.deb` works too: `sudo dpkg -i
-onionskin_*.deb`.
+removed. It leaves your calibration profiles alone, and says so.
 
-Two things are needed beyond the binary itself, and `doctor` will tell you if
-either is absent:
-
-* **pdfium** draws PDF pages. It is inside the archive, and `install` puts it
-  where the program looks. Building from source, put `libpdfium` beside the
-  binary or point `ONIONSKIN_PDFIUM` at it.
-* **LibreOffice** opens everything that is not already a PDF or an image —
-  `.docx`, `.odt`, `.rtf`, `.xlsx`, `.ods`, `.pptx`, `.odp`, `.vsdx` and the
-  rest of the list in `render::CONVERTIBLE`
-  ([download](https://www.libreoffice.org/download/)). PDFs and scans need it
-  not at all. It is deliberately *not* bundled: it is under the MPL, which would
-  put obligations on anyone passing the archive on. See `THIRD-PARTY-LICENCES`
-  in the download. Onionskin looks for it wherever it installs — package
-  manager, Snap, Flatpak, `/Applications`, `Program Files` — and
-  `ONIONSKIN_SOFFICE` points at it if it is somewhere else.
-
-  Writing `.docx` and `.odt` needs nothing installed: Onionskin writes them
-  itself.
-
-### From source
+### Making the archives other people install from
 
 ```bash
-cargo build --release        # the binary lands in target/release/onionskin
-cargo run --release -- package --out dist/   # build the archives yourself
+cargo run --release -- package --out dist/
 ```
 
-`package` writes a `.tar.gz` and a `.deb` on Linux, a `.tar.gz` on macOS and a
-`.zip` on Windows, each holding the binary, the renderer, both licence files and
-a README. Built from the same input twice it produces the same bytes, so a
-download can be checked against a hash somebody else published. It refuses to
-put a Linux binary in a Windows archive.
+This writes a `.tar.gz` and a `.deb` on Linux, a `.tar.gz` on macOS and a `.zip`
+on Windows — each about 5 MB, holding the binary, the renderer, both licence
+files and a README saying to run `onionskin install`. On Debian, Ubuntu and Mint
+the `.deb` installs with `sudo dpkg -i onionskin_*.deb`.
+
+Built from the same input twice it produces the same bytes, so a download can be
+checked against a hash somebody else published. It refuses to put a Linux binary
+in a Windows archive, which is the mistake that produces a download that looks
+completely normal and cannot run.
+
+### The one other thing
+
+**LibreOffice** opens everything that is not already a PDF or an image — `.docx`,
+`.odt`, `.rtf`, `.xlsx`, `.ods`, `.pptx`, `.odp`, `.vsdx` and the rest of the
+list in `render::CONVERTIBLE` ([download](https://www.libreoffice.org/download/)).
+PDFs and scans need it not at all, and *writing* `.docx` and `.odt` needs
+nothing installed — Onionskin writes those itself.
+
+It is deliberately not bundled: it is under the MPL, which would put obligations
+on anyone passing the archive on. Onionskin looks for it wherever it installs —
+package manager, Snap, Flatpak, `/Applications`, `Program Files` — and
+`ONIONSKIN_SOFFICE` points at it if it is somewhere else.
 
 ## Four ways to work
 
