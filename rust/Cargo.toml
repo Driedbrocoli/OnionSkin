@@ -12,7 +12,7 @@ readme = "../README.md"
 lopdf = "0.32"
 # Same rendering engine as the Python version, so rasters match bit for bit.
 pdfium-render = { version = "0.8", features = ["thread_safe"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

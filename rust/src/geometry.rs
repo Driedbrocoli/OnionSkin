@@ -104,6 +104,63 @@ fn named_size(size: &PageSize) -> Option<&'static str> {
         .map(|(_, _, name)| *name)
 }
 
+/// Every paper size Onionskin knows by name.
+///
+/// A printer it has never heard of is still fine — a size may be given as
+/// `WIDTHxHEIGHT` in millimetres.
+pub const PAGE_PRESETS: &[(&str, f64, f64)] = &[
+    ("a3", 297.0, 420.0),
+    ("a4", 210.0, 297.0),
+    ("a5", 148.0, 210.0),
+    ("a6", 105.0, 148.0),
+    ("b5", 176.0, 250.0),
+    ("letter", 215.9, 279.4),
+    ("legal", 215.9, 355.6),
+    ("tabloid", 279.4, 431.8),
+    ("executive", 184.15, 266.7),
+    ("statement", 139.7, 215.9),
+];
+
+/// Resolve a page name, or a custom `WIDTHxHEIGHT` in millimetres.
+pub fn parse_page(spec: &str) -> Result<PageSize, String> {
+    let text = spec.trim().to_ascii_lowercase();
+    if let Some((_, w, h)) = PAGE_PRESETS.iter().find(|(name, _, _)| *name == text) {
+        return Ok(PageSize::new(*w, *h));
+    }
+
+    let separator = if text.contains('x') {
+        'x'
+    } else if text.contains('*') {
+        '*'
+    } else {
+        return Err(unknown_page(spec));
+    };
+
+    let parts: Vec<&str> = text.split(separator).collect();
+    if parts.len() != 2 {
+        return Err(unknown_page(spec));
+    }
+    let (width, height) = match (parts[0].trim().parse::<f64>(), parts[1].trim().parse::<f64>()) {
+        (Ok(w), Ok(h)) => (w, h),
+        _ => return Err(unknown_page(spec)),
+    };
+    if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+        return Err(unknown_page(spec));
+    }
+    if width > 2000.0 || height > 2000.0 {
+        return Err(format!("{width}×{height} mm is not a paper size"));
+    }
+    Ok(PageSize::new(width, height))
+}
+
+fn unknown_page(spec: &str) -> String {
+    let names: Vec<&str> = PAGE_PRESETS.iter().map(|(n, _, _)| *n).collect();
+    format!(
+        "unknown page size '{spec}'. Use one of {}, or a custom size like '210x297' (mm).",
+        names.join(", ")
+    )
+}
+
 /// A PDF content-stream matrix `[a b c d e f]`.
 ///
 /// PDF uses the row-vector convention, so a point maps as
@@ -624,6 +681,22 @@ mod tests {
         .describe();
         assert!(text.contains("+0.40") && text.contains("-0.20"));
         assert!(text.contains("cw") && text.contains('%'));
+    }
+
+    #[test]
+    fn page_sizes_by_name_or_measurement() {
+        assert_eq!(parse_page("a4").unwrap(), PageSize::new(210.0, 297.0));
+        assert_eq!(parse_page("  LETTER ").unwrap(), PageSize::new(215.9, 279.4));
+        assert_eq!(parse_page("legal").unwrap(), PageSize::new(215.9, 355.6));
+        assert_eq!(parse_page("210x297").unwrap(), PageSize::new(210.0, 297.0));
+        assert_eq!(parse_page("100*150").unwrap(), PageSize::new(100.0, 150.0));
+    }
+
+    #[test]
+    fn impossible_page_sizes_are_refused() {
+        for spec in ["", "nonsense", "a4x", "1x", "0x100", "-5x10", "9000x9000", "1x2x3"] {
+            assert!(parse_page(spec).is_err(), "{spec} should be refused");
+        }
     }
 
     #[test]

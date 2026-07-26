@@ -181,6 +181,22 @@ class PageFrame:
         return ", ".join(bits) or "standard"
 
 
+def _unreadable(path: Path, exc: Exception) -> str:
+    """Turn a library's complaint into something a person can act on."""
+    detail = str(exc).lower()
+    if "password" in detail or "encrypt" in detail:
+        return (
+            f"{path.name} is password-protected. Open it in a PDF reader, save an "
+            "unprotected copy, and use that."
+        )
+    if path.exists() and path.stat().st_size == 0:
+        return f"{path.name} is empty (0 bytes)."
+    return (
+        f"{path.name} could not be opened as a PDF. It may be damaged, incomplete, "
+        f"or not really a PDF.\n    ({exc})"
+    )
+
+
 def _read_frames(pdf_path: str | Path) -> list[PageFrame]:
     """Read every page's box geometry, resolving inherited attributes."""
     import pikepdf
@@ -242,8 +258,22 @@ class Document:
 
     def __init__(self, pdf_path: str | Path):
         self.path = Path(pdf_path)
-        self._doc = pdfium.PdfDocument(str(self.path))
-        self.frames: list[PageFrame] = _read_frames(self.path)
+        # pdfium raises its own exception type for anything it cannot open —
+        # encrypted, truncated, empty, or not a PDF at all. Left unwrapped it
+        # reaches a non-technical user as a Python traceback, which is exactly
+        # what the rest of the app is careful never to do.
+        try:
+            self._doc = pdfium.PdfDocument(str(self.path))
+        except Exception as exc:
+            raise DocumentError(_unreadable(self.path, exc)) from exc
+        try:
+            self.frames: list[PageFrame] = _read_frames(self.path)
+        except DocumentError:
+            self.close()
+            raise
+        except Exception as exc:
+            self.close()
+            raise DocumentError(_unreadable(self.path, exc)) from exc
         self.page_sizes: list[PageSize] = [f.display_size for f in self.frames]
         if not self.page_sizes:
             raise DocumentError(f"{self.path.name} has no pages")

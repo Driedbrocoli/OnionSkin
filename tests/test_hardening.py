@@ -314,3 +314,90 @@ def test_ink_at_the_very_edge_survives_the_crop(tmp_path):
                           pipeline.Options(dpi=300))
 
     assert ink_bbox_mm(result.output, 300.0) is not None
+
+
+# --- unreadable PDFs must explain themselves, not traceback -----------------
+
+
+def build_hostile(tmp_path):
+    """Every way a .pdf can arrive broken, short of being fine."""
+    import zipfile
+
+    import pikepdf
+
+    from helpers import make_docx
+
+    good = make_pdf(tmp_path / "good.pdf", [(20.0, 40.0, "base")])
+    files = {}
+
+    with pikepdf.open(good) as pdf:
+        pdf.save(tmp_path / "encrypted.pdf",
+                 encryption=pikepdf.Encryption(owner="x", user="x"))
+    files["encrypted"] = tmp_path / "encrypted.pdf"
+
+    raw = good.read_bytes()
+    (tmp_path / "truncated.pdf").write_bytes(raw[: len(raw) // 2])
+    files["truncated"] = tmp_path / "truncated.pdf"
+
+    (tmp_path / "empty.pdf").write_bytes(b"")
+    files["empty"] = tmp_path / "empty.pdf"
+
+    make_docx(tmp_path / "real.docx", ["hello"])
+    (tmp_path / "mislabelled.pdf").write_bytes((tmp_path / "real.docx").read_bytes())
+    files["mislabelled"] = tmp_path / "mislabelled.pdf"
+
+    (tmp_path / "garbage.pdf").write_bytes(b"%PDF-1.4\nnot really\n%%EOF\n")
+    files["garbage"] = tmp_path / "garbage.pdf"
+
+    return good, files
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["encrypted", "truncated", "empty", "mislabelled", "garbage"],
+)
+def test_an_unreadable_pdf_is_explained_not_crashed(tmp_path, kind):
+    """pdfium raises its own exception type, which nothing was catching — a
+    non-technical user saw a Python traceback."""
+    good, files = build_hostile(tmp_path)
+    bad = files[kind]
+
+    with pytest.raises(DocumentError) as exc:
+        pipeline.run(bad, good, tmp_path / "d.pdf", pipeline.Options(dpi=150))
+    assert bad.name in str(exc.value)
+
+    # ...whichever side it arrives on, and through compose too.
+    with pytest.raises(DocumentError):
+        pipeline.run(good, bad, tmp_path / "d.pdf", pipeline.Options(dpi=150))
+    with pytest.raises(DocumentError):
+        pipeline.compose_run(
+            bad, [compose.TextBox(page=0, text="hi")], tmp_path / "d.pdf",
+            pipeline.Options(dpi=150),
+        )
+
+
+def test_an_encrypted_pdf_says_so(tmp_path):
+    good, files = build_hostile(tmp_path)
+    with pytest.raises(DocumentError, match="password-protected"):
+        pipeline.run(files["encrypted"], good, tmp_path / "d.pdf",
+                     pipeline.Options(dpi=150))
+
+
+def test_an_empty_pdf_says_so(tmp_path):
+    good, files = build_hostile(tmp_path)
+    with pytest.raises(DocumentError, match="empty"):
+        pipeline.run(files["empty"], good, tmp_path / "d.pdf",
+                     pipeline.Options(dpi=150))
+
+
+@pytest.mark.parametrize("kind", ["encrypted", "truncated", "empty", "garbage"])
+def test_the_cli_reports_unreadable_pdfs_cleanly(tmp_path, capsys, kind):
+    from onionskin.cli import main
+
+    good, files = build_hostile(tmp_path)
+    code = main(["delta", str(files[kind]), str(good), "-o", str(tmp_path / "d.pdf")])
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error:")
+    assert "Traceback" not in captured.err and "Traceback" not in captured.out
