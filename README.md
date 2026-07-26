@@ -177,21 +177,41 @@ the folder you last chose something from.
 `onionskin uninstall` removes exactly what was put there and says what it
 removed. It leaves your calibration profiles alone, and says so.
 
-### Making the archives other people install from
+### Making a release
+
+You should not have to. Pushing a version tag does all of it:
+
+```bash
+git tag v0.1.1 && git push origin v0.1.1
+```
+
+That runs `.github/workflows/release.yml`, which builds on four machines —
+Linux, Windows, and macOS on both chips — fetches the PDF renderer for each,
+packages, and attaches ten files to a GitHub release: five archives with the
+version in the name, and five with a name that never changes, for URLs that
+have to keep working. The same workflow can be run from the Actions tab with a
+version typed in, which is how to try it without committing to a number.
+
+`.github/workflows/ci.yml` runs the tests on every push, with the renderer and
+LibreOffice installed, because a release nobody tested is a download nobody
+should trust.
+
+Neither uses an action from the marketplace. Both are `cargo` and `gh`, which
+the runners already have — an action is somebody else's code running with a
+token that can write to this repository.
+
+To build the archives on your own machine instead:
 
 ```bash
 cargo run --release -- package --out dist/
 ```
 
-This writes a `.tar.gz` and a `.deb` on Linux, a `.tar.gz` on macOS and a `.zip`
-on Windows — each about 5 MB, holding the binary, the renderer, both licence
-files and a README saying to run `onionskin install`. On Debian, Ubuntu and Mint
-the `.deb` installs with `sudo dpkg -i onionskin_*.deb`.
-
-Built from the same input twice it produces the same bytes, so a download can be
-checked against a hash somebody else published. It refuses to put a Linux binary
-in a Windows archive, which is the mistake that produces a download that looks
-completely normal and cannot run.
+Each is about 11 MB and holds both programs, the renderer, both licence files
+and a README saying to run `onionskin install`. Built from the same input twice
+it produces the same bytes, so a download can be checked against a hash
+somebody else published. It refuses to put a Linux binary in a Windows archive,
+which is the mistake that produces a download that looks completely normal and
+cannot run.
 
 ### Word documents, with or without LibreOffice
 

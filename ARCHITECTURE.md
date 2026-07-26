@@ -471,6 +471,67 @@ compression methods it will not read rather than reading them wrongly. The XML
 scanner resolves no external entities and follows no DTD, so there is nothing to
 point at `/etc/passwd` and no entity expansion to run away with.
 
+## Getting it onto somebody's machine
+
+The `package` module writes the archives and `install` unpacks itself into a
+home directory; between them sits the part that was missing for a long time,
+which is anywhere to download from. Two workflows fill it.
+
+| | |
+|---|---|
+| `.github/workflows/ci.yml` | The tests, on every push, with pdfium and LibreOffice installed |
+| `.github/workflows/release.yml` | Four runners, ten files, one GitHub release |
+
+Neither uses an action from the marketplace. Both are `cargo` and `gh`, which
+the runners already have. An action is somebody else's code running with a
+token that can write to this repository, and that is a lot to accept for a step
+that is four lines of shell — the same reasoning that keeps the dependency list
+short everywhere else here.
+
+### Why each archive is uploaded twice
+
+GitHub serves the newest release at
+`/releases/latest/download/<the exact file name>`. A name with a version in it
+therefore cannot be written down: `onionskin-0.1.0-linux.tar.gz` is a URL that
+stops working the day there is a 0.1.1, and it is exactly the URL a README, an
+`install.sh` or an answer to "how do I install this" would contain.
+
+So every archive goes up under both names. The versioned one is the nicer thing
+to find in a Downloads folder six months later; the plain one —
+`onionskin-linux-x64.tar.gz` — is what a script can point at forever. It costs
+a `cp` and eleven megabytes of storage.
+
+### The one-line install
+
+`install.sh` at the root is what `curl … | sh` runs. It is fifty lines of
+POSIX shell: work out the machine from `uname`, refuse politely if there is no
+ready-made archive for it and say how to build from source instead, fetch,
+unpack into a directory it cleans up on any exit, and hand over to
+`onionskin install` — which is the same code path the person who unpacked a
+`.tar.gz` by hand runs. There is no second installer to keep in step.
+
+No `sudo`, and none needed: everything goes into the user's own account. A
+program that asks for an administrator password to put a file on somebody's own
+computer is teaching them to give passwords to programs.
+
+The README also writes out the two commands the script runs. Piping a script
+from the internet into a shell is a reasonable thing to refuse, and somebody
+who refuses it should not be left without instructions.
+
+### What cannot be done here
+
+`sudo apt install onionskin` needs the package to be in Debian's own archive,
+which needs a Debian developer to sponsor it and a good deal of back-and-forth
+over packaging policy. The `.deb` this builds installs from a file —
+`sudo apt install ./onionskin-linux-x64.deb` — and that is as close as it gets
+without that process. A self-hosted apt repository would close the gap, at the
+cost of a GPG signing key that has to live somewhere and be looked after.
+
+macOS is unsigned, and says so in the archive's README: Gatekeeper stops a
+downloaded program the first time it runs and the message it gives reads like
+the file is broken. Saying so up front is cheaper than the alternative, which
+is paying Apple for a certificate.
+
 ## Where it came from
 
 Onionskin began as Python and was ported module by module. The Python is gone,
@@ -515,7 +576,13 @@ cargo test
 cargo build --release
 ```
 
-pdfium is loaded at runtime. If it is not on the system library path, point
-`PDFIUM_DYNAMIC_LIB_PATH` at a directory containing `libpdfium.so`
-(`.dylib` / `.dll` on macOS and Windows) — the copy shipped inside pypdfium2
-works.
+pdfium is loaded at run time, not linked. `Engine::bind` looks beside the
+binary, then in the places a package manager puts it, then at whatever the
+system library path offers. To point it somewhere else, set `ONIONSKIN_PDFIUM`
+to the library **file** — `libpdfium.so`, or `.dylib` / `.dll` on macOS and
+Windows. The copy inside pypdfium2 works, and so does the one from
+[pdfium-binaries](https://github.com/bblanchon/pdfium-binaries/releases),
+which is what the release workflow fetches.
+
+Without it everything works except comparing two documents, and `onionskin
+doctor` says so along with the exact download to get.
