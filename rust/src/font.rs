@@ -41,8 +41,23 @@ pub struct EmbeddedFont {
     cap_height: f64,
     italic_angle: f64,
     bbox: (f64, f64, f64, f64),
-    /// Index into a font collection (`.ttc`); zero for a plain file.
+    /// Index into a font collection (`.ttc`/`.otc`); zero for a plain file.
     index: u32,
+    outlines: Outlines,
+}
+
+/// How a font describes its glyph shapes.
+///
+/// It decides how the font must be written into a PDF, and the two forms are
+/// not interchangeable: a PostScript-flavoured font embedded as if it were
+/// TrueType produces a file that reads as valid and prints nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outlines {
+    /// Quadratic outlines in a `glyf` table — `.ttf`, `.ttc`.
+    TrueType,
+    /// Cubic PostScript outlines in a `CFF` table — most `.otf`, and the fonts
+    /// Word leans on such as Calibri and Cambria.
+    PostScript,
 }
 
 impl std::fmt::Debug for EmbeddedFont {
@@ -76,18 +91,19 @@ impl EmbeddedFont {
             ))
         })?;
 
-        // A PDF carries TrueType outlines as a plain font programme. Fonts with
-        // PostScript (CFF) outlines need a different, much more involved
-        // arrangement, so say so plainly rather than emitting a file that
-        // reads as valid and prints nothing.
-        if face.tables().glyf.is_none() {
+        // Which kind of outlines the font carries decides how a PDF must hold
+        // it. Both are supported; they simply take different shapes.
+        let outlines = if face.tables().glyf.is_some() {
+            Outlines::TrueType
+        } else if face.tables().cff.is_some() {
+            Outlines::PostScript
+        } else {
             return Err(FontError::Unusable(format!(
-                "{} has PostScript outlines, which Onionskin cannot embed yet.\n\
-                 Use a TrueType font — a .ttf, or a .ttc collection — which most \
-                 systems have for every alphabet.",
+                "{} has no outlines Onionskin can use — it is neither a TrueType \
+                 nor a PostScript-flavoured font.",
                 path.display()
             )));
-        }
+        };
 
         let units_per_em = face.units_per_em() as f64;
         if units_per_em <= 0.0 {
@@ -123,6 +139,7 @@ impl EmbeddedFont {
             ),
             data,
             index,
+            outlines,
         })
     }
 
@@ -133,6 +150,15 @@ impl EmbeddedFont {
 
     pub fn program(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn outlines(&self) -> Outlines {
+        self.outlines
+    }
+
+    /// How many glyphs the font holds, for sizing the widths table.
+    pub fn glyph_count(&self) -> u16 {
+        self.face().number_of_glyphs()
     }
 
     pub fn ascender(&self) -> f64 {
@@ -150,7 +176,137 @@ impl EmbeddedFont {
     pub fn bbox(&self) -> (f64, f64, f64, f64) {
         self.bbox
     }
+    /// Font design units per em — the scale the outlines are drawn in.
+    pub fn units_per_em(&self) -> f64 {
+        self.units_per_em
+    }
 
+    /// Does the font have a glyph for this character?
+    pub fn has(&self, ch: char) -> bool {
+        self.face().glyph_index(ch).is_some()
+    }
+
+    /// Every character the font can draw.
+    ///
+    /// This is what makes reading a page language-agnostic: the alphabet to
+    /// look for is not a list somebody wrote down in English, it is whatever
+    /// the font that set the page actually contains. Point Onionskin at a
+    /// Greek font and it looks for Greek; at a CJK font and it looks for han.
+    pub fn coverage(&self) -> Vec<char> {
+        let face = self.face();
+        let mut characters = Vec::new();
+        if let Some(cmap) = face.tables().cmap {
+            for subtable in cmap.subtables {
+                // Symbol and Mac-Roman subtables map bytes, not Unicode; a
+                // codepoint read out of them means something else entirely.
+                if !subtable.is_unicode() {
+                    continue;
+                }
+                subtable.codepoints(|codepoint| {
+                    if let Some(ch) = char::from_u32(codepoint) {
+                        characters.push(ch);
+                    }
+                });
+            }
+        }
+        characters.sort_unstable();
+        characters.dedup();
+        characters
+    }
+
+    /// The shape of a character, for comparing against ink on a scan.
+    ///
+    /// Curves are flattened to line segments here rather than by the caller:
+    /// the tolerance belongs with the outline, and everything downstream wants
+    /// polygons. Coordinates are font units, y upwards from the baseline —
+    /// both conversions are the reader's, since only they know the size.
+    pub fn outline(&self, ch: char) -> Option<Vec<Vec<(f64, f64)>>> {
+        let face = self.face();
+        let id = face.glyph_index(ch)?;
+        let mut sink = Flattener::default();
+        // A glyph with no outline — a space — reports a bounding box and no
+        // contours. That is a real answer, so keep it rather than failing.
+        face.outline_glyph(id, &mut sink)?;
+        sink.finish_contour();
+        Some(sink.contours)
+    }
+}
+
+/// Collects a glyph's outline, turning curves into line segments.
+#[derive(Default)]
+struct Flattener {
+    contours: Vec<Vec<(f64, f64)>>,
+    current: Vec<(f64, f64)>,
+    at: (f64, f64),
+}
+
+impl Flattener {
+    /// Segments per curve. Twenty holds a 2000-unit em to well under a pixel
+    /// at any size a page is scanned at, and costs nothing worth counting.
+    const STEPS: usize = 20;
+
+    fn finish_contour(&mut self) {
+        if self.current.len() >= 3 {
+            let done = std::mem::take(&mut self.current);
+            self.contours.push(done);
+        } else {
+            self.current.clear();
+        }
+    }
+
+    fn push(&mut self, x: f64, y: f64) {
+        self.current.push((x, y));
+        self.at = (x, y);
+    }
+}
+
+impl ttf_parser::OutlineBuilder for Flattener {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.finish_contour();
+        self.push(x as f64, y as f64);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.push(x as f64, y as f64);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (x0, y0) = self.at;
+        let (x1, y1, x, y) = (x1 as f64, y1 as f64, x as f64, y as f64);
+        for step in 1..=Self::STEPS {
+            let t = step as f64 / Self::STEPS as f64;
+            let u = 1.0 - t;
+            self.current.push((
+                u * u * x0 + 2.0 * u * t * x1 + t * t * x,
+                u * u * y0 + 2.0 * u * t * y1 + t * t * y,
+            ));
+        }
+        self.at = (x, y);
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (x0, y0) = self.at;
+        let (x1, y1) = (x1 as f64, y1 as f64);
+        let (x2, y2) = (x2 as f64, y2 as f64);
+        let (x, y) = (x as f64, y as f64);
+        for step in 1..=Self::STEPS {
+            let t = step as f64 / Self::STEPS as f64;
+            let u = 1.0 - t;
+            let (uu, tt) = (u * u, t * t);
+            self.current.push((
+                uu * u * x0 + 3.0 * uu * t * x1 + 3.0 * u * tt * x2 + tt * t * x,
+                uu * u * y0 + 3.0 * uu * t * y1 + 3.0 * u * tt * y2 + tt * t * y,
+            ));
+        }
+        self.at = (x, y);
+    }
+
+    fn close(&mut self) {
+        self.finish_contour();
+    }
+}
+
+impl EmbeddedFont {
     /// Turn text into the glyphs that will be drawn.
     ///
     /// Characters the font has no glyph for are reported rather than dropped:
@@ -266,12 +422,31 @@ pub fn suggest_system_font() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn dejavu() -> Option<PathBuf> {
+    pub(crate) fn dejavu_path() -> Option<PathBuf> {
         let path = PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
         path.is_file().then_some(path)
+    }
+
+    /// A font with PostScript outlines — the shape Word's own faces take.
+    pub(crate) fn postscript_font() -> Option<PathBuf> {
+        const CANDIDATES: [&str; 4] = [
+            "/usr/share/fonts/opentype/tlwg/Loma.otf",
+            "/usr/share/fonts/opentype/unifont/unifont_sample.otf",
+            "/Library/Fonts/Optima.ttc",
+            "C:/Windows/Fonts/calibri.ttf",
+        ];
+        CANDIDATES
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .find(|p| {
+                EmbeddedFont::load(p)
+                    .map(|f| f.outlines() == Outlines::PostScript)
+                    .unwrap_or(false)
+            })
     }
 
     #[test]
@@ -292,7 +467,7 @@ mod tests {
 
     #[test]
     fn a_real_font_loads_with_sane_metrics() {
-        let Some(path) = dejavu() else { return };
+        let Some(path) = dejavu_path() else { return };
         let font = EmbeddedFont::load(&path).unwrap();
 
         assert!(!font.name.is_empty());
@@ -308,7 +483,7 @@ mod tests {
 
     #[test]
     fn text_becomes_glyphs_that_advance() {
-        let Some(path) = dejavu() else { return };
+        let Some(path) = dejavu_path() else { return };
         let font = EmbeddedFont::load(&path).unwrap();
 
         let glyphs = font.shape("Hello").unwrap();
@@ -322,7 +497,7 @@ mod tests {
 
     #[test]
     fn cyrillic_and_greek_are_carried() {
-        let Some(path) = dejavu() else { return };
+        let Some(path) = dejavu_path() else { return };
         let font = EmbeddedFont::load(&path).unwrap();
 
         for text in ["Утверждено", "Έγκριση", "café — naïve"] {
@@ -333,7 +508,7 @@ mod tests {
 
     #[test]
     fn characters_the_font_lacks_are_named_not_dropped() {
-        let Some(path) = dejavu() else { return };
+        let Some(path) = dejavu_path() else { return };
         let font = EmbeddedFont::load(&path).unwrap();
 
         // DejaVu has no CJK.
@@ -344,7 +519,7 @@ mod tests {
 
     #[test]
     fn tabs_and_line_endings_are_taken_literally_enough() {
-        let Some(path) = dejavu() else { return };
+        let Some(path) = dejavu_path() else { return };
         let font = EmbeddedFont::load(&path).unwrap();
 
         assert_eq!(font.shape("a\tb").unwrap().len(), 3); // tab became a space
@@ -353,7 +528,7 @@ mod tests {
 
     #[test]
     fn width_grows_with_the_text_and_the_size() {
-        let Some(path) = dejavu() else { return };
+        let Some(path) = dejavu_path() else { return };
         let font = EmbeddedFont::load(&path).unwrap();
 
         let short = font.width_mm("Hi", 12.0).unwrap();
@@ -362,5 +537,54 @@ mod tests {
 
         assert!(long > short * 3.0);
         assert!((bigger - short * 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn truetype_outlines_are_recognised() {
+        let Some(path) = dejavu_path() else { return };
+        let font = EmbeddedFont::load(&path).unwrap();
+        assert_eq!(font.outlines(), Outlines::TrueType);
+    }
+
+    #[test]
+    fn postscript_outlines_load_rather_than_being_refused() {
+        // Word's own faces — Calibri, Cambria — are PostScript-flavoured, so
+        // refusing this format would refuse the fonts most documents use.
+        let Some(path) = postscript_font() else {
+            return;
+        };
+        let font = EmbeddedFont::load(&path).unwrap();
+
+        assert_eq!(font.outlines(), Outlines::PostScript);
+        assert!(font.ascender() > 0.0);
+        assert!(!font.program().is_empty());
+        assert!(!font.shape("Approved").unwrap().is_empty());
+        assert!(font.width_mm("Approved", 12.0).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_font_with_no_outlines_at_all_is_refused() {
+        // A colour-emoji font carries bitmaps and nothing to draw with.
+        let path = PathBuf::from("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf");
+        if !path.is_file() {
+            return;
+        }
+        let Err(err) = EmbeddedFont::load(&path) else {
+            // Some builds do carry outlines; then loading is correct.
+            return;
+        };
+        assert!(err.to_string().contains("no outlines"), "{err}");
+    }
+
+    #[test]
+    fn glyph_count_covers_the_glyphs_shaping_returns() {
+        let Some(path) = dejavu_path() else { return };
+        let font = EmbeddedFont::load(&path).unwrap();
+
+        let count = font.glyph_count();
+        assert!(count > 0);
+        for glyph in font.shape("Approved 25 July").unwrap() {
+            assert!(glyph.id < count, "glyph {} of {count}", glyph.id);
+        }
     }
 }

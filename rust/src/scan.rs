@@ -37,28 +37,61 @@ pub struct ScanRegistration {
     pub origin_px: (f64, f64),
 }
 
-impl ScanRegistration {
+/// The registration's arithmetic with its trigonometry already done.
+///
+/// The same mapping as the methods on [`ScanRegistration`], and the only
+/// implementation of it — those methods build one of these and use it. Worth
+/// having separately because reading a page converts millions of points, and a
+/// sine and a cosine per point is then most of the work.
+#[derive(Debug, Clone, Copy)]
+pub struct Mapping {
+    origin_px: (f64, f64),
+    px_per_mm: f64,
+    sin_t: f64,
+    cos_t: f64,
+}
+
+impl Mapping {
     /// Where a point on the scan actually is on the physical sheet.
     pub fn pixel_to_page_mm(&self, px: (f64, f64)) -> (f64, f64) {
         let (dx, dy) = (px.0 - self.origin_px.0, px.1 - self.origin_px.1);
         // Undo the scanner's rotation, then convert pixels to millimetres.
-        let theta = (-self.skew_deg).to_radians();
-        let (sin_t, cos_t) = theta.sin_cos();
         (
-            (cos_t * dx - sin_t * dy) / self.px_per_mm,
-            (sin_t * dx + cos_t * dy) / self.px_per_mm,
+            (self.cos_t * dx + self.sin_t * dy) / self.px_per_mm,
+            (-self.sin_t * dx + self.cos_t * dy) / self.px_per_mm,
         )
     }
 
     /// Where a point on the sheet appears in the scan.
     pub fn page_mm_to_pixel(&self, mm: (f64, f64)) -> (f64, f64) {
         let (x, y) = (mm.0 * self.px_per_mm, mm.1 * self.px_per_mm);
-        let theta = self.skew_deg.to_radians();
-        let (sin_t, cos_t) = theta.sin_cos();
         (
-            cos_t * x - sin_t * y + self.origin_px.0,
-            sin_t * x + cos_t * y + self.origin_px.1,
+            self.cos_t * x - self.sin_t * y + self.origin_px.0,
+            self.sin_t * x + self.cos_t * y + self.origin_px.1,
         )
+    }
+}
+
+impl ScanRegistration {
+    /// This registration's mapping, with the trigonometry done once.
+    pub fn mapping(&self) -> Mapping {
+        let (sin_t, cos_t) = self.skew_deg.to_radians().sin_cos();
+        Mapping {
+            origin_px: self.origin_px,
+            px_per_mm: self.px_per_mm,
+            sin_t,
+            cos_t,
+        }
+    }
+
+    /// Where a point on the scan actually is on the physical sheet.
+    pub fn pixel_to_page_mm(&self, px: (f64, f64)) -> (f64, f64) {
+        self.mapping().pixel_to_page_mm(px)
+    }
+
+    /// Where a point on the sheet appears in the scan.
+    pub fn page_mm_to_pixel(&self, mm: (f64, f64)) -> (f64, f64) {
+        self.mapping().page_mm_to_pixel(mm)
     }
 
     /// Effective scan resolution in dots per inch.
@@ -142,7 +175,12 @@ pub fn register(
     let gray = image.to_luma8();
 
     let bounds = if options.assume_cropped {
-        Bounds { x0: 0, y0: 0, x1: width, y1: height }
+        Bounds {
+            x0: 0,
+            y0: 0,
+            x1: width,
+            y1: height,
+        }
     } else {
         find_sheet(&gray).ok_or_else(|| {
             ScanError::Detection(
@@ -193,8 +231,8 @@ pub fn register(
     // they show scanner backing, on a square one they show paper.
     let touches_edge =
         bounds.x0 == 0 || bounds.y0 == 0 || bounds.x1 >= width || bounds.y1 >= height;
-    let looks_turned = skew_deg.abs() > 0.05
-        || (!options.assume_cropped && corners_show_backing(&gray, bounds));
+    let looks_turned =
+        skew_deg.abs() > 0.05 || (!options.assume_cropped && corners_show_backing(&gray, bounds));
     if touches_edge && looks_turned {
         return Err(ScanError::Detection(
             "the sheet is lying at an angle and runs off the edge of this scan, so \
@@ -291,6 +329,16 @@ pub fn otsu_threshold(gray: &GrayImage) -> u8 {
     for pixel in gray.pixels() {
         histogram[pixel.0[0] as usize] += 1;
     }
+    otsu_of_histogram(&histogram)
+}
+
+/// Otsu's threshold over a tally of grey levels.
+///
+/// Separated from the image so a caller can choose which pixels count. Reading
+/// text needs exactly that: a flatbed's dark backing around the sheet is a
+/// third cluster, and left in the tally it drags the split away from the one
+/// that matters — ink against paper — and finds no letters at all.
+pub fn otsu_of_histogram(histogram: &[u64; 256]) -> u8 {
     let total: u64 = histogram.iter().sum();
     if total == 0 {
         return 128;
@@ -536,11 +584,21 @@ fn first_paper(gray: &GrayImage, bounds: Bounds, y: u32, from_left: bool) -> Opt
 
     // Average a few pixels so a speck of dust on the glass cannot read as the
     // edge of the paper.
+    //
+    // Clamped to the *image*, not to the sheet's box. Clamping to the box
+    // hides the one thing this function exists to find: on a sheet lying
+    // square, the box edge is the paper edge exactly, so the backing outside
+    // it is never sampled, no step is ever seen there, and the search walks on
+    // into the page and stops at the first letter it meets. The lean of the
+    // paper is then read off the ragged right-hand margin of the text — which
+    // is how a perfectly square sheet came back turned four and a half
+    // degrees, and every addition on it landed a centimetre out.
+    let edge_x = gray.width() as i64 - 1;
     let sample = |x: i64| -> i32 {
         let mut total = 0i32;
         for offset in -1..=1i64 {
-            let px = (x + offset).clamp(low_x, high_x) as u32;
-            total += gray.get_pixel(px.min(gray.width() - 1), y).0[0] as i32;
+            let px = (x + offset).clamp(0, edge_x) as u32;
+            total += gray.get_pixel(px, y).0[0] as i32;
         }
         total / 3
     };
@@ -613,7 +671,10 @@ fn fit_edge_angle(points: &[(f64, f64)]) -> Option<f64> {
     };
 
     let (a, b) = slope(points)?;
-    let residuals: Vec<f64> = points.iter().map(|(y, x)| (x - (a * y + b)).abs()).collect();
+    let residuals: Vec<f64> = points
+        .iter()
+        .map(|(y, x)| (x - (a * y + b)).abs())
+        .collect();
     let mean_residual = residuals.iter().sum::<f64>() / residuals.len() as f64;
     let cutoff = (mean_residual * 3.0).max(2.0);
     let kept: Vec<(f64, f64)> = points
@@ -624,7 +685,11 @@ fn fit_edge_angle(points: &[(f64, f64)]) -> Option<f64> {
         .map(|(p, _)| p)
         .collect();
 
-    let (a, _) = if kept.len() >= 16 { slope(&kept)? } else { (a, b) };
+    let (a, _) = if kept.len() >= 16 {
+        slope(&kept)?
+    } else {
+        (a, b)
+    };
     // x falls as y rises when the sheet leans clockwise, so the angle is the
     // negated slope.
     Some((-a).atan().to_degrees())
@@ -645,9 +710,8 @@ pub fn estimate_skew(gray: &GrayImage, bounds: Bounds, max_skew_deg: f64) -> f64
     // and backing is dark, which reads as ink. Left in, those four triangles
     // are the strongest "lines" on the page and the estimate follows them
     // instead of the text.
-    let inset = (bounds.width().max(bounds.height()) as f64
-        * max_skew_deg.to_radians().sin())
-    .ceil() as u32;
+    let inset = (bounds.width().max(bounds.height()) as f64 * max_skew_deg.to_radians().sin())
+        .ceil() as u32;
     let inset_x = inset.min(bounds.width() * 15 / 100);
     let inset_y = inset.min(bounds.height() * 15 / 100);
     let inner = Bounds {
@@ -714,9 +778,9 @@ fn projection_variance(ink: &[(f64, f64)], angle_deg: f64) -> f64 {
     let (sin_t, cos_t) = theta.sin_cos();
 
     let projected: Vec<f64> = ink.iter().map(|(x, y)| sin_t * x + cos_t * y).collect();
-    let (min, max) = projected.iter().fold((f64::MAX, f64::MIN), |(lo, hi), v| {
-        (lo.min(*v), hi.max(*v))
-    });
+    let (min, max) = projected
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
     // Spelled out rather than `!(max > min)` so the NaN case is obvious: a
     // degenerate or non-finite spread has no structure to score.
     if !max.is_finite() || !min.is_finite() || max <= min {
@@ -788,9 +852,8 @@ mod tests {
                 if lines > 0 {
                     let band = sheet_h as f64 / (lines as f64 * 3.0);
                     let row = (sy / band) as usize;
-                    let in_text = row % 3 == 1
-                        && sx > sheet_w as f64 * 0.1
-                        && sx < sheet_w as f64 * 0.8;
+                    let in_text =
+                        row % 3 == 1 && sx > sheet_w as f64 * 0.1 && sx < sheet_w as f64 * 0.8;
                     if in_text {
                         value = 25;
                     }
@@ -799,6 +862,98 @@ mod tests {
             }
         }
         DynamicImage::ImageRgb8(img)
+    }
+
+    /// A sheet lying square, carrying text whose margins are ragged — every
+    /// line starting and ending somewhere different, as real text does.
+    ///
+    /// The shape that matters: the *only* straight vertical line in this image
+    /// is the paper's own edge, and it coincides exactly with the sheet's
+    /// bounding box. Anything that measures the lean from the text instead
+    /// will find one, because the text leans.
+    fn square_sheet_with_ragged_text(dpi: f64, margin_px: u32) -> DynamicImage {
+        let px_per_mm = dpi / crate::geometry::MM_PER_INCH;
+        let sheet_w = (A4.width_mm * px_per_mm) as u32;
+        let sheet_h = (A4.height_mm * px_per_mm) as u32;
+        let mut img = RgbImage::from_pixel(
+            sheet_w + margin_px * 2,
+            sheet_h + margin_px * 2,
+            image::Rgb([40, 40, 40]),
+        );
+
+        for y in 0..sheet_h {
+            for x in 0..sheet_w {
+                img.put_pixel(x + margin_px, y + margin_px, image::Rgb([245, 245, 245]));
+            }
+        }
+
+        // Twelve lines, each indented and ended differently, all of them well
+        // inside the margins — the raggedness is the point.
+        let line_height = (5.0 * px_per_mm) as u32;
+        for line in 0..12u32 {
+            let top = margin_px + (30.0 * px_per_mm) as u32 + line * line_height;
+            let left = margin_px + ((25.0 + (line % 4) as f64 * 4.0) * px_per_mm) as u32;
+            let right = margin_px + ((90.0 + (line % 5) as f64 * 11.0) * px_per_mm) as u32;
+            for y in top..top + (2.5 * px_per_mm) as u32 {
+                for x in left..right.min(sheet_w + margin_px) {
+                    img.put_pixel(x, y, image::Rgb([25, 25, 25]));
+                }
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn a_square_sheet_of_text_is_not_read_as_turned() {
+        // The lean must come from the paper's edge. Measured off the text
+        // instead, a sheet lying perfectly square reads as several degrees
+        // turned, and every addition on it lands a centimetre from where it
+        // was asked for — with nothing in the output saying so.
+        let image = square_sheet_with_ragged_text(300.0, 30);
+        let registration = register(&image, ScanOptions::new(A4)).unwrap();
+
+        assert!(
+            registration.skew_deg.abs() < 0.15,
+            "a square sheet read as turned {:.2}°",
+            registration.skew_deg
+        );
+        assert_relative_eq!(registration.origin_px.0, 30.0, epsilon = 2.0);
+        assert_relative_eq!(registration.origin_px.1, 30.0, epsilon = 2.0);
+        assert_relative_eq!(registration.dpi(), 300.0, epsilon = 2.0);
+    }
+
+    #[test]
+    fn the_edge_is_measured_even_when_it_touches_the_box() {
+        // The underlying reason for the test above: on a square sheet the
+        // paper's edge and the detected box are the same line, and a search
+        // that cannot see outside the box cannot see the edge at all.
+        let image = square_sheet_with_ragged_text(300.0, 30).to_luma8();
+        let bounds = find_sheet(&image).unwrap();
+        let skew = edge_skew(&image, bounds).expect("the paper's edge was not found");
+
+        assert!(skew.abs() < 0.15, "edge read as {skew:.3}°");
+    }
+
+    #[test]
+    fn text_touching_the_paper_edge_does_not_become_the_edge() {
+        // Ink running right up to where the paper ends is the hardest case for
+        // an edge finder, and it happens whenever someone scans a page with a
+        // full-bleed rule or a stamp near the margin.
+        let mut image = square_sheet_with_ragged_text(300.0, 30).to_rgb8();
+        let px_per_mm = 300.0 / crate::geometry::MM_PER_INCH;
+        let sheet_h = (A4.height_mm * px_per_mm) as u32;
+        for y in 30 + sheet_h / 3..30 + sheet_h / 3 + 40 {
+            for x in 30..30 + (6.0 * px_per_mm) as u32 {
+                image.put_pixel(x, y, image::Rgb([25, 25, 25]));
+            }
+        }
+        let registration = register(&DynamicImage::ImageRgb8(image), ScanOptions::new(A4)).unwrap();
+
+        assert!(
+            registration.skew_deg.abs() < 0.2,
+            "read as turned {:.2}°",
+            registration.skew_deg
+        );
     }
 
     #[test]
@@ -919,8 +1074,7 @@ mod tests {
 
             let recovered = registration.pixel_to_page_mm(pixel);
             assert!(
-                (recovered.0 - truth_mm.0).abs() < 1.5
-                    && (recovered.1 - truth_mm.1).abs() < 1.5,
+                (recovered.0 - truth_mm.0).abs() < 1.5 && (recovered.1 - truth_mm.1).abs() < 1.5,
                 "{:?} recovered as {:?}",
                 truth_mm,
                 recovered
@@ -957,7 +1111,10 @@ mod tests {
     #[test]
     fn an_empty_image_is_refused() {
         let img = DynamicImage::ImageRgb8(RgbImage::new(0, 0));
-        assert!(matches!(register(&img, ScanOptions::new(A4)), Err(ScanError::Empty)));
+        assert!(matches!(
+            register(&img, ScanOptions::new(A4)),
+            Err(ScanError::Empty)
+        ));
     }
 
     #[test]

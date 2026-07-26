@@ -12,7 +12,7 @@ use std::path::Path;
 use lopdf::content::{Content, Operation};
 use lopdf::{dictionary, Document, Object, Stream};
 
-use crate::font::EmbeddedFont;
+use crate::font::{EmbeddedFont, Outlines};
 use crate::geometry::{mm_to_pt, PageSize};
 
 /// The fonts built into every PDF reader.
@@ -71,6 +71,28 @@ impl Font {
             Font::CourierBold,
         ]
     }
+}
+
+mod metrics;
+
+/// How wide a run of text is in one of the built-in fonts, in millimetres.
+///
+/// Exact rather than estimated: these are the widths every PDF reader uses for
+/// these fonts, so a line measured here breaks in the same place on the page.
+/// A character the font cannot write counts as nothing, because it will not be
+/// written — [`encode_winansi`] refuses the line before it reaches paper.
+pub fn builtin_width_mm(font: Font, text: &str, size_pt: f64) -> f64 {
+    let widths = font.widths();
+    let thousandths: u32 = text
+        .chars()
+        .map(|ch| match ch {
+            '\t' => ' ',
+            other => other,
+        })
+        .filter_map(winansi_byte)
+        .map(|byte| widths[byte as usize] as u32)
+        .sum();
+    thousandths as f64 / 1000.0 * size_pt * 25.4 / 72.0
 }
 
 /// Which face a line is set in.
@@ -358,17 +380,30 @@ fn add_embedded_font(
     used_glyphs: &BTreeMap<u16, f64>,
 ) -> Object {
     let program = font.program();
-    let mut stream = Stream::new(
-        dictionary! { "Length1" => program.len() as i64 },
-        program.to_vec(),
-    );
+
+    // The two outline formats are held differently, and swapping them produces
+    // a file that reads as valid and prints nothing. TrueType goes in as a
+    // plain font programme; PostScript-flavoured fonts — most .otf, and the
+    // faces Word leans on — go in whole, as OpenType.
+    let (stream_key, subtype, cid_subtype) = match font.outlines() {
+        Outlines::TrueType => ("FontFile2", None, "CIDFontType2"),
+        Outlines::PostScript => ("FontFile3", Some("OpenType"), "CIDFontType0"),
+    };
+
+    let mut stream_dict = dictionary! { "Length1" => program.len() as i64 };
+    if let Some(subtype) = subtype {
+        // Length1 has no meaning for FontFile3, and /Subtype names the format.
+        stream_dict.remove(b"Length1");
+        stream_dict.set("Subtype", Object::Name(subtype.as_bytes().to_vec()));
+    }
+    let mut stream = Stream::new(stream_dict, program.to_vec());
     // Compressing the font programme is what keeps a delta sane: the file is
     // often several megabytes and the printer has to receive all of it.
     let _ = stream.compress();
     let file_id = doc.add_object(stream);
 
     let (x0, y0, x1, y1) = font.bbox();
-    let descriptor_id = doc.add_object(dictionary! {
+    let mut descriptor = dictionary! {
         "Type" => "FontDescriptor",
         "FontName" => Object::Name(font.name.clone().into_bytes()),
         // Symbolic: the text is addressed by glyph, not by a named encoding.
@@ -383,8 +418,9 @@ fn add_embedded_font(
         "CapHeight" => Object::Real(font.cap_height() as f32),
         // Nominal: nothing in a print path reads it, but it is required.
         "StemV" => 80_i64,
-        "FontFile2" => file_id,
-    });
+    };
+    descriptor.set(stream_key, file_id);
+    let descriptor_id = doc.add_object(descriptor);
 
     // Widths for the glyphs actually drawn, one entry each.
     let mut widths: Vec<Object> = Vec::new();
@@ -393,9 +429,9 @@ fn add_embedded_font(
         widths.push(Object::Array(vec![Object::Real(*advance as f32)]));
     }
 
-    let cid_id = doc.add_object(dictionary! {
+    let mut cid_font = dictionary! {
         "Type" => "Font",
-        "Subtype" => "CIDFontType2",
+        "Subtype" => Object::Name(cid_subtype.as_bytes().to_vec()),
         "BaseFont" => Object::Name(font.name.clone().into_bytes()),
         "CIDSystemInfo" => dictionary! {
             "Registry" => Object::string_literal("Adobe"),
@@ -405,8 +441,13 @@ fn add_embedded_font(
         "FontDescriptor" => descriptor_id,
         "DW" => 1000_i64,
         "W" => Object::Array(widths),
-        "CIDToGIDMap" => "Identity",
-    });
+    };
+    if font.outlines() == Outlines::TrueType {
+        // Only a Type2 CID font maps CIDs to glyphs; a Type0 one is addressed
+        // by glyph already, and the key is not allowed there.
+        cid_font.set("CIDToGIDMap", Object::Name(b"Identity".to_vec()));
+    }
+    let cid_id = doc.add_object(cid_font);
 
     Object::Reference(doc.add_object(dictionary! {
         "Type" => "Font",
@@ -508,10 +549,7 @@ fn page_content(
         } else {
             lopdf::StringFormat::Literal
         };
-        operations.push(Operation::new(
-            "Tj",
-            vec![Object::String(encoded, format)],
-        ));
+        operations.push(Operation::new("Tj", vec![Object::String(encoded, format)]));
         operations.push(Operation::new("ET", vec![]));
         operations.push(Operation::new("Q", vec![]));
     }
@@ -657,5 +695,144 @@ mod tests {
             assert_eq!(Font::parse(font.base_name()), Some(*font));
         }
         assert_eq!(Font::parse("Comic Sans"), None);
+    }
+
+    /// Write one line in an embedded font and hand back the loaded document.
+    fn delta_with(path: &Path, font: &EmbeddedFont) -> Document {
+        let mut placed = line("Approved 25 July");
+        placed.font = LineFont::Embedded;
+        write_delta(
+            path,
+            &[PageSize::new(210.0, 297.0)],
+            &[vec![placed]],
+            "t",
+            Some(font),
+        )
+        .unwrap();
+        Document::load(path).unwrap()
+    }
+
+    /// The only dictionary in the file with a `/Type /FontDescriptor`.
+    fn descriptor(doc: &Document) -> lopdf::Dictionary {
+        doc.objects
+            .values()
+            .filter_map(|object| object.as_dict().ok())
+            .find(|dict| {
+                dict.get(b"Type")
+                    .and_then(|t| t.as_name())
+                    .map(|name| name == b"FontDescriptor")
+                    .unwrap_or(false)
+            })
+            .expect("no font descriptor was written")
+            .clone()
+    }
+
+    /// The descendant CID font, which names the flavour of the programme.
+    fn cid_font(doc: &Document) -> lopdf::Dictionary {
+        doc.objects
+            .values()
+            .filter_map(|object| object.as_dict().ok())
+            .find(|dict| {
+                dict.get(b"Subtype")
+                    .and_then(|t| t.as_name())
+                    .map(|name| name.starts_with(b"CIDFontType"))
+                    .unwrap_or(false)
+            })
+            .expect("no CID font was written")
+            .clone()
+    }
+
+    fn name_of(dict: &lopdf::Dictionary, key: &[u8]) -> String {
+        String::from_utf8_lossy(dict.get(key).unwrap().as_name().unwrap()).into_owned()
+    }
+
+    #[test]
+    fn a_truetype_font_is_embedded_as_a_plain_programme() {
+        let Some(path) = crate::font::tests::dejavu_path() else {
+            return;
+        };
+        let font = EmbeddedFont::load(&path).unwrap();
+        let dir = tempdir().unwrap();
+        let doc = delta_with(&dir.path().join("d.pdf"), &font);
+
+        let descriptor = descriptor(&doc);
+        assert!(descriptor.has(b"FontFile2"), "{descriptor:?}");
+        assert!(!descriptor.has(b"FontFile3"));
+
+        let cid = cid_font(&doc);
+        assert_eq!(name_of(&cid, b"Subtype"), "CIDFontType2");
+        // A Type2 CID font is addressed by CID, so the map must be there.
+        assert_eq!(name_of(&cid, b"CIDToGIDMap"), "Identity");
+
+        // The programme itself carries Length1, which only FontFile2 wants.
+        let file_id = descriptor
+            .get(b"FontFile2")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let stream = doc.get_object(file_id).unwrap().as_stream().unwrap();
+        assert!(stream.dict.has(b"Length1"));
+        assert!(!stream.dict.has(b"Subtype"));
+    }
+
+    #[test]
+    fn a_postscript_font_is_embedded_whole_as_opentype() {
+        // Getting this wrong is silent: a CFF font written as if it were
+        // TrueType gives a file that opens fine and prints a blank page.
+        let Some(path) = crate::font::tests::postscript_font() else {
+            return;
+        };
+        let font = EmbeddedFont::load(&path).unwrap();
+        let dir = tempdir().unwrap();
+        let doc = delta_with(&dir.path().join("d.pdf"), &font);
+
+        let descriptor = descriptor(&doc);
+        assert!(descriptor.has(b"FontFile3"), "{descriptor:?}");
+        assert!(!descriptor.has(b"FontFile2"));
+
+        let cid = cid_font(&doc);
+        assert_eq!(name_of(&cid, b"Subtype"), "CIDFontType0");
+        // CIDToGIDMap has no meaning for a Type0 CID font and is not allowed.
+        assert!(!cid.has(b"CIDToGIDMap"), "{cid:?}");
+
+        let file_id = descriptor
+            .get(b"FontFile3")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let stream = doc.get_object(file_id).unwrap().as_stream().unwrap();
+        assert_eq!(name_of(&stream.dict, b"Subtype"), "OpenType");
+        // Length1 counts a TrueType programme's bytes and means nothing here.
+        assert!(!stream.dict.has(b"Length1"), "{:?}", stream.dict);
+    }
+
+    #[test]
+    fn either_flavour_carries_the_whole_font_programme() {
+        let candidates = [
+            crate::font::tests::dejavu_path(),
+            crate::font::tests::postscript_font(),
+        ];
+        for path in candidates.into_iter().flatten() {
+            let font = EmbeddedFont::load(&path).unwrap();
+            let expected = font.program().len();
+            let dir = tempdir().unwrap();
+            let doc = delta_with(&dir.path().join("d.pdf"), &font);
+
+            let descriptor = descriptor(&doc);
+            let key: &[u8] = if descriptor.has(b"FontFile2") {
+                b"FontFile2"
+            } else {
+                b"FontFile3"
+            };
+            let file_id = descriptor.get(key).unwrap().as_reference().unwrap();
+            let stream = doc.get_object(file_id).unwrap().as_stream().unwrap();
+            let program = stream.decompressed_content().unwrap();
+            assert_eq!(
+                program.len(),
+                expected,
+                "{} arrived truncated",
+                path.display()
+            );
+        }
     }
 }

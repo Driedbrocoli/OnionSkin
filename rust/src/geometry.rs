@@ -34,7 +34,7 @@ pub fn px_to_mm(px: f64, dpi: f64) -> f64 {
 }
 
 /// A page's physical size in millimetres.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PageSize {
     pub width_mm: f64,
     pub height_mm: f64,
@@ -140,7 +140,10 @@ pub fn parse_page(spec: &str) -> Result<PageSize, String> {
     if parts.len() != 2 {
         return Err(unknown_page(spec));
     }
-    let (width, height) = match (parts[0].trim().parse::<f64>(), parts[1].trim().parse::<f64>()) {
+    let (width, height) = match (
+        parts[0].trim().parse::<f64>(),
+        parts[1].trim().parse::<f64>(),
+    ) {
         (Ok(w), Ok(h)) => (w, h),
         _ => return Err(unknown_page(spec)),
     };
@@ -686,7 +689,10 @@ mod tests {
     #[test]
     fn page_sizes_by_name_or_measurement() {
         assert_eq!(parse_page("a4").unwrap(), PageSize::new(210.0, 297.0));
-        assert_eq!(parse_page("  LETTER ").unwrap(), PageSize::new(215.9, 279.4));
+        assert_eq!(
+            parse_page("  LETTER ").unwrap(),
+            PageSize::new(215.9, 279.4)
+        );
         assert_eq!(parse_page("legal").unwrap(), PageSize::new(215.9, 355.6));
         assert_eq!(parse_page("210x297").unwrap(), PageSize::new(210.0, 297.0));
         assert_eq!(parse_page("100*150").unwrap(), PageSize::new(100.0, 150.0));
@@ -694,7 +700,16 @@ mod tests {
 
     #[test]
     fn impossible_page_sizes_are_refused() {
-        for spec in ["", "nonsense", "a4x", "1x", "0x100", "-5x10", "9000x9000", "1x2x3"] {
+        for spec in [
+            "",
+            "nonsense",
+            "a4x",
+            "1x",
+            "0x100",
+            "-5x10",
+            "9000x9000",
+            "1x2x3",
+        ] {
             assert!(parse_page(spec).is_err(), "{spec} should be refused");
         }
     }

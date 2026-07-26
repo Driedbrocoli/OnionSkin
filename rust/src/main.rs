@@ -8,12 +8,13 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use onionskin::geometry::{parse_page, PageSize};
 use onionskin::acquire::{
-    acquire, list_devices, scanning_available, unavailable_reason, AcquireOptions,
-    PLACEMENT_ADVICE,
+    acquire, list_devices, scanning_available, unavailable_reason, AcquireOptions, PLACEMENT_ADVICE,
 };
+use onionskin::document::{Document, Item};
 use onionskin::font::{suggest_system_font, EmbeddedFont};
+use onionskin::geometry::{parse_page, PageSize};
+use onionskin::letters;
 use onionskin::pdf::{write_delta, Font, LineFont, PlacedLine};
 use onionskin::scan::{register, ScanOptions, ScanRegistration};
 
@@ -41,6 +42,180 @@ enum Command {
     Scanners,
     /// List the fonts available.
     Fonts,
+
+    /// Start a new document from a blank page.
+    New(NewArgs),
+    /// Put words on a document.
+    Write(WriteArgs),
+    /// List what is on a document, with the number of each piece of text.
+    Show(ShowArgs),
+    /// Change a piece of text: its words, where it sits, how it is set.
+    Edit(EditArgs),
+    /// Take a piece of text off the page.
+    Erase(EraseArgs),
+    /// Write a document out as a PDF, whole or as a delta onto the printed sheet.
+    Print(PrintArgs),
+    /// Read the letters off a scanned page.
+    Read(ReadArgs),
+}
+
+#[derive(clap::Args)]
+struct NewArgs {
+    /// Where to keep the document.
+    document: PathBuf,
+    /// Size of the paper: a4, letter, legal… or a size in mm like 100x150.
+    #[arg(long, default_value = "a4")]
+    page: String,
+    /// How many sheets.
+    #[arg(long, default_value_t = 1)]
+    pages: usize,
+    /// Replace a document that is already there.
+    #[arg(long)]
+    force: bool,
+}
+
+// Positions on a page are routinely negative when someone is nudging
+// something, and a leading minus would otherwise read as another flag.
+#[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
+struct WriteArgs {
+    /// The document to write on.
+    document: PathBuf,
+    /// Where the words go and what they say, in millimetres from the top-left
+    /// corner of the paper: 'X,Y:the words'. Y is the baseline — where the
+    /// letters sit. Use \n in the text for a line break.
+    #[arg(long = "at", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
+    at: Vec<String>,
+    /// Which page, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    /// Type size in points.
+    #[arg(long, default_value_t = 11.0)]
+    size: f64,
+    /// A built-in font's name (see `onionskin fonts`), or 'file' for the one
+    /// passed with --font-file when printing.
+    #[arg(long, default_value = "Helvetica")]
+    font: String,
+    /// Wrap the words at this many millimetres.
+    #[arg(long)]
+    width: Option<f64>,
+    /// Turn the words, degrees clockwise on the page.
+    #[arg(long, default_value_t = 0.0)]
+    rotation: f64,
+    /// Colour as #rrggbb. Most printers only have black.
+    #[arg(long, default_value = "#000000")]
+    colour: String,
+    /// Space between wrapped lines, as a multiple of the type size.
+    #[arg(long, default_value_t = 1.2)]
+    leading: f64,
+}
+
+#[derive(clap::Args)]
+struct ShowArgs {
+    /// The document to look at.
+    document: PathBuf,
+    /// Report as JSON instead of for reading.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
+struct EditArgs {
+    /// The document to change.
+    document: PathBuf,
+    /// Which piece of text, by the number `onionskin show` gives it.
+    item: u32,
+    /// New words. Use \n for a line break.
+    #[arg(long, allow_hyphen_values = true)]
+    text: Option<String>,
+    /// Move it to this position, in millimetres: 'X,Y'.
+    #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+    at: Option<String>,
+    /// Nudge it by this much, in millimetres: 'X,Y'.
+    #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+    by: Option<String>,
+    /// Move it to another page.
+    #[arg(long)]
+    page: Option<usize>,
+    #[arg(long)]
+    size: Option<f64>,
+    #[arg(long)]
+    font: Option<String>,
+    #[arg(long)]
+    width: Option<f64>,
+    /// Stop wrapping, and let the text run on one line.
+    #[arg(long, conflicts_with = "width")]
+    no_width: bool,
+    #[arg(long)]
+    rotation: Option<f64>,
+    #[arg(long)]
+    colour: Option<String>,
+    #[arg(long)]
+    leading: Option<f64>,
+}
+
+#[derive(clap::Args)]
+struct EraseArgs {
+    /// The document to change.
+    document: PathBuf,
+    /// Which piece of text, by the number `onionskin show` gives it.
+    item: u32,
+}
+
+#[derive(clap::Args)]
+struct PrintArgs {
+    /// The document to print.
+    document: PathBuf,
+    /// PDF to write.
+    #[arg(short, long)]
+    output: PathBuf,
+    /// Print only what has been added since the sheet was last printed, so it
+    /// can go back through the printer onto the same paper.
+    #[arg(long)]
+    delta: bool,
+    /// Note that this document is now on paper, so a later --delta knows what
+    /// is already there.
+    #[arg(long)]
+    printed: bool,
+    /// A font file, for text set in 'file'.
+    #[arg(long)]
+    font_file: Option<PathBuf>,
+    /// Which face inside a font collection.
+    #[arg(long, default_value_t = 0)]
+    font_index: u32,
+    /// Print a delta even though something already on the sheet has changed.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::Args)]
+struct ReadArgs {
+    /// The scan: PNG, JPEG, TIFF or BMP.
+    scan: PathBuf,
+    /// Size of the paper that was scanned.
+    #[arg(long, default_value = "a4")]
+    page: String,
+    /// A font file to read the letters against. Without one, Onionskin reports
+    /// where every letter is but not which letter it is.
+    #[arg(long)]
+    font_file: Option<PathBuf>,
+    /// Which face inside a font collection.
+    #[arg(long, default_value_t = 0)]
+    font_index: u32,
+    /// Look only for these characters. The default is everything the font can
+    /// draw, which covers whatever language the page is in.
+    #[arg(long)]
+    letters: Option<String>,
+    /// The image is exactly the sheet: skip detection and straightening.
+    #[arg(long)]
+    cropped: bool,
+    /// Do not look for skew; take the sheet as square to the scan.
+    #[arg(long)]
+    square: bool,
+    /// Report as JSON instead of for reading.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -169,9 +344,7 @@ fn same_file_key(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(path)
+        std::env::current_dir().unwrap_or_default().join(path)
     };
     // Resolve the parent where possible, so ./out/x.pdf and out/x.pdf agree.
     match (absolute.parent(), absolute.file_name()) {
@@ -241,7 +414,466 @@ fn run() -> Result<ExitCode, String> {
         Command::Add(args) => cmd_add(args),
         Command::Acquire(args) => cmd_acquire(args),
         Command::Scanners => cmd_scanners(),
+        Command::New(args) => cmd_new(args),
+        Command::Write(args) => cmd_write(args),
+        Command::Show(args) => cmd_show(args),
+        Command::Edit(args) => cmd_edit(args),
+        Command::Erase(args) => cmd_erase(args),
+        Command::Print(args) => cmd_print(args),
+        Command::Read(args) => cmd_read(args),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Making a document, and editing it
+// ---------------------------------------------------------------------------
+
+fn cmd_new(args: NewArgs) -> Result<ExitCode, String> {
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+    if args.pages == 0 {
+        return Err("a document has at least one page".into());
+    }
+    check_writable(&args.document, "document")?;
+    if args.document.exists() && !args.force {
+        return Err(format!(
+            "'{}' is already there. Use --force to start it again from blank, \
+             or pick another name.",
+            args.document.display()
+        ));
+    }
+
+    let document = Document::blank(page, args.pages);
+    document.save(&args.document).map_err(|e| e.to_string())?;
+
+    println!(
+        "{}: a blank {} document, {} page{}.",
+        args.document.display(),
+        page.describe(),
+        args.pages,
+        if args.pages == 1 { "" } else { "s" }
+    );
+    println!(
+        "\nPut words on it:\n  onionskin write {} --at '25,40:Dear Sir'",
+        args.document.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
+    if args.at.is_empty() {
+        return Err(
+            "nothing to write. Say where the words go, for example:\n    \
+             --at '25,40:Dear Sir'"
+                .into(),
+        );
+    }
+    let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
+
+    let mut added = Vec::new();
+    for placement in &args.at {
+        let ((x_mm, y_mm), text) = parse_placement(placement)?;
+        let item = Item {
+            id: 0,
+            page: args.page,
+            x_mm,
+            y_mm,
+            text: unescape(&text),
+            size_pt: args.size,
+            font: args.font.clone(),
+            width_mm: args.width,
+            rotation_deg: args.rotation,
+            colour: args.colour.clone(),
+            leading: args.leading,
+        };
+        added.push(document.add(item).map_err(|e| e.to_string())?);
+    }
+    document.save(&args.document).map_err(|e| e.to_string())?;
+
+    for id in &added {
+        let item = document.get(*id).expect("just added");
+        println!(
+            "{id}: page {}, {:.1},{:.1} mm — {}",
+            item.page,
+            item.x_mm,
+            item.y_mm,
+            first_line(&item.text)
+        );
+    }
+    warn_off_the_page(&document);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_show(args: ShowArgs) -> Result<ExitCode, String> {
+    let document = Document::load(&args.document).map_err(|e| e.to_string())?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!(
+        "{} — {}, {} page{}",
+        args.document.display(),
+        document.page.describe(),
+        document.pages,
+        if document.pages == 1 { "" } else { "s" }
+    );
+    if document.items.is_empty() {
+        println!("\nNothing on it yet.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for page in 1..=document.pages {
+        let items: Vec<_> = document.on_page(page).collect();
+        println!("\nPage {page}:");
+        if items.is_empty() {
+            println!("  (blank)");
+            continue;
+        }
+        for item in items {
+            let wrapped = item
+                .width_mm
+                .map(|w| format!(", wrapped at {w:.0} mm"))
+                .unwrap_or_default();
+            println!(
+                "  {:>3}  {:>6.1},{:<6.1} {:>5.1} pt {}{}",
+                item.id, item.x_mm, item.y_mm, item.size_pt, item.font, wrapped
+            );
+            println!("       {}", first_line(&item.text));
+        }
+    }
+
+    if document.has_been_printed() {
+        let added = document.added_since_printing().len();
+        println!(
+            "\nPrinted once. {} since then.",
+            match added {
+                0 => "Nothing added".to_string(),
+                1 => "One piece of text added".to_string(),
+                n => format!("{n} pieces of text added"),
+            }
+        );
+        let problems = document.overlay_problems();
+        if !problems.is_empty() {
+            println!(
+                "{} already on the sheet {} changed, so a delta cannot be printed.",
+                problems.len(),
+                if problems.len() == 1 { "has" } else { "have" }
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_edit(args: EditArgs) -> Result<ExitCode, String> {
+    let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
+    if args.at.is_some() && args.by.is_some() {
+        return Err("--at and --by both move the text; use one or the other".into());
+    }
+
+    let position = args.at.as_deref().map(parse_point).transpose()?;
+    let nudge = args.by.as_deref().map(parse_point).transpose()?;
+
+    {
+        let item = document.get_mut(args.item).map_err(|e| e.to_string())?;
+        if let Some(text) = &args.text {
+            item.text = unescape(text);
+        }
+        if let Some((x, y)) = position {
+            item.x_mm = x;
+            item.y_mm = y;
+        }
+        if let Some((dx, dy)) = nudge {
+            item.x_mm += dx;
+            item.y_mm += dy;
+        }
+        if let Some(page) = args.page {
+            item.page = page;
+        }
+        if let Some(size) = args.size {
+            item.size_pt = size;
+        }
+        if let Some(font) = &args.font {
+            item.font = font.clone();
+        }
+        if let Some(width) = args.width {
+            item.width_mm = Some(width);
+        }
+        if args.no_width {
+            item.width_mm = None;
+        }
+        if let Some(rotation) = args.rotation {
+            item.rotation_deg = rotation;
+        }
+        if let Some(colour) = &args.colour {
+            item.colour = colour.clone();
+        }
+        if let Some(leading) = args.leading {
+            item.leading = leading;
+        }
+    }
+    if let Some(page) = args.page {
+        document.pages = document.pages.max(page);
+    }
+    document.save(&args.document).map_err(|e| e.to_string())?;
+
+    let item = document.get(args.item).expect("just edited");
+    println!(
+        "{}: page {}, {:.1},{:.1} mm — {}",
+        item.id,
+        item.page,
+        item.x_mm,
+        item.y_mm,
+        first_line(&item.text)
+    );
+    warn_off_the_page(&document);
+    report_overlay_problems(&document, false);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_erase(args: EraseArgs) -> Result<ExitCode, String> {
+    let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
+    let gone = document.remove(args.item).map_err(|e| e.to_string())?;
+    document.save(&args.document).map_err(|e| e.to_string())?;
+
+    println!("{}: erased — {}", gone.id, first_line(&gone.text));
+    report_overlay_problems(&document, false);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
+    let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
+    check_writable(&args.output, "PDF")?;
+    refuse_to_clobber(&args.output, "PDF", &[(&args.document, "document")])?;
+
+    let font = load_font(args.font_file.as_deref(), args.font_index)?;
+
+    let pages = if args.delta {
+        let problems = document.overlay_problems();
+        if !problems.is_empty() && !args.force {
+            for problem in &problems {
+                eprintln!("{}\n", problem.format());
+            }
+            eprintln!(
+                "Nothing was written. Print the whole document instead (drop --delta), \
+                 or --force if you know what you are doing."
+            );
+            return Ok(ExitCode::from(2));
+        }
+        if !document.has_been_printed() {
+            eprintln!(
+                "note: this document has not been printed yet, so the delta is all \
+                 of it. Add --printed when you print it, and a later --delta will \
+                 carry only what you added afterwards."
+            );
+        }
+        document.delta_layout(font.as_ref())
+    } else {
+        document.layout(font.as_ref())
+    }
+    .map_err(|e| e.to_string())?;
+
+    let written: usize = pages.iter().map(|p| p.len()).sum();
+    if written == 0 {
+        eprintln!(
+            "note: nothing to print — the {} is empty.",
+            if args.delta { "delta" } else { "document" }
+        );
+    }
+
+    write_delta(
+        &args.output,
+        &document.page_sizes(),
+        &pages,
+        "Onionskin document",
+        font.as_ref(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!(
+        "{}: {} page{}, {written} line{}.",
+        args.output.display(),
+        document.pages,
+        if document.pages == 1 { "" } else { "s" },
+        if written == 1 { "" } else { "s" }
+    );
+
+    if args.printed {
+        document.mark_printed();
+        document.save(&args.document).map_err(|e| e.to_string())?;
+        println!(
+            "Noted as printed. Add more words, then:\n  onionskin print {} -o delta.pdf --delta",
+            args.document.display()
+        );
+    }
+    if args.delta {
+        println!("\n{PRINT_INSTRUCTIONS}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Say when text has been placed off the paper, without refusing it.
+///
+/// Refusing would be wrong: someone may be laying a page out and mean to move
+/// it in a moment. Saying nothing would be worse — it prints blank and the
+/// reason is invisible.
+fn warn_off_the_page(document: &Document) {
+    for item in &document.items {
+        let page = document.page;
+        if item.x_mm < 0.0
+            || item.y_mm < 0.0
+            || item.x_mm > page.width_mm
+            || item.y_mm > page.height_mm
+        {
+            eprintln!(
+                "warning: item {} sits at {:.1},{:.1} mm, which is off a {} sheet. \
+                 It will not print.",
+                item.id,
+                item.x_mm,
+                item.y_mm,
+                page.describe()
+            );
+        }
+    }
+}
+
+fn report_overlay_problems(document: &Document, verbose: bool) {
+    let problems = document.overlay_problems();
+    if problems.is_empty() {
+        return;
+    }
+    if verbose {
+        for problem in &problems {
+            eprintln!("{}\n", problem.format());
+        }
+    }
+    eprintln!(
+        "note: {} piece{} of text already on the printed sheet {} changed. \
+         A delta cannot undo ink, so that page has to be printed fresh.",
+        problems.len(),
+        if problems.len() == 1 { "" } else { "s" },
+        if problems.len() == 1 { "has" } else { "have" }
+    );
+}
+
+/// Load a font file, if one was named.
+fn load_font(path: Option<&Path>, index: u32) -> Result<Option<EmbeddedFont>, String> {
+    match path {
+        Some(path) => EmbeddedFont::load_indexed(path, index)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        None => Ok(None),
+    }
+}
+
+/// `\n` typed at a shell prompt, meant as a line break.
+fn unescape(text: &str) -> String {
+    text.replace("\\n", "\n").replace("\\t", "\t")
+}
+
+fn first_line(text: &str) -> String {
+    let first = text.lines().next().unwrap_or("");
+    let shown: String = first.chars().take(56).collect();
+    let more = if shown.chars().count() < first.chars().count() || text.contains('\n') {
+        " …"
+    } else {
+        ""
+    };
+    format!("{shown}{more}")
+}
+
+fn parse_point(text: &str) -> Result<(f64, f64), String> {
+    let (x, y) = text
+        .split_once(',')
+        .ok_or_else(|| format!("'{text}' should be two numbers: 'X,Y' in millimetres"))?;
+    let number = |part: &str, which: &str| -> Result<f64, String> {
+        part.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("'{}' is not a {which} position in millimetres", part.trim()))
+    };
+    Ok((number(x, "horizontal")?, number(y, "vertical")?))
+}
+
+// ---------------------------------------------------------------------------
+// Reading the letters off a scan
+// ---------------------------------------------------------------------------
+
+fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+    let image = image::open(&args.scan)
+        .map_err(|e| format!("could not read '{}': {e}", args.scan.display()))?;
+
+    let options = ScanOptions {
+        page,
+        assume_cropped: args.cropped,
+        assume_square: args.square,
+        ..ScanOptions::new(page)
+    };
+    let registration = register(&image, options).map_err(|e| e.to_string())?;
+    let gray = image.to_luma8();
+
+    let font = load_font(args.font_file.as_deref(), args.font_index)?;
+    let text = match &font {
+        Some(font) => letters::read_with_font(
+            &gray,
+            &registration,
+            &letters::ReadOptions::default(),
+            font,
+            args.letters.as_deref(),
+        ),
+        None => letters::read(&gray, &registration, &letters::ReadOptions::default()),
+    }
+    .map_err(|e| e.to_string())?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&text).map_err(|e| e.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("{}", registration.describe());
+    println!(
+        "\n{} letter{} in {} word{} on {} line{}.",
+        text.letter_count(),
+        if text.letter_count() == 1 { "" } else { "s" },
+        text.word_count(),
+        if text.word_count() == 1 { "" } else { "s" },
+        text.lines.len(),
+        if text.lines.len() == 1 { "" } else { "s" }
+    );
+    if font.is_none() {
+        println!(
+            "No font was given, so this is where the letters are, not which they \
+             are.\nPass --font-file with the font the page was set in to read them."
+        );
+    }
+
+    for line in &text.lines {
+        println!(
+            "\n  {:>6.1} mm  ({:.1}–{:.1} mm across)",
+            line.baseline_mm,
+            line.rect.x_mm,
+            line.rect.right_mm()
+        );
+        if font.is_some() {
+            println!("     {}", line.text_lossy());
+        }
+    }
+    if text.discarded > 0 {
+        println!(
+            "\n{} mark{} set aside as too small or too large to be a letter.",
+            text.discarded,
+            if text.discarded == 1 { "" } else { "s" }
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_scanners() -> Result<ExitCode, String> {
@@ -400,9 +1032,9 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     // A supplied font wins: asking for one and silently getting Helvetica is
     // how the Python side once made --font-file appear to do nothing.
     let embedded = match &args.font_file {
-        Some(path) => Some(
-            EmbeddedFont::load_indexed(path, args.font_index).map_err(|e| e.to_string())?,
-        ),
+        Some(path) => {
+            Some(EmbeddedFont::load_indexed(path, args.font_index).map_err(|e| e.to_string())?)
+        }
         None => None,
     };
     let line_font = match &embedded {
@@ -489,7 +1121,10 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         // Point at a font that is actually on this machine, rather than
         // leaving someone to hunt for one.
         let text = message.to_string();
-        match (text.contains("cannot write these characters"), suggest_system_font()) {
+        match (
+            text.contains("cannot write these characters"),
+            suggest_system_font(),
+        ) {
             (true, Some(path)) => format!(
                 "{text}\n    There is one on this machine: --font-file {}",
                 path.display()

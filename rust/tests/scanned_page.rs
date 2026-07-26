@@ -29,7 +29,12 @@ struct Look {
 
 impl Look {
     fn plain(lines: usize) -> Look {
-        Look { lines, backing: [38, 40, 44], paper: 245, ink: 25 }
+        Look {
+            lines,
+            backing: [38, 40, 44],
+            paper: 245,
+            ink: 25,
+        }
     }
 }
 
@@ -49,7 +54,12 @@ impl Scan {
     }
 
     fn build_with(page: PageSize, dpi: f64, margin: u32, skew_deg: f64, look: Look) -> Scan {
-        let Look { lines, backing, paper, ink } = look;
+        let Look {
+            lines,
+            backing,
+            paper,
+            ink,
+        } = look;
         let px_per_mm = dpi / 25.4;
         let sheet_w = (page.width_mm * px_per_mm) as u32;
         let sheet_h = (page.height_mm * px_per_mm) as u32;
@@ -209,14 +219,36 @@ fn skew_is_recovered_across_the_usual_range() {
 #[test]
 fn a_pale_scan_still_registers() {
     // Some scanners wash everything out; the split has to come from the image.
-    let scan = Scan::build_with(A4, 150.0, 90, 1.0, Look { lines: 20, backing: [150, 150, 150], paper: 252, ink: 190 });
+    let scan = Scan::build_with(
+        A4,
+        150.0,
+        90,
+        1.0,
+        Look {
+            lines: 20,
+            backing: [150, 150, 150],
+            paper: 252,
+            ink: 190,
+        },
+    );
     let registration = register(&scan.image, ScanOptions::new(A4)).unwrap();
     assert!((registration.dpi() - 150.0).abs() < 6.0);
 }
 
 #[test]
 fn a_dark_scan_still_registers() {
-    let scan = Scan::build_with(A4, 150.0, 90, 1.0, Look { lines: 20, backing: [5, 5, 5], paper: 160, ink: 20 });
+    let scan = Scan::build_with(
+        A4,
+        150.0,
+        90,
+        1.0,
+        Look {
+            lines: 20,
+            backing: [5, 5, 5],
+            paper: 160,
+            ink: 20,
+        },
+    );
     let registration = register(&scan.image, ScanOptions::new(A4)).unwrap();
     assert!((registration.dpi() - 150.0).abs() < 6.0);
 }
@@ -276,7 +308,11 @@ fn a_blank_sheet_is_still_measured_from_its_edges() {
     let scan = Scan::build(A4, 150.0, 90, 1.5, 0);
     let registration = register(&scan.image, ScanOptions::new(A4)).unwrap();
     // A blank sheet has no text, but it still has edges.
-    assert!((registration.skew_deg - 1.5).abs() < 0.3, "{}", registration.skew_deg);
+    assert!(
+        (registration.skew_deg - 1.5).abs() < 0.3,
+        "{}",
+        registration.skew_deg
+    );
     assert!((registration.dpi() - 150.0).abs() < 6.0);
 }
 
@@ -349,7 +385,11 @@ fn add_accepts_millimetres_measured_on_the_paper() {
     ]);
 
     assert_eq!(result.code, 0, "stderr: {}", result.stderr);
-    assert!(result.stdout.contains("(60.0, 150.0) mm"), "{}", result.stdout);
+    assert!(
+        result.stdout.contains("(60.0, 150.0) mm"),
+        "{}",
+        result.stdout
+    );
 }
 
 #[test]
@@ -415,7 +455,11 @@ fn multiple_additions_all_land() {
     ]);
 
     assert_eq!(result.code, 0, "stderr: {}", result.stderr);
-    assert!(result.stdout.contains("additions  : 3"), "{}", result.stdout);
+    assert!(
+        result.stdout.contains("additions  : 3"),
+        "{}",
+        result.stdout
+    );
 }
 
 #[test]
@@ -467,19 +511,55 @@ fn bad_input_is_reported_cleanly() {
             "no words",
         ),
         (
-            vec!["add", scan, "-o", output, "--at-mm", "60,150:hi", "--page", "nope"],
+            vec![
+                "add",
+                scan,
+                "-o",
+                output,
+                "--at-mm",
+                "60,150:hi",
+                "--page",
+                "nope",
+            ],
             "unknown page size",
         ),
         (
-            vec!["add", scan, "-o", output, "--at-mm", "60,150:hi", "--font", "Comic Sans"],
+            vec![
+                "add",
+                scan,
+                "-o",
+                output,
+                "--at-mm",
+                "60,150:hi",
+                "--font",
+                "Comic Sans",
+            ],
             "unknown font",
         ),
         (
-            vec!["add", scan, "-o", output, "--at-mm", "60,150:hi", "--size", "0"],
+            vec![
+                "add",
+                scan,
+                "-o",
+                output,
+                "--at-mm",
+                "60,150:hi",
+                "--size",
+                "0",
+            ],
             "out of range",
         ),
         (
-            vec!["add", scan, "-o", output, "--at-mm", "60,150:hi", "--size", "9000"],
+            vec![
+                "add",
+                scan,
+                "-o",
+                output,
+                "--at-mm",
+                "60,150:hi",
+                "--size",
+                "9000",
+            ],
             "out of range",
         ),
         (
@@ -487,7 +567,14 @@ fn bad_input_is_reported_cleanly() {
             "cannot write these characters",
         ),
         (
-            vec!["add", "/nonexistent/scan.png", "-o", output, "--at-mm", "60,150:hi"],
+            vec![
+                "add",
+                "/nonexistent/scan.png",
+                "-o",
+                output,
+                "--at-mm",
+                "60,150:hi",
+            ],
             "no such file",
         ),
         (vec!["inspect", scan, "--page", "0x0"], "unknown page size"),
@@ -525,7 +612,11 @@ fn a_file_that_is_not_an_image_is_reported_cleanly() {
     ]);
 
     assert_eq!(result.code, 1);
-    assert!(result.stderr.contains("could not read"), "{}", result.stderr);
+    assert!(
+        result.stderr.contains("could not read"),
+        "{}",
+        result.stderr
+    );
     assert!(!result.stderr.contains("panicked"));
 }
 
@@ -759,17 +850,30 @@ fn the_scan_is_never_written_over() {
     for args in [
         vec!["add", scan, "-o", scan, "--at-mm", "60,150:hi"],
         vec![
-            "add", scan, "-o",
+            "add",
+            scan,
+            "-o",
             dir.path().join("d.pdf").to_str().unwrap(),
-            "--at-mm", "60,150:hi", "--preview", scan,
+            "--at-mm",
+            "60,150:hi",
+            "--preview",
+            scan,
         ],
     ] {
         let result = run(&args);
         assert_eq!(result.code, 1, "should refuse: {args:?}");
-        assert!(result.stderr.contains("refusing to write"), "{}", result.stderr);
+        assert!(
+            result.stderr.contains("refusing to write"),
+            "{}",
+            result.stderr
+        );
     }
 
-    assert_eq!(std::fs::read(&scan_path).unwrap(), before, "the scan changed");
+    assert_eq!(
+        std::fs::read(&scan_path).unwrap(),
+        before,
+        "the scan changed"
+    );
 }
 
 #[test]
@@ -780,14 +884,22 @@ fn the_proof_is_never_written_over_the_delta() {
     let shared = dir.path().join("both.png");
 
     let result = run(&[
-        "add", scan_path.to_str().unwrap(),
-        "-o", shared.to_str().unwrap(),
-        "--at-mm", "60,150:hi",
-        "--preview", shared.to_str().unwrap(),
+        "add",
+        scan_path.to_str().unwrap(),
+        "-o",
+        shared.to_str().unwrap(),
+        "--at-mm",
+        "60,150:hi",
+        "--preview",
+        shared.to_str().unwrap(),
     ]);
 
     assert_eq!(result.code, 1);
-    assert!(result.stderr.contains("refusing to write"), "{}", result.stderr);
+    assert!(
+        result.stderr.contains("refusing to write"),
+        "{}",
+        result.stderr
+    );
 }
 
 #[test]
@@ -823,10 +935,32 @@ fn negative_numbers_are_accepted_as_values() {
 
     // A leading minus must read as a value, not the start of another flag.
     for args in [
-        vec!["add", scan, "-o", out.to_str().unwrap(), "--at-mm", "60,150:x",
-             "--rotation", "-90"],
-        vec!["add", scan, "-o", out.to_str().unwrap(), "--at-mm", "-20,-30:x"],
-        vec!["add", scan, "-o", out.to_str().unwrap(), "--at", "-50,-50:x"],
+        vec![
+            "add",
+            scan,
+            "-o",
+            out.to_str().unwrap(),
+            "--at-mm",
+            "60,150:x",
+            "--rotation",
+            "-90",
+        ],
+        vec![
+            "add",
+            scan,
+            "-o",
+            out.to_str().unwrap(),
+            "--at-mm",
+            "-20,-30:x",
+        ],
+        vec![
+            "add",
+            scan,
+            "-o",
+            out.to_str().unwrap(),
+            "--at",
+            "-50,-50:x",
+        ],
     ] {
         let result = run(&args);
         assert_eq!(result.code, 0, "for {args:?}: {}", result.stderr);
@@ -861,13 +995,20 @@ fn a_placement_may_carry_several_lines() {
     Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
 
     let result = run(&[
-        "add", scan_path.to_str().unwrap(),
-        "-o", dir.path().join("d.pdf").to_str().unwrap(),
-        "--at-mm", r"40,100:first\nsecond\nthird",
+        "add",
+        scan_path.to_str().unwrap(),
+        "-o",
+        dir.path().join("d.pdf").to_str().unwrap(),
+        "--at-mm",
+        r"40,100:first\nsecond\nthird",
     ]);
 
     assert_eq!(result.code, 0, "{}", result.stderr);
-    assert!(result.stdout.contains("additions  : 3"), "{}", result.stdout);
+    assert!(
+        result.stdout.contains("additions  : 3"),
+        "{}",
+        result.stdout
+    );
     // Successive lines step down the page.
     assert!(result.stdout.contains("(40.0, 100.0)"), "{}", result.stdout);
     assert!(result.stdout.contains("(40.0, 104.5)"), "{}", result.stdout);
@@ -910,16 +1051,23 @@ fn a_font_with_cyrillic() -> Option<&'static str> {
 /// leaving the person with no way forward is not.
 #[test]
 fn other_alphabets_work_with_a_supplied_font() {
-    let Some(font) = a_font_with_cyrillic() else { return };
+    let Some(font) = a_font_with_cyrillic() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let scan_path = dir.path().join("scan.png");
     Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
     let out = dir.path().join("ru.pdf");
 
     let result = run(&[
-        "add", scan_path.to_str().unwrap(), "-o", out.to_str().unwrap(),
-        "--at-mm", "40,100:Утверждено 26 июля",
-        "--font-file", font,
+        "add",
+        scan_path.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--at-mm",
+        "40,100:Утверждено 26 июля",
+        "--font-file",
+        font,
     ]);
 
     assert_eq!(result.code, 0, "{}", result.stderr);
@@ -940,9 +1088,12 @@ fn without_a_font_the_refusal_points_somewhere_useful() {
     Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
 
     let result = run(&[
-        "add", scan_path.to_str().unwrap(),
-        "-o", dir.path().join("d.pdf").to_str().unwrap(),
-        "--at-mm", "40,100:Утверждено",
+        "add",
+        scan_path.to_str().unwrap(),
+        "-o",
+        dir.path().join("d.pdf").to_str().unwrap(),
+        "--at-mm",
+        "40,100:Утверждено",
     ]);
 
     assert_eq!(result.code, 1);
@@ -953,17 +1104,23 @@ fn without_a_font_the_refusal_points_somewhere_useful() {
 /// font at all, and needs a different fix.
 #[test]
 fn a_font_missing_the_language_says_which_characters() {
-    let Some(font) = a_font_with_cyrillic() else { return };
+    let Some(font) = a_font_with_cyrillic() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let scan_path = dir.path().join("scan.png");
     Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
 
     // DejaVu has no CJK.
     let result = run(&[
-        "add", scan_path.to_str().unwrap(),
-        "-o", dir.path().join("d.pdf").to_str().unwrap(),
-        "--at-mm", "40,100:承認済み",
-        "--font-file", font,
+        "add",
+        scan_path.to_str().unwrap(),
+        "-o",
+        dir.path().join("d.pdf").to_str().unwrap(),
+        "--at-mm",
+        "40,100:承認済み",
+        "--font-file",
+        font,
     ]);
 
     assert_eq!(result.code, 1);
@@ -984,9 +1141,14 @@ fn a_font_file_that_is_not_a_font_is_reported() {
         ("/nonexistent/f.ttf", "no font file"),
     ] {
         let result = run(&[
-            "add", scan_path.to_str().unwrap(),
-            "-o", dir.path().join("d.pdf").to_str().unwrap(),
-            "--at-mm", "40,100:hello", "--font-file", path,
+            "add",
+            scan_path.to_str().unwrap(),
+            "-o",
+            dir.path().join("d.pdf").to_str().unwrap(),
+            "--at-mm",
+            "40,100:hello",
+            "--font-file",
+            path,
         ]);
         assert_eq!(result.code, 1);
         assert!(result.stderr.contains(expected), "{}", result.stderr);
@@ -1011,7 +1173,10 @@ fn without_a_scanner_the_commands_explain_themselves() {
         assert_ne!(result.code, 0, "{args:?} should not claim success");
         let all = format!("{}{}", result.stdout, result.stderr);
         assert!(all.contains("scanimage"), "{args:?}: {all}");
-        assert!(all.contains("pass the image file instead"), "{args:?}: {all}");
+        assert!(
+            all.contains("pass the image file instead"),
+            "{args:?}: {all}"
+        );
         assert!(!all.contains("panicked"), "{args:?}: {all}");
     }
 }
@@ -1041,8 +1206,16 @@ fn acquire_checks_its_arguments_before_asking_for_a_sheet() {
     for (args, expected) in cases {
         let result = run(&args);
         assert_eq!(result.code, 1, "{args:?}");
-        assert!(result.stderr.contains(expected), "{args:?}: {}", result.stderr);
+        assert!(
+            result.stderr.contains(expected),
+            "{args:?}: {}",
+            result.stderr
+        );
         // Nothing about laying the sheet down, since we never got that far.
-        assert!(!result.stdout.contains("Before scanning"), "{}", result.stdout);
+        assert!(
+            !result.stdout.contains("Before scanning"),
+            "{}",
+            result.stdout
+        );
     }
 }

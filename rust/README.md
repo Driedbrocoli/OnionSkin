@@ -2,6 +2,64 @@
 
 A port of the Python implementation in `../onionskin/`, in progress.
 
+## Making a document, and adding to it after it is printed
+
+This is Onionskin's own idea applied to its own documents, and it is the one
+place where the delta is *exact*. Start from a blank sheet:
+
+```bash
+onionskin new order.onionskin --page a4
+onionskin write order.onionskin --at '25,35:PURCHASE ORDER 4471' --size 16 --font bold
+onionskin write order.onionskin --at '25,50:Wickham & Sons Ltd\n14 Mill Lane\nBristol'
+onionskin write order.onionskin --at '25,90:Two hundred widgets, 40 mm, black.' --width 90
+onionskin show order.onionskin
+```
+
+Coordinates are millimetres from the top-left of the paper, the way you would
+measure with a ruler; the second number is the baseline, where the letters sit.
+`show` lists everything with a number, and those numbers are what you edit by:
+
+```bash
+onionskin edit order.onionskin 3 --by '0,-2'          # nudge it up 2 mm
+onionskin edit order.onionskin 3 --text 'Two hundred widgets, black anodised.'
+onionskin erase order.onionskin 2
+```
+
+Print it, and say that you have:
+
+```bash
+onionskin print order.onionskin -o order.pdf --printed
+```
+
+Now add the approval and print **only that**, onto the same sheet:
+
+```bash
+onionskin write order.onionskin --at '25,150:Approved — J. Bezzina, 26 July'
+onionskin print order.onionskin -o delta.pdf --delta
+```
+
+No rendering, no diffing, no comparing of pixels: the document recorded exactly
+which words went on the paper, so the delta is the words that did not. Nothing
+can drift, because nothing is measured.
+
+It also cannot reflow — every piece of text sits at a millimetre you chose, so
+inserting one does not push another down the page. What it *can* do is catch you
+moving something that is already printed:
+
+```
+BLOCKER [page 1]: item 1 has been moved, and it is already on the sheet.
+    "PURCHASE ORDER 4471"
+    Toner does not come off paper, so an overlay cannot undo it. Print this
+    page fresh.
+```
+
+`print --delta` exits `2` when it finds one and writes nothing.
+
+The document is JSON, so it diffs, it goes in version control, and you can edit
+it by hand. It is written through a temporary file and renamed into place, so a
+failure halfway leaves the old one intact rather than an empty file where your
+work was.
+
 ## Adding words to a scanned page
 
 This is the workflow Rust does end to end today. You have a sheet in your hand
@@ -55,10 +113,72 @@ onionskin add scan.png -o delta.pdf --font-file /path/to/NotoSans.ttf \
   --at-mm '40,100:承認済み 2026年7月25日'
 ```
 
-TrueType outlines only (`.ttf`, `.ttc`) — a font with PostScript outlines says
-so rather than producing a file that reads as valid and prints nothing. The
-whole font is embedded rather than subset, so a CJK delta runs to a few
+**Any font file works** — `.ttf`, `.ttc`, `.otf`, `.otc`. The two outline
+formats are held differently inside a PDF, and swapping them gives a file that
+opens fine and prints a blank page, so Onionskin looks at what the font actually
+carries rather than at its extension:
+
+| outlines | written as | typical fonts |
+|---|---|---|
+| TrueType (`glyf`) | `CIDFontType2` + `FontFile2` | Arial, Times New Roman, Noto, DejaVu |
+| PostScript (`CFF`) | `CIDFontType0` + `FontFile3` `/OpenType` | Calibri, Cambria, most `.otf` |
+
+That second row is the one that matters for Word: its default faces are
+PostScript-flavoured. A font carrying neither — a colour-emoji bitmap font, say
+— is refused by name rather than embedded as an empty page.
+
+The whole font is embedded rather than subset, so a CJK delta runs to a few
 megabytes: a large file that prints correctly beats a small one that does not.
+
+### Reading the letters off the page
+
+Registration says where the *sheet* is. `onionskin read` says where the *words*
+are — every mark of ink, grouped into letters, words and lines, reported in the
+same millimetres everything else uses:
+
+```bash
+onionskin read scan.png --page a4
+onionskin read scan.png --font-file /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+onionskin read scan.png --json
+```
+
+Without a font that is all you get, and it is already the useful half: you can
+point at a gap and know it really is a gap, rather than finding out at the
+printer that your new line landed on top of a footnote.
+
+With a font it reads them. A page is set in *some* font, and comparing ink
+against the glyphs of the font it was set in is both far more accurate and far
+less code than guessing from scratch. Each letter comes back with how well it
+actually matched, and a poor match is reported as unread rather than as a
+confident wrong answer — a plausible guess is worse than a blank when the sheet
+may be someone's only copy.
+
+**Any language.** The alphabet is not a list written down in English; it is
+everything the font can draw. Point it at a Greek font and it looks for Greek, a
+Devanagari font and it looks for Devanagari. `--letters` narrows it if you want.
+
+Three problems come with that, and all three are handled:
+
+* **Homoglyphs.** Latin `o`, Greek `ο` and Lao `໐` are three characters drawn as
+  one circle, and no amount of looking at ink will separate them. So the page is
+  read twice: once with no opinion, then again knowing which script it turned
+  out to be in. Most letters in any script have no lookalike, so the first pass
+  settles it comfortably.
+* **Second alphabets.** Unicode holds several complete extra copies of Latin —
+  small capitals, subscripts, four mathematical variants, roman numerals — all
+  drawn as ordinary letters and none of them used in ordinary text. They are
+  left out of the default alphabet, or `Paid` comes back as `ᴘaid`. Ask for them
+  with `--letters` and you get them.
+* **Right-to-left.** A line of Hebrew or Arabic found left-to-right comes back
+  with its words reversed, which is invisible to anyone who does not read the
+  script. The characters know which way they go, so the line is put in reading
+  order from what it says.
+
+Two honest limits, both about scripts rather than size. **Cursive** scripts —
+Arabic, and handwriting — join their letters, so a joined run is one mark and
+comes back as one unread letter; finding *where* the ink is still works, which
+is what placing a delta needs. **Combining marks** are folded into the letter
+they sit on, so Devanagari and Thai read as their base letters.
 
 ### Why a scan needs registering
 
