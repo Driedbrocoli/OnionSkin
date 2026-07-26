@@ -1,0 +1,49 @@
+# Run the tests, on every push.
+#
+# A release nobody tested is a download nobody should trust, and this is the
+# thing that makes the release workflow worth having.
+#
+# Tests that need something this machine has not got — a scanner, a printer,
+# LibreOffice, a font with wide coverage — skip themselves and say so. The PDF
+# renderer is fetched here because a great many of them do need it, and
+# without it they would all quietly skip and the run would be green and empty.
+
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache what cargo downloaded
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Fetch the PDF renderer
+        run: |
+          curl -fL -o pdfium.tgz \
+            https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz
+          mkdir -p pdfium && tar -xzf pdfium.tgz -C pdfium
+          echo "ONIONSKIN_PDFIUM=$PWD/pdfium/lib/libpdfium.so" >> "$GITHUB_ENV"
+
+      # Not required — Onionskin reads .docx, .odt and plain text itself — but
+      # the tests that check the built-in readers against files LibreOffice
+      # actually wrote need it, and those are the ones that matter.
+      - name: Install LibreOffice
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer
+
+      - run: cargo test --locked
+
+      - run: cargo clippy --all-targets --locked -- -D warnings

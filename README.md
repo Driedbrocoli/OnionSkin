@@ -16,16 +16,49 @@ Linux, Windows and macOS.
 
 ## Install
 
-**There is no published release yet, so this is built from source.** It takes
-about five minutes, most of it waiting. The steps below are the ones that were
-actually run on a clean clone, in this order, and they work.
+### Download it
 
-### 1. Rust
+The [Releases page](https://github.com/driedbrocoli/onionskin/releases) has one
+file per machine. Take yours:
+
+| | |
+|---|---|
+| **Windows** | `onionskin-VERSION-windows.zip` |
+| **Linux** — Debian, Ubuntu, Mint | `onionskin_VERSION_amd64.deb`, then `sudo dpkg -i onionskin_*.deb` |
+| **Linux** — anything else | `onionskin-VERSION-linux.tar.gz` |
+| **macOS** — Apple silicon | `onionskin-VERSION-macos-arm64.tar.gz` |
+| **macOS** — Intel | `onionskin-VERSION-macos-x64.tar.gz` |
+
+Unpack it, open a terminal in that folder, and run one line:
+
+```bash
+./onionskin install          # Windows: onionskin.exe install
+```
+
+That copies both programs and the PDF renderer into your own account, puts
+`onionskin` on your path, and — on Linux and Windows — adds a menu entry that
+opens the window. **Nothing asks for an administrator password.** Then open the
+applications menu and look for Onionskin, or type `onionskin-desktop`.
+
+The archives hold everything: both programs, the renderer, and the licences.
+Nothing else has to be installed.
+
+> **If the Releases page is empty**, no version has been tagged yet — build it
+> from source below. Anyone with write access to the repository makes the
+> downloads appear by pushing a tag (`git tag v0.1.0 && git push origin v0.1.0`),
+> which builds all five archives and attaches them to a release.
+
+### Or build it from source
+
+It takes about five minutes, most of it waiting. The steps below are the ones
+that were actually run on a clean clone, in this order, and they work.
+
+#### 1. Rust
 
 If `cargo --version` says nothing, get it from [rustup.rs](https://rustup.rs) —
 one command on every platform, and it installs into your own account.
 
-### 2. Build it
+#### 2. Build it
 
 ```bash
 git clone https://github.com/driedbrocoli/onionskin
@@ -39,7 +72,7 @@ The program is now `target/release/onionskin`. It already works:
 ./target/release/onionskin doctor
 ```
 
-### 3. The PDF renderer
+#### 3. The PDF renderer
 
 `doctor` will say `PDF rendering MISSING`, and tell you what to do about it.
 Onionskin draws PDF pages with **pdfium**, Google's renderer from Chromium. It
@@ -58,7 +91,7 @@ It is BSD and Apache licensed, like Onionskin, so there is nothing to agree to.
 scan, typing onto a form, drawing, reading letters and printing all need
 nothing installed.
 
-### 4. Install it
+#### 4. Install it
 
 ```bash
 cd target/release
@@ -86,11 +119,14 @@ removed.
 ### The window
 
 There are two programs. `onionskin` is the command line; `onionskin-desktop` is
-a window, and on Linux it is what the applications menu opens.
+the window, and it is what the applications menu opens. **That is the app** —
+you download it, install it, and it is in your menu like anything else.
 
-It is a real window — egui draws every widget itself onto an OpenGL surface.
-There is no web view and no browser engine inside it, which is what keeps the
-whole thing one file that runs on a machine with nothing installed.
+It is a real window. egui draws every widget itself onto an OpenGL surface:
+**no browser, no web view, no localhost, no tab.** That is what keeps the whole
+thing a 5 MB download that runs on a machine with nothing installed, and it is
+why the program can promise it never touches the network and have you be able
+to check.
 
 On **Linux** the window needs the display and graphics libraries every desktop
 already has: X11 or Wayland, xkbcommon, and OpenGL. A desktop machine has them.
@@ -278,11 +314,11 @@ it. Same for `add` and `print`.
 Either way, put the printed sheet back in the tray and print the delta **at
 100% / "Actual size"**, with "Fit to page" turned off.
 
-There is also a browser interface for the two-document workflow, served from
-your own machine: `onionskin serve`, then open <http://127.0.0.1:8737/>. It
-shows the same checks the command line prints — which engine opened the
-document, how close the new ink lands to the edge, whether the printer has been
-calibrated — before it offers you the delta to download. Anything automated
+**You never have to touch a browser.** For anyone who would rather use one
+anyway — over SSH, or on a machine with no desktop at all — `onionskin serve`
+puts the two-document workflow on `http://127.0.0.1:8737/`, reachable only from
+that machine. It is an extra command that has to be typed to happen: nothing
+opens a browser by itself, ever. Anything automated
 that posts to it with `Accept: application/pdf` gets the file straight back
 instead, as it always did.
 
