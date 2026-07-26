@@ -109,6 +109,26 @@ pub fn encode_winansi(text: &str) -> Result<Vec<u8>, PdfError> {
     let mut missing: Vec<char> = Vec::new();
 
     for ch in text.chars() {
+        // Text pasted out of a document arrives with tabs and carriage
+        // returns in it. A line of PDF text has no tab stops to honour and no
+        // notion of a line ending, so the sensible readings are a space and
+        // nothing — complaining about them as if they were foreign alphabets
+        // would be both wrong and unhelpful.
+        match ch {
+            '\t' => {
+                out.push(b' ');
+                continue;
+            }
+            '\r' | '\n' => continue,
+            _ => {}
+        }
+        if (ch as u32) < 0x20 || ch as u32 == 0x7F {
+            return Err(PdfError::Text(format!(
+                "the text contains a control character (code {}), which cannot be \
+                 printed. Remove it, or retype the line.",
+                ch as u32
+            )));
+        }
         match winansi_byte(ch) {
             Some(byte) => out.push(byte),
             None => {
@@ -416,6 +436,20 @@ mod tests {
             let width = media[2].as_float().unwrap() as f64;
             assert!((width - sizes[index].width_pt()).abs() < 0.5);
         }
+    }
+
+    #[test]
+    fn tabs_and_line_endings_are_taken_literally_enough() {
+        // Pasting from a document brings these along; neither means anything
+        // inside a single run of PDF text.
+        assert_eq!(encode_winansi("a\tb").unwrap(), b"a b".to_vec());
+        assert_eq!(encode_winansi("a\r\nb").unwrap(), b"ab".to_vec());
+    }
+
+    #[test]
+    fn a_control_character_is_named_as_such() {
+        let message = encode_winansi("a\u{7}b").unwrap_err().to_string();
+        assert!(message.contains("control character"), "{message}");
     }
 
     #[test]
