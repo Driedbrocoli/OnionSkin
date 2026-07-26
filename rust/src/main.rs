@@ -35,6 +35,7 @@ enum Command {
 }
 
 #[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
 struct InspectArgs {
     /// The scan: PNG, JPEG, TIFF or BMP.
     scan: PathBuf,
@@ -49,7 +50,10 @@ struct InspectArgs {
     square: bool,
 }
 
+// Angles and page coordinates are routinely negative, and a leading minus
+// would otherwise be read as the start of another flag.
 #[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
 struct AddArgs {
     /// The scan: PNG, JPEG, TIFF or BMP.
     scan: PathBuf,
@@ -59,12 +63,15 @@ struct AddArgs {
 
     /// Words to place, positioned by where they appear in the SCAN, in pixels:
     /// 'X,Y:the words'. This is what you read off an image viewer.
-    #[arg(long = "at", value_name = "X,Y:WORDS")]
+    // allow_hyphen_values: a placement is a string that may start with a minus
+    // ("-20,-30:note"), which allow_negative_numbers does not cover since the
+    // whole value is not a number.
+    #[arg(long = "at", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
     at_scan: Vec<String>,
 
     /// Words positioned by where they sit on the PAPER, in millimetres from the
     /// top-left corner: 'X,Y:the words'. Use when you measured with a ruler.
-    #[arg(long = "at-mm", value_name = "X,Y:WORDS")]
+    #[arg(long = "at-mm", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
     at_page: Vec<String>,
 
     /// Size of the paper that was scanned.
@@ -94,6 +101,70 @@ struct AddArgs {
     /// Warn about additions closer than this to an edge, in mm.
     #[arg(long, default_value_t = 5.0)]
     margin: f64,
+}
+
+/// Refuse to write over a file we are reading from.
+///
+/// `onionskin add scan.png -o scan.png` is an easy thing to type, and without
+/// this it destroys the scan — quite possibly the only copy of a sheet that has
+/// already been through the printer once. The same goes for the proof image.
+fn refuse_to_clobber(output: &Path, label: &str, inputs: &[(&Path, &str)]) -> Result<(), String> {
+    let target = same_file_key(output);
+    for (path, name) in inputs {
+        if same_file_key(path) == target {
+            return Err(format!(
+                "refusing to write the {label} over '{}' — that is the {name}, and \
+                 overwriting it would destroy it. Choose a different path.",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A comparable identity for a path, whether or not it exists yet.
+///
+/// Two files we are about to write cannot be canonicalised, since neither is
+/// there — but the proof quietly landing on top of the delta is exactly the
+/// kind of mistake worth catching before the work is done, not after.
+fn same_file_key(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(path)
+    };
+    // Resolve the parent where possible, so ./out/x.pdf and out/x.pdf agree.
+    match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(name)) => parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf())
+            .join(name),
+        _ => absolute,
+    }
+}
+
+/// Make sure a file can actually be written before doing the work.
+fn check_writable(path: &Path, label: &str) -> Result<(), String> {
+    if path.is_dir() {
+        return Err(format!(
+            "the {label} path '{}' is a directory. Give it a file name.",
+            path.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(format!(
+                "the folder '{}' does not exist, so the {label} cannot be written there.",
+                parent.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 const PRINT_INSTRUCTIONS: &str = "\
@@ -224,6 +295,19 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         )
     })?;
 
+    // Check the destinations before doing any work, so a mistake costs a
+    // message rather than the scan.
+    check_writable(&args.output, "delta")?;
+    refuse_to_clobber(&args.output, "delta", &[(&args.scan, "scan")])?;
+    if let Some(preview) = &args.preview {
+        check_writable(preview, "proof")?;
+        refuse_to_clobber(
+            preview,
+            "proof",
+            &[(&args.scan, "scan"), (&args.output, "delta")],
+        )?;
+    }
+
     let (registration, _) = load_registration(&args.scan, &args.page, args.cropped, args.square)?;
     let page: PageSize = registration.page;
 
@@ -291,20 +375,44 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         );
     }
 
-    let mut warned = false;
-    for line in &lines {
-        let near_edge = line.x_mm < args.margin
-            || line.y_mm < args.margin
-            || line.x_mm > page.width_mm - args.margin
-            || line.y_mm > page.height_mm - args.margin;
-        if near_edge && !warned {
-            println!(
-                "\nWARNING: an addition sits within {} mm of the edge. Most printers\n\
-                 cannot place ink there and will clip it.",
-                args.margin
-            );
-            warned = true;
-        }
+    // Off the sheet entirely and merely close to the edge are different
+    // problems: one prints nothing at all, the other prints and may be clipped.
+    let off_page = lines
+        .iter()
+        .filter(|line| {
+            line.x_mm < 0.0
+                || line.y_mm < 0.0
+                || line.x_mm > page.width_mm
+                || line.y_mm > page.height_mm
+        })
+        .count();
+    if off_page > 0 {
+        println!(
+            "\nWARNING: {off_page} addition(s) fall outside the {} sheet altogether,\n\
+             so nothing of them will be printed. Check the coordinates.",
+            page.describe()
+        );
+    }
+
+    let near_edge = lines
+        .iter()
+        .filter(|line| {
+            line.x_mm >= 0.0
+                && line.y_mm >= 0.0
+                && line.x_mm <= page.width_mm
+                && line.y_mm <= page.height_mm
+                && (line.x_mm < args.margin
+                    || line.y_mm < args.margin
+                    || line.x_mm > page.width_mm - args.margin
+                    || line.y_mm > page.height_mm - args.margin)
+        })
+        .count();
+    if near_edge > 0 {
+        println!(
+            "\nWARNING: {near_edge} addition(s) sit within {} mm of the edge. Most\n\
+             printers cannot place ink there and will clip it.",
+            args.margin
+        );
     }
 
     if let Some(preview_path) = &args.preview {

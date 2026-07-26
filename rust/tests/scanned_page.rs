@@ -743,3 +743,158 @@ fn dust_on_the_glass_is_handled() {
         }
     });
 }
+
+// --- never damage what the user already has --------------------------------
+
+/// `onionskin add scan.png -o scan.png` is an easy thing to type, and the scan
+/// may be the only copy of a sheet that has already been through the printer.
+#[test]
+fn the_scan_is_never_written_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let before = std::fs::read(&scan_path).unwrap();
+    let scan = scan_path.to_str().unwrap();
+
+    for args in [
+        vec!["add", scan, "-o", scan, "--at-mm", "60,150:hi"],
+        vec![
+            "add", scan, "-o",
+            dir.path().join("d.pdf").to_str().unwrap(),
+            "--at-mm", "60,150:hi", "--preview", scan,
+        ],
+    ] {
+        let result = run(&args);
+        assert_eq!(result.code, 1, "should refuse: {args:?}");
+        assert!(result.stderr.contains("refusing to write"), "{}", result.stderr);
+    }
+
+    assert_eq!(std::fs::read(&scan_path).unwrap(), before, "the scan changed");
+}
+
+#[test]
+fn the_proof_is_never_written_over_the_delta() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let shared = dir.path().join("both.png");
+
+    let result = run(&[
+        "add", scan_path.to_str().unwrap(),
+        "-o", shared.to_str().unwrap(),
+        "--at-mm", "60,150:hi",
+        "--preview", shared.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result.code, 1);
+    assert!(result.stderr.contains("refusing to write"), "{}", result.stderr);
+}
+
+#[test]
+fn unwritable_destinations_are_explained_before_any_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let scan = scan_path.to_str().unwrap();
+    let missing = dir.path().join("nope").join("d.pdf");
+    let a_directory = dir.path().join("adir");
+    std::fs::create_dir(&a_directory).unwrap();
+
+    let cases = [
+        (missing.to_str().unwrap(), "does not exist"),
+        (a_directory.to_str().unwrap(), "is a directory"),
+    ];
+    for (output, expected) in cases {
+        let result = run(&["add", scan, "-o", output, "--at-mm", "60,150:hi"]);
+        assert_eq!(result.code, 1);
+        assert!(result.stderr.contains(expected), "{}", result.stderr);
+    }
+}
+
+// --- placements at the limits ----------------------------------------------
+
+#[test]
+fn negative_numbers_are_accepted_as_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let scan = scan_path.to_str().unwrap();
+    let out = dir.path().join("d.pdf");
+
+    // A leading minus must read as a value, not the start of another flag.
+    for args in [
+        vec!["add", scan, "-o", out.to_str().unwrap(), "--at-mm", "60,150:x",
+             "--rotation", "-90"],
+        vec!["add", scan, "-o", out.to_str().unwrap(), "--at-mm", "-20,-30:x"],
+        vec!["add", scan, "-o", out.to_str().unwrap(), "--at", "-50,-50:x"],
+    ] {
+        let result = run(&args);
+        assert_eq!(result.code, 0, "for {args:?}: {}", result.stderr);
+    }
+}
+
+/// Off the sheet entirely and merely close to the edge are different problems:
+/// one prints nothing at all, the other prints and may be clipped.
+#[test]
+fn additions_off_the_sheet_are_told_apart_from_ones_near_the_edge() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let scan = scan_path.to_str().unwrap();
+    let out = dir.path().join("d.pdf");
+    let out = out.to_str().unwrap();
+
+    let off = run(&["add", scan, "-o", out, "--at-mm", "9999,500:gone"]);
+    assert!(off.stdout.contains("outside the"), "{}", off.stdout);
+
+    let edge = run(&["add", scan, "-o", out, "--at-mm", "2,150:tight"]);
+    assert!(edge.stdout.contains("within 5 mm"), "{}", edge.stdout);
+
+    let fine = run(&["add", scan, "-o", out, "--at-mm", "60,150:fine"]);
+    assert!(!fine.stdout.contains("WARNING"), "{}", fine.stdout);
+}
+
+#[test]
+fn a_placement_may_carry_several_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+
+    let result = run(&[
+        "add", scan_path.to_str().unwrap(),
+        "-o", dir.path().join("d.pdf").to_str().unwrap(),
+        "--at-mm", r"40,100:first\nsecond\nthird",
+    ]);
+
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("additions  : 3"), "{}", result.stdout);
+    // Successive lines step down the page.
+    assert!(result.stdout.contains("(40.0, 100.0)"), "{}", result.stdout);
+    assert!(result.stdout.contains("(40.0, 104.5)"), "{}", result.stdout);
+}
+
+#[test]
+fn many_additions_stay_a_small_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let out = dir.path().join("many.pdf");
+
+    let mut args: Vec<String> = vec![
+        "add".into(),
+        scan_path.to_str().unwrap().into(),
+        "-o".into(),
+        out.to_str().unwrap().into(),
+    ];
+    for i in 0..200 {
+        args.push("--at-mm".into());
+        args.push(format!("20,{}:line {i}", 20 + i % 260));
+    }
+    let borrowed: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let result = run(&borrowed);
+
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("additions  : 200"));
+    // Text is text: the whole page of it should still be a few kilobytes.
+    assert!(out.metadata().unwrap().len() < 20_000);
+}
