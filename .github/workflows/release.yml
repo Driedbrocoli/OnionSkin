@@ -1,0 +1,165 @@
+# Build the archives people download, and attach them to a release.
+#
+# Runs when a version tag is pushed:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# or by hand from the Actions tab, which is how to try it without committing
+# to a version number.
+#
+# There is no third-party action here. Everything is the `gh` command line and
+# `cargo`, both of which GitHub's runners already have — an action from the
+# marketplace is somebody else's code running with a token that can write to
+# this repository, which is a lot to accept for a step that is four lines of
+# shell.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the v"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  # Made once, before the builds, so four jobs uploading at the same time are
+  # not four jobs racing to create the same release.
+  draft:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.name.outputs.tag }}
+      version: ${{ steps.name.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out what this is called
+        id: name
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Open the release, empty
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.name.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag already exists; the archives will be replaced."
+          else
+            gh release create "$tag" \
+              --draft \
+              --title "Onionskin ${{ steps.name.outputs.version }}" \
+              --notes "Download the file for your machine, unpack it, and run \`onionskin install\`. Nothing asks for an administrator password."
+          fi
+
+  build:
+    needs: draft
+    strategy:
+      # One platform failing should not stop the others from being built:
+      # three archives and a note about the fourth beats no archives.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            pdfium: pdfium-linux-x64.tgz
+            library: lib/libpdfium.so
+            beside: libpdfium.so
+            exe: ""
+          - os: windows-latest
+            platform: windows
+            pdfium: pdfium-win-x64.tgz
+            library: bin/pdfium.dll
+            beside: pdfium.dll
+            exe: ".exe"
+          - os: macos-14
+            platform: macos
+            pdfium: pdfium-mac-arm64.tgz
+            library: lib/libpdfium.dylib
+            beside: libpdfium.dylib
+            exe: ""
+          - os: macos-13
+            platform: macos
+            pdfium: pdfium-mac-x64.tgz
+            library: lib/libpdfium.dylib
+            beside: libpdfium.dylib
+            exe: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache what cargo downloaded
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build both programs
+        run: cargo build --release --locked
+
+      # pdfium is a C++ library and is not on crates.io, so it is fetched as a
+      # binary from the build everyone uses. BSD and Apache licensed, which is
+      # why it can be shipped inside the archive at all.
+      - name: Fetch the PDF renderer
+        shell: bash
+        run: |
+          curl -fL -o pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/${{ matrix.pdfium }}"
+          mkdir -p pdfium
+          tar -xzf pdfium.tgz -C pdfium
+          cp "pdfium/${{ matrix.library }}" "target/release/${{ matrix.beside }}"
+
+      - name: Check it can see the renderer
+        shell: bash
+        run: ./target/release/onionskin${{ matrix.exe }} doctor || true
+
+      - name: Build the archives
+        shell: bash
+        run: |
+          ./target/release/onionskin${{ matrix.exe }} package \
+            --platform ${{ matrix.platform }} \
+            --version "${{ needs.draft.outputs.version }}" \
+            --out dist
+
+      # macOS is built twice, for two different chips, and both produce an
+      # archive of the same name. The chip goes in the name so neither is
+      # silently overwritten by the other.
+      - name: Name the macOS archives after the chip they are for
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          chip=$([ "${{ matrix.os }}" = "macos-14" ] && echo arm64 || echo x64)
+          for file in dist/*; do
+            mv "$file" "${file%.tar.gz}-$chip.tar.gz"
+          done
+
+      - name: Attach them to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.draft.outputs.tag }}" dist/* --clobber
+
+  publish:
+    needs: [draft, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Take it out of draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ needs.draft.outputs.tag }}" --draft=false

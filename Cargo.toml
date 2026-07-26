@@ -27,8 +27,36 @@ ttf-parser = "0.25.1"
 # by way of `image`, so this costs no new dependency.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
+# The desktop window. egui draws every widget itself onto an OpenGL surface —
+# there is no web view, no system toolkit and no C++ library behind it, so the
+# program is still one file that runs on a machine with nothing installed.
+#
+# `default-features = false` is not tidiness. The defaults bring wgpu, naga and
+# accesskit, which is 340 more crates for a second rendering backend this does
+# not use. glow is the OpenGL one, and it is enough to draw a page.
+eframe = { version = "0.35", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+egui = "0.35"
+egui_extras = { version = "0.35", default-features = false }
+
 [dev-dependencies]
 approx = "0.5"
+
+# The command line, and the window. Two binaries rather than one because
+# Windows decides at link time whether a program owns a console: a GUI built as
+# a console program flashes a black window behind itself, and a console program
+# built as a GUI prints to nowhere. They cannot both be right in one file.
+[[bin]]
+name = "onionskin"
+path = "src/main.rs"
+
+[[bin]]
+name = "onionskin-desktop"
+path = "src/desktop/main.rs"
 
 [profile.release]
 opt-level = 3

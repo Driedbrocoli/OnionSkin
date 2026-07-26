@@ -40,6 +40,9 @@ struct Request {
     method: String,
     path: String,
     content_type: String,
+    /// What the caller said it would take back. A browser says it will take
+    /// anything; a script that wants the file says so.
+    accept: String,
     body: Vec<u8>,
 }
 
@@ -110,11 +113,26 @@ fn handle(mut stream: TcpStream) {
             &mut stream,
             200,
             "text/html; charset=utf-8",
-            PAGE.as_bytes(),
+            page().as_bytes(),
         ),
         ("GET", "/health") => respond(&mut stream, 200, "text/plain; charset=utf-8", b"ok"),
         ("POST", "/delta") => match make_delta(&request) {
-            Ok(pdf) => respond_file(&mut stream, &pdf, "delta.pdf"),
+            // Nothing to say, or a caller that asked for the file rather than
+            // a page to read: hand the PDF straight over. The second is what
+            // keeps a script working — a browser says it will take anything,
+            // and only something automated asks specifically for a PDF.
+            Ok((pdf, said, _)) if said.is_empty() || wants_the_file(&request) => {
+                respond_file(&mut stream, &pdf, "delta.pdf")
+            }
+            Ok((pdf, said, took)) => {
+                let token = set_aside(pdf);
+                respond(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    result_page(&said, &token, took).as_bytes(),
+                )
+            }
             Err(message) => respond(
                 &mut stream,
                 422,
@@ -122,6 +140,18 @@ fn handle(mut stream: TcpStream) {
                 message.as_bytes(),
             ),
         },
+        // Collecting the delta the page above offered.
+        ("GET", path) if path.starts_with("/delta/") => {
+            match collect(path.trim_start_matches("/delta/")) {
+                Some(pdf) => respond_file(&mut stream, &pdf, "delta.pdf"),
+                None => respond(
+                    &mut stream,
+                    404,
+                    "text/plain; charset=utf-8",
+                    b"That delta has already been collected. Make it again from the front page.",
+                ),
+            }
+        }
         ("POST", "/convert") => match convert_scan(&request) {
             Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
             Err(message) => respond(
@@ -153,6 +183,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
 
     let mut content_length = 0usize;
     let mut content_type = String::new();
+    let mut accept = String::new();
     loop {
         let mut header = String::new();
         let read = reader
@@ -165,6 +196,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
             match name.trim().to_ascii_lowercase().as_str() {
                 "content-length" => content_length = value.trim().parse().unwrap_or(0),
                 "content-type" => content_type = value.trim().to_string(),
+                "accept" => accept = value.trim().to_ascii_lowercase(),
                 _ => {}
             }
         }
@@ -190,6 +222,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
         method,
         path,
         content_type,
+        accept,
         body,
     })
 }
@@ -280,7 +313,72 @@ fn safe_name(name: &str, fallback: &str) -> String {
     }
 }
 
-fn make_delta(request: &Request) -> Result<Vec<u8>, String> {
+/// Whether the caller asked for the delta itself rather than a page about it.
+///
+/// Everything worth saying about a run is worth saying to a person, and a
+/// browser is a person. A script is not: it posted two documents to get a
+/// file, and handing it a page of prose instead would break it. The one
+/// distinguishes itself from the other by asking for a PDF by name.
+fn wants_the_file(request: &Request) -> bool {
+    let accept = request.accept.trim();
+    accept.starts_with("application/pdf") || accept == "application/octet-stream"
+}
+
+/// A finished delta, waiting to be collected.
+///
+/// The page shows what the run had to say before handing the file over, and a
+/// browser cannot be told two things in one response — so the PDF waits here
+/// for the second request. It is a hand-off measured in seconds, not a store:
+/// collecting takes it, and only the last few are kept.
+///
+/// No more of a hole than the rest of the server, which has no password: anyone
+/// who can reach the address can make a delta and read it. That is why it binds
+/// to this machine only, and says so loudly when told to bind elsewhere.
+static WAITING: std::sync::Mutex<Vec<(String, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+/// How many deltas may be waiting at once. Enough for somebody with three tabs
+/// open, and far short of filling memory with documents nobody came back for.
+const MOST_WAITING: usize = 4;
+
+/// Put a finished delta aside and hand back the name to collect it by.
+fn set_aside(pdf: Vec<u8>) -> String {
+    let token = unique_token();
+    let mut waiting = WAITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while waiting.len() >= MOST_WAITING {
+        waiting.remove(0);
+    }
+    waiting.push((token.clone(), pdf));
+    token
+}
+
+/// Collect one, once.
+fn collect(token: &str) -> Option<Vec<u8>> {
+    let mut waiting = WAITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let at = waiting.iter().position(|(name, _)| name == token)?;
+    Some(waiting.remove(at).1)
+}
+
+/// A name nothing else will pick, without a random number generator.
+fn unique_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{:x}{:x}",
+        nanos,
+        COUNT.fetch_add(1, Ordering::Relaxed).wrapping_add(0x9E37)
+    )
+}
+
+fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>, std::time::Duration), String> {
+    let started = std::time::Instant::now();
     let parts = parse_multipart(&request.content_type, &request.body)?;
     let field = |name: &str| parts.iter().find(|p| p.name == name);
 
@@ -341,7 +439,15 @@ fn make_delta(request: &Request) -> Result<Vec<u8>, String> {
         }
         return Err(message);
     }
-    std::fs::read(&output).map_err(|e| e.to_string())
+
+    // Everything the run had to say that did not stop it. The command line
+    // prints these and the window shows them; a browser that is handed the PDF
+    // and nothing else is the one interface where they would vanish — and one
+    // of them is now "Onionskin read the document itself", which is exactly
+    // what somebody about to put a printed sheet back in a tray needs.
+    let said: Vec<String> = outcome.checks.iter().map(|check| check.format()).collect();
+    let pdf = std::fs::read(&output).map_err(|e| e.to_string())?;
+    Ok((pdf, said, started.elapsed()))
 }
 
 fn respond(
@@ -379,9 +485,7 @@ fn respond_file(stream: &mut TcpStream, body: &[u8], name: &str) -> std::io::Res
     // the file is broken.
     let content_type = match name.rsplit('.').next().unwrap_or("") {
         "pdf" => "application/pdf",
-        "docx" => {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        }
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "odt" => "application/vnd.oasis.opendocument.text",
         "onionskin" | "onion" | "json" => "application/json",
         _ => "application/octet-stream",
@@ -436,8 +540,7 @@ fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
 
     let image = image::load_from_memory(&scan.data)
         .map_err(|e| format!("That does not look like an image Onionskin can read: {e}"))?;
-    let registration =
-        register(&image, ScanOptions::new(page)).map_err(|e| e.to_string())?;
+    let registration = register(&image, ScanOptions::new(page)).map_err(|e| e.to_string())?;
     let gray = image.to_luma8();
 
     // The font has to be a file on disk, because that is what the loader takes
@@ -482,7 +585,89 @@ fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
 }
 
 /// The one page. No script, no external asset, nothing to fetch.
-const PAGE: &str = r#"<!doctype html>
+/// The one page this server serves.
+fn page() -> String {
+    format!("{HEAD}{PAGE_BODY}")
+}
+
+/// What a finished run had to say, and a way to fetch the delta.
+///
+/// A browser is handed one thing per request, so a run with something worth
+/// saying says it here and offers the file second. Nothing is lost by that: the
+/// warnings are the reason a person would not print the delta at all, and a
+/// file that arrives before them arrives too late to be worth reading.
+fn result_page(said: &[String], token: &str, took: std::time::Duration) -> String {
+    let mut lines = String::new();
+    for check in said {
+        // A check is a first line and an indented detail under it, which is how
+        // the command line prints them too.
+        let mut parts = check.splitn(2, '\n');
+        let first = parts.next().unwrap_or_default();
+        let rest = parts.next().unwrap_or("").trim();
+        let loud = first.starts_with("WARNING") || first.starts_with("BLOCKER");
+        lines.push_str(&format!(
+            "<div class=\"{}\"><p><strong>{}</strong></p>{}</div>\n",
+            if loud { "warn" } else { "note" },
+            escape_html(first),
+            if rest.is_empty() {
+                String::new()
+            } else {
+                format!("<p class=\"hint\">{}</p>", escape_html(rest))
+            }
+        ));
+    }
+
+    // How long it took. A browser shows nothing at all while it waits, so
+    // afterwards is the only chance to say that the waiting was the work.
+    let seconds = took.as_secs_f64();
+    let spent = if seconds < 1.0 {
+        String::new()
+    } else if seconds < 60.0 {
+        format!(" Took {seconds:.0} seconds.")
+    } else {
+        format!(" Took {:.0} minutes.", seconds / 60.0)
+    };
+
+    format!(
+        "{HEAD}\n<h1>The delta is ready</h1>\n\
+         <p class=\"lede\">Worth reading before you print it.{spent}</p>\n\
+         {lines}\n\
+         <p><a class=\"get\" href=\"/delta/{token}\" download=\"delta.pdf\">\
+         Download delta.pdf</a></p>\n\
+         <h2>Printing it</h2>\n\
+         <ol>\n\
+         <li>Put the printed sheet back in the tray. Check which way up, and \
+         which end goes in first.</li>\n\
+         <li>Print at 100% — turn <em>off</em> \"Fit to page\", which scales by a \
+         few percent and lines nothing up.</li>\n\
+         <li>Do one sheet and hold it against the original before committing \
+         any more.</li>\n\
+         </ol>\n\
+         <p><a href=\"/\">Make another</a></p>\n\
+         <footer>Onionskin never uses the network. Everything here happened on \
+         this machine.</footer>\n\
+         </body>\n</html>\n"
+    )
+}
+
+/// The five characters HTML cannot take literally. A document called
+/// `Smith &amp; Sons <draft>` would otherwise close a tag nobody opened.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+const HEAD: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -510,10 +695,16 @@ const PAGE: &str = r#"<!doctype html>
   .warn { border-left: 3px solid #d63333; padding-left: .9rem; margin: 1.5rem 0; }
   footer { margin-top: 2.5rem; font-size: .9rem; opacity: .7; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+  .note { border-left: 3px solid rgba(128,128,128,.5); padding-left: .9rem; margin: 1.2rem 0; }
+  .note p, .warn p { margin: .3rem 0; }
+  a.get { display: inline-block; font-weight: 600; padding: .6rem 1.4rem; margin: 1.4rem 0;
+          border: 1px solid rgba(128,128,128,.5); border-radius: .4rem; text-decoration: none; }
 </style>
 </head>
 <body>
+"#;
 
+const PAGE_BODY: &str = r#"
 <h1>Onionskin</h1>
 <p class="lede">Add words to a page that is already printed.</p>
 
@@ -522,11 +713,14 @@ const PAGE: &str = r#"<!doctype html>
     <legend>The two documents</legend>
 
     <label for="original">The document as it was printed
-      <span class="hint">— .pdf, .docx, .odt, .rtf, .txt</span></label>
+      <span class="hint">— .pdf, .docx, .odt and plain text need nothing
+      installed. .doc, .rtf, spreadsheets and slides need LibreOffice.</span></label>
     <input type="file" id="original" name="original" required>
 
     <label for="edited">The edited copy</label>
     <input type="file" id="edited" name="edited" required>
+    <p class="hint">A long document takes a while — a page a second or so, and
+    the browser shows nothing until it is done.</p>
   </fieldset>
 
   <fieldset>

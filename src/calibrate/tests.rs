@@ -17,7 +17,6 @@ fn scratch_home() -> PathBuf {
     HOME.get_or_init(|| {
         let path = std::env::temp_dir().join(format!("onionskin-test-{}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
-        std::env::set_var("ONIONSKIN_HOME", &path);
         path
     })
     .clone()
@@ -212,7 +211,7 @@ fn the_inset_has_to_match_the_target_that_was_printed() {
 
 #[test]
 fn a_profile_survives_being_saved_and_loaded() {
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     let profile = a_profile("roundtrip");
     save_profile(&profile).unwrap();
 
@@ -237,7 +236,7 @@ fn the_correction_is_the_opposite_of_the_error() {
 
 #[test]
 fn a_profile_that_is_not_there_lists_the_ones_that_are() {
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     save_profile(&a_profile("office")).unwrap();
 
     let err = load_profile("nowhere").unwrap_err().to_string();
@@ -251,7 +250,7 @@ fn a_profile_that_is_not_there_lists_the_ones_that_are() {
 
 #[test]
 fn a_profile_name_cannot_escape_its_folder() {
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     let path = profile_path("../../etc/passwd").unwrap();
     assert_eq!(path.parent().unwrap(), profiles_dir().unwrap());
     assert!(!path.to_string_lossy().contains(".."), "{path:?}");
@@ -259,14 +258,14 @@ fn a_profile_name_cannot_escape_its_folder() {
 
 #[test]
 fn a_profile_with_no_usable_name_still_gets_one() {
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     let path = profile_path("///").unwrap();
     assert_eq!(path.file_name().unwrap(), "default.json");
 }
 
 #[test]
 fn a_corrupt_profile_does_not_hide_the_good_ones() {
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     save_profile(&a_profile("intact")).unwrap();
     std::fs::write(profiles_dir().unwrap().join("broken.json"), b"{ not json").unwrap();
 
@@ -283,7 +282,7 @@ fn a_corrupt_profile_does_not_hide_the_good_ones() {
 
 #[test]
 fn deleting_says_whether_there_was_anything_to_delete() {
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     save_profile(&a_profile("temporary")).unwrap();
     assert!(delete_profile("temporary").unwrap());
     assert!(!delete_profile("temporary").unwrap());
@@ -293,7 +292,7 @@ fn deleting_says_whether_there_was_anything_to_delete() {
 #[test]
 fn a_profile_is_not_readable_by_other_accounts() {
     use std::os::unix::fs::PermissionsExt;
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     let path = save_profile(&a_profile("private")).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o077, 0, "mode {:o}", mode & 0o777);
@@ -431,7 +430,7 @@ fn the_target_folder_is_made_if_it_is_not_there() {
 fn a_reading_off_a_printed_target_becomes_a_correction_that_undoes_it() {
     // The property the whole feature rests on: whatever the printer does to
     // the second pass, applying the stored correction first cancels it.
-    scratch_home();
+    let _home = crate::calibrate::borrow_home(&scratch_home());
     let printer_does = Similarity {
         dx_mm: 0.45,
         dy_mm: -0.18,

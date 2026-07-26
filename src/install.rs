@@ -50,6 +50,8 @@ fn io<'a>(
 #[derive(Debug, Default, PartialEq)]
 pub struct Report {
     pub binary: Option<PathBuf>,
+    /// The desktop window, if one was installed alongside.
+    pub desktop: Option<PathBuf>,
     pub library: Option<PathBuf>,
     pub menu_entry: Option<PathBuf>,
     /// The profile a PATH line was added to, if one was needed.
@@ -113,6 +115,128 @@ pub fn binary_name() -> &'static str {
     }
 }
 
+/// What the window is called.
+pub fn desktop_name() -> &'static str {
+    if cfg!(windows) {
+        "onionskin-desktop.exe"
+    } else {
+        "onionskin-desktop"
+    }
+}
+
+/// What the desktop window needs from the operating system before it will open.
+///
+/// The window draws with OpenGL and reads the keyboard through the desktop's
+/// own libraries, and it loads them when it starts rather than linking them, so
+/// a machine without them gets a program that quits with a line about a file
+/// nobody has heard of instead of a window.
+///
+/// Every desktop Linux has these. A server install, a container and a minimal
+/// virtual machine do not — which is exactly where somebody is most likely to
+/// be puzzled by it, and least likely to guess the answer.
+#[cfg(target_os = "linux")]
+pub fn desktop_needs() -> Vec<&'static str> {
+    // Wayland or X11 will do, so the two are checked as alternatives. Missing
+    // *both* is what stops the window opening.
+    let display = ["libwayland-client.so.0", "libX11.so.6"];
+    let mut missing = Vec::new();
+    if !display.iter().any(|name| library_is_here(name)) {
+        missing.push("libX11.so.6");
+    }
+    for name in ["libxkbcommon.so.0", "libxkbcommon-x11.so.0"] {
+        if !library_is_here(name) {
+            missing.push(name);
+        }
+    }
+    // Either the older GL front end or the newer one is enough to get a
+    // surface to draw on.
+    if !["libGL.so.1", "libEGL.so.1"]
+        .iter()
+        .any(|name| library_is_here(name))
+    {
+        missing.push("libGL.so.1");
+    }
+    missing
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn desktop_needs() -> Vec<&'static str> {
+    // Windows and macOS ship their own graphics and keyboard handling, and
+    // there has never been anything to install for either.
+    Vec::new()
+}
+
+/// The one command that installs what is missing, for this kind of machine.
+///
+/// Worked out from which package manager is actually here rather than from the
+/// name in `/etc/os-release`, because the file lies on derivatives and the
+/// binary on disk does not.
+#[cfg(target_os = "linux")]
+pub fn how_to_install_desktop_needs() -> &'static str {
+    for (tool, command) in [
+        (
+            "apt-get",
+            "sudo apt install libxkbcommon-x11-0 libgl1 libxcursor1 libxrandr2 libxi6",
+        ),
+        (
+            "dnf",
+            "sudo dnf install libxkbcommon-x11 mesa-libGL libXcursor libXrandr libXi",
+        ),
+        (
+            "pacman",
+            "sudo pacman -S libxkbcommon-x11 libglvnd libxcursor libxrandr libxi",
+        ),
+        (
+            "zypper",
+            "sudo zypper install libxkbcommon-x11-0 Mesa-libGL1 libXcursor1 libXrandr2 libXi6",
+        ),
+        ("apk", "sudo apk add libxkbcommon mesa-gl libxcursor libxrandr libxi"),
+    ] {
+        if which_binary(tool).is_some() {
+            return command;
+        }
+    }
+    "install the X11, xkbcommon and OpenGL runtime libraries with your package manager"
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn how_to_install_desktop_needs() -> &'static str {
+    ""
+}
+
+/// Is a shared library anywhere the loader would look?
+#[cfg(target_os = "linux")]
+fn library_is_here(name: &str) -> bool {
+    // The ordinary places, plus whatever the loader has been told about. Not
+    // exhaustive by design: a false "missing" costs somebody one wasted
+    // package install, and a false "present" costs them a program that will
+    // not start and no idea why.
+    let mut roots: Vec<PathBuf> = vec![
+        PathBuf::from("/lib"),
+        PathBuf::from("/lib64"),
+        PathBuf::from("/usr/lib"),
+        PathBuf::from("/usr/lib64"),
+        PathBuf::from("/usr/local/lib"),
+        // Debian and Ubuntu put nearly everything here.
+        PathBuf::from("/lib/x86_64-linux-gnu"),
+        PathBuf::from("/usr/lib/x86_64-linux-gnu"),
+        PathBuf::from("/usr/lib/aarch64-linux-gnu"),
+    ];
+    if let Ok(extra) = std::env::var("LD_LIBRARY_PATH") {
+        roots.extend(std::env::split_paths(&extra));
+    }
+    roots.iter().any(|root| root.join(name).exists())
+}
+
+/// Is this program on the path?
+#[cfg(target_os = "linux")]
+fn which_binary(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 /// The rendering library's name here, in the order worth trying.
 fn library_names() -> &'static [&'static str] {
     if cfg!(windows) {
@@ -172,17 +296,29 @@ pub fn path_line(directory: &Path, profile: &Path) -> String {
 }
 
 /// A `.desktop` entry, so Onionskin appears in the applications menu.
-fn desktop_entry(binary: &Path) -> String {
+/// `window` is the desktop program if one was installed, and `binary` the
+/// command line one otherwise.
+///
+/// Which it is changes the entry completely. A window is launched directly and
+/// needs no terminal; the command line program has to open one and start the
+/// browser interface, because a menu entry that runs a program with no visible
+/// output looks exactly like a menu entry that does nothing.
+fn desktop_entry(binary: &Path, window: Option<&Path>) -> String {
+    let (exec, terminal) = match window {
+        Some(window) => (window.display().to_string(), "false"),
+        None => (format!("{} serve", binary.display()), "true"),
+    };
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=Onionskin\n\
+         GenericName=Overprinting\n\
          Comment=Add words to a page that is already printed\n\
-         Exec={} serve\n\
-         Terminal=true\n\
-         Categories=Office;Publishing;\n\
-         Keywords=print;pdf;scan;delta;overprint;\n",
-        binary.display()
+         Exec={exec}\n\
+         Terminal={terminal}\n\
+         Categories=Office;Publishing;Scanning;\n\
+         Keywords=print;pdf;scan;delta;overprint;\n\
+         StartupWMClass=onionskin\n"
     )
 }
 
@@ -220,6 +356,16 @@ pub fn install(options: &Options) -> Result<Report, InstallError> {
     let target = prefix.join(binary_name());
     place(&me, &target)?;
     report.binary = Some(target.clone());
+
+    // The window, if it came along. Installed under its own name so the menu
+    // entry can launch it directly: a menu entry that opens a terminal is not
+    // what anybody means by an application.
+    let window = here.join(desktop_name());
+    if window.is_file() {
+        let to = prefix.join(desktop_name());
+        place(&window, &to)?;
+        report.desktop = Some(to);
+    }
 
     // The rendering library, if it travelled alongside. Onionskin looks beside
     // its own binary first, so putting it there is all that is needed.
@@ -280,7 +426,7 @@ pub fn install(options: &Options) -> Result<Report, InstallError> {
         let applications = home().join(".local/share/applications");
         if std::fs::create_dir_all(&applications).is_ok() {
             let entry = applications.join("onionskin.desktop");
-            if std::fs::write(&entry, desktop_entry(&target)).is_ok() {
+            if std::fs::write(&entry, desktop_entry(&target, report.desktop.as_deref())).is_ok() {
                 report.menu_entry = Some(entry);
             }
         }
@@ -308,6 +454,21 @@ pub fn uninstall(options: &Options) -> Result<Report, InstallError> {
                 binary.display()
             )),
             Err(e) => return Err(io("remove", &binary)(e)),
+        }
+    }
+
+    // The window, which is the larger of the two files and the one somebody
+    // would most notice being left behind.
+    let window = prefix.join(desktop_name());
+    if window.is_file() {
+        match std::fs::remove_file(&window) {
+            Ok(()) => report.desktop = Some(window),
+            Err(e) if cfg!(windows) => report.notes.push(format!(
+                "{} is in use and could not be removed ({e}).\n    Close the \
+                 Onionskin window and delete that file by hand.",
+                window.display()
+            )),
+            Err(e) => return Err(io("remove", &window)(e)),
         }
     }
 
@@ -350,6 +511,39 @@ pub fn uninstall(options: &Options) -> Result<Report, InstallError> {
         ));
     }
     Ok(report)
+}
+
+/// Hand a file or a folder to whatever this desktop opens it with.
+///
+/// Returns whether anything was launched, so a caller can say "it is at ..."
+/// instead when nothing was. Best effort by design: on a server, in a
+/// container, or over SSH there is nothing to open, and failing quietly is
+/// right — the path has just been printed, so nothing is lost.
+///
+/// Lives here rather than in the window because both want it, and two copies
+/// of "which command opens a file on this operating system" is one too many.
+pub fn open_with_desktop(path: &Path) -> bool {
+    // The one on Windows is a shell built-in rather than a program, which is
+    // why it is spelled as an argument to the shell.
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(path);
+        command
+    } else if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    // Its output is not ours: a viewer that writes a warning to the terminal
+    // would otherwise appear in the middle of Onionskin's own report.
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command.spawn().is_ok()
 }
 
 /// Where an installed copy would be, and whether it is there.

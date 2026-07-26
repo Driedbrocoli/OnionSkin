@@ -1,15 +1,19 @@
-//! Writing what is on a page out as a word-processor document.
+//! Word and OpenDocument files: writing them, and reading them.
 //!
 //! Reading a scan gives you letters at millimetre positions. That is exactly
 //! what a delta needs and nothing like what a person needs when they say "I
 //! want to edit it" — they mean in Word, or in LibreOffice Writer, with a
-//! cursor. So the same page goes out as `.docx` or `.odt`.
+//! cursor. So the same page goes out as `.docx` or `.odt`. That is this file.
 //!
 //! Both formats are a zip of XML files, which is why they are written here
 //! rather than shelled out to something: the zip writer already exists for the
 //! packaging, the XML is a page and a half, and the alternative is making a
-//! word processor a requirement for *producing* a document rather than only for
-//! reading somebody else's.
+//! word processor a requirement for *producing* a document.
+//!
+//! The same reasoning, followed one step further, is why they are now *read*
+//! here too. [`read`] opens a `.docx`, a `.odt` or plain text and sets it on
+//! paper, with [`unzip`] and [`xml`] underneath — so LibreOffice is what
+//! improves the result rather than what makes it possible.
 //!
 //! # Why frames, and not paragraphs
 //!
@@ -28,6 +32,10 @@
 use crate::document::{Document, Item, Shape, ShapeKind};
 use crate::geometry::PageSize;
 use crate::package::{zip, Entry};
+
+pub mod read;
+pub mod unzip;
+pub mod xml;
 
 /// Which word-processor format to write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

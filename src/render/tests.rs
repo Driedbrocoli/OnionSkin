@@ -480,3 +480,125 @@ fn working_files_are_not_readable_by_other_accounts() {
         .mode();
     assert_eq!(mode & 0o077, 0, "mode {:o}", mode & 0o777);
 }
+
+// ---------------------------------------------------------------------------
+// Opening a document without LibreOffice
+// ---------------------------------------------------------------------------
+
+/// A `.docx` holding one line.
+///
+/// The whole package, not just `word/document.xml`: Onionskin's own reader is
+/// happy with the one part, and LibreOffice refuses to open a file without the
+/// content types and the relationships beside it — and both readers are under
+/// test here.
+fn a_word_document(dir: &std::path::Path, name: &str, text: &str) -> PathBuf {
+    let document = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+         <w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p>\
+         <w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr>\
+         </w:body></w:document>"
+    );
+    let content_types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+         <Default Extension=\"rels\" \
+         ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+         <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+         <Override PartName=\"/word/document.xml\" \
+         ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
+         </Types>";
+    let rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+         <Relationship Id=\"rId1\" \
+         Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" \
+         Target=\"word/document.xml\"/></Relationships>";
+
+    use crate::package::Entry;
+    let bytes = crate::package::zip(&[
+        Entry::file("[Content_Types].xml", content_types.as_bytes().to_vec()),
+        Entry::file("_rels/.rels", rels.as_bytes().to_vec()),
+        Entry::file("word/document.xml", document.into_bytes()),
+    ]);
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn a_word_document_opens_with_no_word_processor_installed() {
+    // The point of the whole exercise: a machine with nothing on it still
+    // opens a `.docx`. Forced rather than inferred, so the test says the same
+    // thing on a machine that has LibreOffice and one that has not.
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_word_document(dir.path(), "order.docx", "Purchase order 4471");
+
+    let (pdf, notes) = crate::office::read::to_pdf(&path, &dir.path().join("out.pdf"))
+        .map(|notes| (dir.path().join("out.pdf"), notes))
+        .expect("Onionskin should read a .docx by itself");
+
+    assert!(pdf.is_file(), "no PDF came out");
+    let opened = lopdf::Document::load(&pdf).expect("what came out is not a PDF");
+    assert_eq!(opened.get_pages().len(), 1);
+    // A4, because the document said so.
+    let frames = read_frames(&opened).unwrap();
+    let size = frames[0].display_size();
+    assert!((size.width_mm - 210.0).abs() < 0.5, "{size:?}");
+    assert!(
+        notes.is_empty(),
+        "a plain document should need no caveats: {notes:?}"
+    );
+}
+
+#[test]
+fn onionskin_says_when_it_opened_the_document_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_word_document(dir.path(), "note.docx", "Two hundred widgets");
+
+    // Only meaningful where LibreOffice is absent, or where it is asked for.
+    if find_soffice().is_some() && preference() != Some(Opener::Onionskin) {
+        let (_, opener, _) = to_pdf_noting(&path, dir.path(), 180).unwrap();
+        assert_eq!(opener, Opener::LibreOffice);
+        return;
+    }
+
+    let (pdf, opener, notes) = to_pdf_noting(&path, dir.path(), 180).unwrap();
+    assert!(pdf.is_file());
+    assert_eq!(opener, Opener::Onionskin);
+    // Somebody about to feed a printed sheet back into a printer has to be
+    // told that the lines may not be exactly where Word put them.
+    assert!(
+        notes
+            .first()
+            .map(|note| note.contains("read the document itself"))
+            .unwrap_or(false),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn plain_text_needs_nothing_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.txt");
+    std::fs::write(&path, "Line one\nLine two\n").unwrap();
+
+    let out = dir.path().join("note.pdf");
+    crate::office::read::to_pdf(&path, &out).unwrap();
+    let opened = lopdf::Document::load(&out).unwrap();
+    assert_eq!(opened.get_pages().len(), 1);
+}
+
+#[test]
+fn a_format_only_libreoffice_knows_says_what_is_missing() {
+    if find_soffice().is_some() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.rtf");
+    std::fs::write(&path, br"{\rtf1\ansi Hello}").unwrap();
+
+    let error = to_pdf(&path, dir.path(), 60).unwrap_err().to_string();
+    assert!(error.contains("needs LibreOffice"), "{error}");
+    // And it should say what does work without it, rather than leaving
+    // somebody to guess.
+    assert!(error.contains(".docx"), "{error}");
+}

@@ -121,6 +121,25 @@ pub fn home_dir() -> PathBuf {
     home().join(".onionskin")
 }
 
+/// Point `ONIONSKIN_HOME` at a directory of a test's own, and hold everything
+/// else off until it is done.
+///
+/// One variable for the whole process, and tests run beside one another — so
+/// two of them changing it at once see each other's answers, which is a test
+/// that fails once in three runs and passes when it is looked at. Everything
+/// that redirects the home directory takes this first.
+#[cfg(test)]
+pub(crate) fn borrow_home(path: &Path) -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that panicked while holding it left it poisoned; the next test
+    // sets the variable itself anyway, so there is nothing to recover.
+    let held = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::env::set_var("ONIONSKIN_HOME", path);
+    held
+}
+
 /// The user's home directory, without a crate to ask.
 fn home() -> PathBuf {
     for key in ["HOME", "USERPROFILE"] {

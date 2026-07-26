@@ -12,7 +12,7 @@ went with it.
 | | |
 |---|---|
 | `geometry` | Page sizes, and the similarity transform calibration fits |
-| `render`   | LibreOffice for Word documents, pdfium for pixels, page frames |
+| `render`   | Which engine opens a document, pdfium for pixels, page frames |
 | `diff`     | What ink is new, what ink is gone |
 | `delta`    | Writing the delta PDF, raster or vector |
 | `safety`   | The checks that run before paper is committed |
@@ -23,12 +23,76 @@ went with it.
 | `document` | A document made from nothing and edited: words and drawings |
 | `font`     | Embedding a font so the printer needs nothing installed |
 | `pdf`      | Writing text and shapes into a PDF |
-| `office`   | Writing `.docx` and `.odt`, so a scan becomes something editable |
+| `office`   | Reading and writing `.docx` and `.odt`, without a word processor |
 | `printer`  | Printing over IPP and scanning over eSCL, both spoken directly |
 | `acquire`  | Driving a scanner through SANE |
 | `web`      | A local HTTP server with no dependency and no external asset |
 | `install`  | Putting the program where the operating system can find it |
+| `settings` | The few things worth remembering between one run and the next |
 | `package`  | Building the archive people download |
+
+And a second binary, `src/desktop/`, which is the window.
+
+## Two programs, one library
+
+`onionskin` is the command line. `onionskin-desktop` is a window. Everything
+either of them can do lives in the library; neither has any logic of its own
+beyond arranging it.
+
+They are two executables rather than one because **Windows decides at link time
+whether a program owns a console**. A window built as a console program flashes
+a black box behind itself on every launch; a console program built as a window
+prints to nowhere. One file cannot be both.
+
+### Why not a web view
+
+The obvious way to build a desktop application now is to wrap a browser engine.
+It is the wrong answer here twice over. It would add something like a hundred
+megabytes to a five-megabyte download, and it would put a full network stack
+inside a program whose central claim is that it never uses the network — a claim
+that would then be impossible to verify by reading the code.
+
+So the window is [egui](https://github.com/emilk/egui), which draws every widget
+itself onto an OpenGL surface. No web view, no system toolkit, no C++ library.
+The binary links against nothing but libc; X11, xkbcommon and OpenGL are opened
+when it starts.
+
+That last detail is worth knowing, because it decides the failure mode. On a
+machine without those libraries — a server, a container, a minimal virtual
+machine — the window quits with a line about a file nobody has heard of.
+`install::desktop_needs` looks for them and `onionskin doctor` prints the one
+command that installs them for whichever package manager is actually present.
+Nothing on the command line needs any of it.
+
+### Slow work
+
+Making a delta takes seconds and reading a page of letters takes about one.
+Either between two frames freezes the window: the title bar greys out and the
+operating system offers to kill the program. So every slow thing runs on a
+thread of its own and reports back through `desktop::job`, and the window keeps
+drawing, says what it is doing, and counts the seconds — which is what tells
+somebody it is working rather than stuck.
+
+A hundred-page delta takes minutes, which is long enough that "working" is not
+enough to say. `pipeline::run_watched` takes a callback and reports a
+`pipeline::Step` — what it is doing and which page of how many — so the window
+shows a bar that moves and the command line rewrites one line as it goes.
+`pipeline::run` is the same thing with the callback thrown away, because most
+callers do not want one. The command line only draws that line when there is a
+terminal to draw on: piped into a file, a carriage return every page turns the
+output into one unreadable line.
+
+There is exactly one worker, on purpose. pdfium serialises individual calls but
+not the *sequence* of calls that makes up one document, so two renders at once
+will eventually read one another's state and crash.
+
+### How it is tested
+
+By running it. There is no display in the build environment, so it runs under
+Xvfb against Mesa's software rasteriser and is screenshotted. Compiling proves
+nothing about a window: the first run found the sidebar text running off the
+edge of the panel and losing its last word, which was the word that
+distinguished one screen from the next.
 
 ## Making a document, and adding to it after it is printed
 
@@ -321,42 +385,113 @@ Onionskin declines rather than guessing when:
 * the text uses characters the built-in fonts cannot write, which would
   otherwise print as a row of solid blocks.
 
-## Port status
+## Opening a Word document without a word processor
 
-| module | ported | verified against Python |
-|---|---|---|
-| `geometry` — units, page sizes, the calibration transform | yes | 582 values, identical to 5e-10 |
-| `pdf` — writing the delta | yes | ink measured in place, 0.2 mm |
-| `scan` — registering a scanned sheet | yes | new; no Python counterpart |
-| `font` — embedding a font to write any alphabet | yes | new; no Python counterpart |
-| `acquire` — driving the scanner | yes | new; no Python counterpart |
-| `render` — LibreOffice conversion, page frames, rasterising | no | |
-| `diff` — added/removed masks, region labelling | no | |
-| `delta` — raster and vector writers, calibration, frame conforming | no | |
-| `compose` — text placement with wrapping and alignment | no | |
-| `safety` — the checks that stop wasted paper | no | |
-| `calibrate` — target, profiles, solving | no | |
-| `pipeline`, `web` | no | |
+Onionskin used to need LibreOffice to open a `.docx`. That is a fair thing to
+ask of somebody who already has it and an unreasonable thing to ask of everybody
+else — three hundred megabytes, on every machine, so that a program can read a
+file that is a zip of XML. So it reads them itself.
 
-The Python version stays authoritative for the two-document and typed-page
-workflows until every row says yes.
+| | |
+|---|---|
+| `office::unzip` | The zip reader: central directory, stored and deflated entries, zip64 sizes |
+| `office::xml`   | A scanner that hands back tags and text, one at a time |
+| `office::read::docx` | `word/document.xml`, `styles.xml`, `numbering.xml` → paragraphs |
+| `office::read::odt`  | `content.xml` and `styles.xml`, zipped or flat |
+| `office::read::plain`| `.txt`, and Markdown read as text with its headings honoured |
+| `office::read::layout` | Paragraphs → lines on paper → the same PDF writer everything else uses |
 
-## How this port is kept honest
+`office::read::Sheet` is the middle: some paper, some margins, and a list of
+blocks — paragraphs with runs of styled text, and tables of cells holding blocks
+of their own. Each reader fills one in and the layout module empties it, so
+neither knows anything about the other's format.
 
-A rewrite earns trust by agreeing with the implementation it replaces. Its own
-unit tests cannot do that on their own — they can encode the same
-misunderstanding twice, and the subtle parts here (a clockwise page rotation
-becoming a counter-clockwise PDF rotation, the y-axis flip, the inverse of a
-similarity) are exactly where that happens.
+### What it reads, and what it says it cannot
 
-So each module gets an `examples/dump_*.rs` that prints its results as JSON, and
-`tools/diff_check.py` recomputes the same values in Python and compares:
+Text, headings, bold, italic, underline, strikethrough, colour, type size and
+font family; alignment including justification; indents, hanging indents,
+spacing before and after, and line spacing; bulleted, numbered, lettered and
+Roman lists with their counters; tables with column widths, spanned cells and
+ruled borders; page and line breaks; the paper size and its margins.
 
-```bash
-cargo run --quiet --example dump_geometry | python3 tools/diff_check.py geometry
-```
+Not images, footnotes, columns, or headers and footers. Every one of those comes
+back as a sentence in `Sheet::notes`, which `render::to_pdf_noting` passes to the
+pipeline, which turns it into a `safety::Check` at `Severity::Note` — so the
+command line, the window, the browser page and the JSON all say the same thing
+without any of them knowing where it came from.
 
-Any new mismatch fails the check.
+The browser page is the one that had to change shape for it. It used to hand
+back the delta as a download and nothing else, which silently threw away every
+warning the run produced — the margins, the coverage, the missing calibration,
+and now which engine opened the document. A browser can be told one thing per
+response, so a run with anything to say now answers with a page that says it and
+offers the file underneath; the delta waits in memory for the second request and
+is handed over once. A run with nothing to say still downloads straight away —
+and so does one whose caller said `Accept: application/pdf`, which is how
+something automated distinguishes itself from a person: a browser says it will
+take anything, and only a script asks for a PDF by name.
+
+### Three traps worth writing down
+
+Word writes some shapes **twice**: as DrawingML inside `mc:Choice`, and again as
+the old VML inside `mc:Fallback`, so that older readers see something. A reader
+that takes both gets every text box twice. The fallback is skipped whole.
+
+Word also writes text that is not words. `w:instrText` is the machinery of a
+field — `PAGE \* MERGEFORMAT` and the like — and `w:delText` is text somebody
+deleted with track changes on. Both would otherwise be printed.
+
+And a `draw:frame` in an OpenDocument file is **not necessarily a picture**. It
+is also how a text box is written — including by the `.odt` writer at the other
+end of this same module, which puts each line of a scanned page in one so that
+it opens where it was found on the paper. Skipping frames as images reads those
+documents as blank pages, which is how Onionskin briefly could not read its own
+output. There is a test that writes a placed document and reads it back.
+
+### Which engine, and why it matters
+
+LibreOffice is used wherever it is installed, because it lays a document out the
+way the program that wrote it would. Onionskin's own reader is what a machine
+without it gets. `ONIONSKIN_OFFICE=onionskin` forces the built-in one.
+
+For the delta itself the choice is safe either way: both documents go through
+the same engine in the same run, so their renderings agree by construction. What
+the choice changes is the sheet **already in the tray**. If that came out of
+Word, Word's line breaks are on it, and Onionskin's may fall elsewhere — which
+is why the opener says which one it was, in the checks printed before anything
+reaches a printer.
+
+### Reading is not trusting
+
+A document arriving from somewhere else is not a friendly input. The zip reader
+checks every entry against its CRC, refuses an entry that inflates to far more
+than it claims (a few kilobytes that fill memory is an old trick), bounds the
+walk by the bytes rather than by the count the file gives, and names the
+compression methods it will not read rather than reading them wrongly. The XML
+scanner resolves no external entities and follows no DTD, so there is nothing to
+point at `/etc/passwd` and no entity expansion to run away with.
+
+## Where it came from
+
+Onionskin began as Python and was ported module by module. The Python is gone,
+and so is the harness that checked the two agreed while both existed — each
+module printed its results as JSON and a script recomputed the same numbers the
+other way round. It earned its keep: the subtle parts here are exactly where a
+rewrite encodes the same misunderstanding twice, and a clockwise page rotation
+becoming a counter-clockwise PDF rotation is not the kind of thing a unit test
+written by the same hand catches.
+
+The printing half of it is still here — `examples/dump_geometry.rs` and
+`examples/dump_pdf.rs` — because dumping a module's numbers is the quickest way
+to see what a change did to them, with or without anything to compare against.
+
+What it settled, and what the tests now hold on their own:
+
+| | |
+|---|---|
+| `geometry` — units, page sizes, the calibration transform | 582 values, identical to 5e-10 |
+| `pdf` — writing the delta | ink measured in place, within 0.2 mm |
+| `scan`, `font`, `acquire`, `letters`, `office`, `printer` | new here; there was never a Python counterpart |
 
 ## Dependencies
 
@@ -365,6 +500,13 @@ pypdfium2, so rasters match rather than merely resembling each other — which i
 what makes a pixel diff of two documents comparable across the two
 implementations. `lopdf` replaces pikepdf for reading page boxes and rewriting
 content streams. Everything stays permissively licensed.
+
+The zip and XML readers are written here rather than pulled in, and the reason
+is the same one that applies to the writers in `package`: the formats are small,
+the alternative is two more dependencies for something a page of code does, and
+`flate2` — the one real algorithm involved — is already in the tree because PNG
+needs it. What it buys is that the checksum used to verify a document is the
+same function used to write one.
 
 ## Building
 

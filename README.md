@@ -16,16 +16,49 @@ Linux, Windows and macOS.
 
 ## Install
 
-**There is no published release yet, so this is built from source.** It takes
-about five minutes, most of it waiting. The steps below are the ones that were
-actually run on a clean clone, in this order, and they work.
+### Download it
 
-### 1. Rust
+The [Releases page](https://github.com/driedbrocoli/onionskin/releases) has one
+file per machine. Take yours:
+
+| | |
+|---|---|
+| **Windows** | `onionskin-VERSION-windows.zip` |
+| **Linux** — Debian, Ubuntu, Mint | `onionskin_VERSION_amd64.deb`, then `sudo dpkg -i onionskin_*.deb` |
+| **Linux** — anything else | `onionskin-VERSION-linux.tar.gz` |
+| **macOS** — Apple silicon | `onionskin-VERSION-macos-arm64.tar.gz` |
+| **macOS** — Intel | `onionskin-VERSION-macos-x64.tar.gz` |
+
+Unpack it, open a terminal in that folder, and run one line:
+
+```bash
+./onionskin install          # Windows: onionskin.exe install
+```
+
+That copies both programs and the PDF renderer into your own account, puts
+`onionskin` on your path, and — on Linux and Windows — adds a menu entry that
+opens the window. **Nothing asks for an administrator password.** Then open the
+applications menu and look for Onionskin, or type `onionskin-desktop`.
+
+The archives hold everything: both programs, the renderer, and the licences.
+Nothing else has to be installed.
+
+> **If the Releases page is empty**, no version has been tagged yet — build it
+> from source below. Anyone with write access to the repository makes the
+> downloads appear by pushing a tag (`git tag v0.1.0 && git push origin v0.1.0`),
+> which builds all five archives and attaches them to a release.
+
+### Or build it from source
+
+It takes about five minutes, most of it waiting. The steps below are the ones
+that were actually run on a clean clone, in this order, and they work.
+
+#### 1. Rust
 
 If `cargo --version` says nothing, get it from [rustup.rs](https://rustup.rs) —
 one command on every platform, and it installs into your own account.
 
-### 2. Build it
+#### 2. Build it
 
 ```bash
 git clone https://github.com/driedbrocoli/onionskin
@@ -39,7 +72,7 @@ The program is now `target/release/onionskin`. It already works:
 ./target/release/onionskin doctor
 ```
 
-### 3. The PDF renderer
+#### 3. The PDF renderer
 
 `doctor` will say `PDF rendering MISSING`, and tell you what to do about it.
 Onionskin draws PDF pages with **pdfium**, Google's renderer from Chromium. It
@@ -58,26 +91,57 @@ It is BSD and Apache licensed, like Onionskin, so there is nothing to agree to.
 scan, typing onto a form, drawing, reading letters and printing all need
 nothing installed.
 
-### 4. Install it
+#### 4. Install it
 
 ```bash
 cd target/release
 ./onionskin install          # Windows: onionskin.exe install
 ```
 
-That copies the program and the renderer into `~/.local/bin` (or
-`%LOCALAPPDATA%\Onionskin`), adds an applications-menu entry, and puts that
-folder on your path. **Nothing asks for an administrator password**: it installs
-into your own account, and a program that demands a password to put a file on
-your own computer teaches people to give passwords to programs.
+That copies both programs and the renderer into `~/.local/bin` (or
+`%LOCALAPPDATA%\Onionskin`), adds an applications-menu entry that opens the
+window, and puts that folder on your path. **Nothing asks for an administrator
+password**: it installs into your own account, and a program that demands a
+password to put a file on your own computer teaches people to give passwords to
+programs.
 
 Open a new terminal, and:
 
 ```bash
 onionskin doctor             # what works on this machine, and what is missing
 onionskin --help             # everything it can do
-onionskin serve              # the browser interface, on this machine only
+onionskin-desktop            # the window
 ```
+
+`onionskin uninstall` removes exactly what was put there and says what it
+removed.
+
+### The window
+
+There are two programs. `onionskin` is the command line; `onionskin-desktop` is
+the window, and it is what the applications menu opens. **That is the app** —
+you download it, install it, and it is in your menu like anything else.
+
+It is a real window. egui draws every widget itself onto an OpenGL surface:
+**no browser, no web view, no localhost, no tab.** That is what keeps the whole
+thing a 5 MB download that runs on a machine with nothing installed, and it is
+why the program can promise it never touches the network and have you be able
+to check.
+
+On **Linux** the window needs the display and graphics libraries every desktop
+already has: X11 or Wayland, xkbcommon, and OpenGL. A desktop machine has them.
+A server, a container or a minimal virtual machine may not, and then the window
+quits with a line about a file nobody has heard of. `onionskin doctor` checks
+for them and prints the one command that installs them for your distribution.
+Nothing on the command line needs any of it.
+
+On **Windows** and **macOS** there is nothing to install: both ship their own
+graphics and keyboard handling.
+
+**Drag a file onto the window** and it goes into the first box that can use it —
+drop two documents on the comparing screen and they fill both, in order. The
+window opens on the screen you were last using, and the file browser opens in
+the folder you last chose something from.
 
 `onionskin uninstall` removes exactly what was put there and says what it
 removed. It leaves your calibration profiles alone, and says so.
@@ -98,18 +162,42 @@ checked against a hash somebody else published. It refuses to put a Linux binary
 in a Windows archive, which is the mistake that produces a download that looks
 completely normal and cannot run.
 
-### The one other thing
+### Word documents, with or without LibreOffice
 
-**LibreOffice** opens everything that is not already a PDF or an image — `.docx`,
-`.odt`, `.rtf`, `.xlsx`, `.ods`, `.pptx`, `.odp`, `.vsdx` and the rest of the
-list in `render::CONVERTIBLE` ([download](https://www.libreoffice.org/download/)).
-PDFs and scans need it not at all, and *writing* `.docx` and `.odt` needs
-nothing installed — Onionskin writes those itself.
+Nothing else has to be installed. The readers are Rust, like everything else
+here — a zip reader, an XML scanner and a page-layout engine, and no new
+dependency for any of them. Onionskin opens these by itself:
 
-It is deliberately not bundled: it is under the MPL, which would put obligations
-on anyone passing the archive on. Onionskin looks for it wherever it installs —
-package manager, Snap, Flatpak, `/Applications`, `Program Files` — and
-`ONIONSKIN_SOFFICE` points at it if it is somewhere else.
+| | |
+|---|---|
+| `.pdf`, and any image | directly |
+| `.docx`, `.docm`, `.dotx` | Word, in the format it has written since 2007 |
+| `.odt`, `.ott`, `.fodt` | OpenDocument text |
+| `.txt`, `.md` | plain text |
+
+It reads the words, the headings, the lists, the tables, the alignment, the
+indents, the bold and italic and colour, and the paper size — and it says what
+it left out. It is not a word processor: it does not lay out images, footnotes,
+columns, or headers and footers, and its lines will not break exactly where
+Word breaks them.
+
+**LibreOffice** ([download](https://www.libreoffice.org/download/)) is used
+whenever it is installed, because it lays a document out the way the program
+that wrote it would. It is also the only way to open the older and stranger
+formats — `.doc`, `.rtf`, `.xlsx`, `.ods`, `.pptx`, `.odp`, `.vsdx` and the
+rest of the list in `render::CONVERTIBLE`.
+
+**Which one matters when.** If you are adding words to a sheet you printed from
+Onionskin, either is exact. If the sheet in your tray came out of Word, Word's
+line breaks are on it — so use LibreOffice, or export the document to PDF from
+Word and use that. Onionskin says which opener it used in the checks it prints
+before anything reaches a printer. `ONIONSKIN_OFFICE=onionskin` forces the
+built-in reader, which is how to see what somebody without LibreOffice gets.
+
+LibreOffice is deliberately not bundled: it is under the MPL, which would put
+obligations on anyone passing the archive on. Onionskin looks for it wherever it
+installs — package manager, Snap, Flatpak, `/Applications`, `Program Files` —
+and `ONIONSKIN_SOFFICE` points at it if it is somewhere else.
 
 ## Four ways to work
 
@@ -214,16 +302,25 @@ lands within **0.30 mm** of where it belongs on the paper.
 Edit in Word as you normally would, and let Onionskin work out what is new:
 
 ```bash
-onionskin delta report.docx report-edited.docx -o delta.pdf
+onionskin delta report.docx report-edited.docx        # writes report-edited-delta.pdf
 onionskin compare report.docx report-edited.docx      # report, write nothing
 onionskin delta a.docx b.docx -o delta.pdf --preview ./proof
+onionskin delta a.docx b.docx --open                  # and open it when it is done
 ```
 
-Either way, put the printed sheet back in the tray and print `delta.pdf` **at
+`-o` is optional: without it the result goes beside the edited copy, named after
+it. Same for `add` and `print`.
+
+Either way, put the printed sheet back in the tray and print the delta **at
 100% / "Actual size"**, with "Fit to page" turned off.
 
-There is also a browser interface for the two-document workflow, served from
-your own machine: `onionskin serve`, then open <http://127.0.0.1:8737/>.
+**You never have to touch a browser.** For anyone who would rather use one
+anyway — over SSH, or on a machine with no desktop at all — `onionskin serve`
+puts the two-document workflow on `http://127.0.0.1:8737/`, reachable only from
+that machine. It is an extra command that has to be typed to happen: nothing
+opens a browser by itself, ever. Anything automated
+that posts to it with `Accept: application/pdf` gets the file straight back
+instead, as it always did.
 
 ## The thing that will bite you: reflow
 

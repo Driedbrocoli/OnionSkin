@@ -250,7 +250,12 @@ pub fn zip(entries: &[Entry]) -> Vec<u8> {
 }
 
 /// The CRC-32 a zip uses, computed without a table.
-fn crc32(bytes: &[u8]) -> u32 {
+///
+/// Shared with the zip *reader* in [`crate::office::unzip`], which checks
+/// entries against it — two implementations of one checksum would be one too
+/// many, and the one that drifted would be found by a document that would not
+/// open.
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for byte in bytes {
         crc ^= *byte as u32;
@@ -371,6 +376,17 @@ impl Platform {
         }
     }
 
+    /// The window's name on this platform.
+    pub fn desktop_name(&self) -> &'static str {
+        match self {
+            Platform::Windows => "Onionskin.exe",
+            // On macOS this is what goes inside the .app bundle, where the
+            // name has to match what Info.plist says it is.
+            Platform::MacOs => "Onionskin",
+            _ => "onionskin-desktop",
+        }
+    }
+
     pub fn library_name(&self) -> &'static str {
         match self {
             Platform::Linux => "libpdfium.so",
@@ -464,14 +480,34 @@ pub fn third_party_licences() -> String {
      \x20   0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,\n\
      \x20   BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense, Zlib\n\
      \n\
-     There is no copyleft anywhere in that list — no GPL, LGPL, MPL or AGPL.\n\
-     That is deliberate, and it is what lets you pass this binary on, changed\n\
-     or not, under whatever terms you like.\n\
+     One crate — self_cell, which the window toolkit uses — is offered as\n\
+     'Apache-2.0 OR GPL-2.0-only'. That is a choice, not a condition: Onionskin\n\
+     takes the Apache-2.0 side, and no GPL obligation reaches this program or\n\
+     anything built on it.\n\
+     \n\
+     Nothing else in the tree is copyleft. That is deliberate, and it is what\n\
+     lets you pass this binary on, changed or not, under whatever terms you\n\
+     like.\n\
      \n\
      The full text of each licence is in the crate it belongs to. The list can\n\
      be checked against the source at any time with:\n\
      \n\
      \x20   cargo tree --format '{p} {l}'\n\
+     \n\
+     The typefaces in the window\n\
+     ---------------------------\n\
+     \n\
+     The desktop window draws its own text, so it carries its own fonts:\n\
+     Ubuntu Light, Hack, Noto Emoji and Emoji Icon Font, by way of the\n\
+     epaint_default_fonts crate.\n\
+     \n\
+     \x20   Ubuntu Light  — Ubuntu Font Licence 1.0  (Ubuntu-font-1.0)\n\
+     \x20   the others    — SIL Open Font Licence 1.1  (OFL-1.1)\n\
+     \n\
+     Both allow the fonts to be bundled and passed on. Both ask that the font\n\
+     files keep their own licence and that a modified font be renamed, which\n\
+     is nothing to do with Onionskin's own terms and places no condition on\n\
+     your use of the program.\n\
      \n\
      Bundled alongside the binary\n\
      ----------------------------\n\
@@ -483,12 +519,13 @@ pub fn third_party_licences() -> String {
      Not bundled\n\
      -----------\n\
      \n\
-     LibreOffice converts Word documents, and Onionskin uses it if it is\n\
-     installed. It is deliberately not included here: it is under the Mozilla\n\
-     Public License 2.0, which would oblige anyone redistributing this archive\n\
-     to offer LibreOffice's source as well. Onionskin detects it instead and\n\
-     points at https://www.libreoffice.org/download/ when it is missing.\n\
-     PDFs need it not at all.\n"
+     LibreOffice converts documents Onionskin cannot read by itself, and it\n\
+     is used if it is installed. It is deliberately not included here: it is\n\
+     under the Mozilla Public License 2.0, which would oblige anyone\n\
+     redistributing this archive to offer LibreOffice's source as well.\n\
+     Onionskin detects it instead and points at\n\
+     https://www.libreoffice.org/download/ when a document needs it.\n\
+     PDFs, images, plain text, .docx and .odt need it not at all.\n"
         .to_string()
 }
 
@@ -528,6 +565,21 @@ pub fn contents(
     library: Option<&Path>,
     licence: &Path,
 ) -> Result<Vec<Entry>, PackageError> {
+    contents_with_window(platform, binary, None, library, licence)
+}
+
+/// Everything that goes into one platform's archive, window included.
+///
+/// The window is optional because the command line is the whole program and
+/// works without it — but an archive built with one is what somebody means by
+/// "an app", and building the archive by hand is how it gets left out.
+pub fn contents_with_window(
+    platform: Platform,
+    binary: &Path,
+    desktop: Option<&Path>,
+    library: Option<&Path>,
+    licence: &Path,
+) -> Result<Vec<Entry>, PackageError> {
     let program = std::fs::read(binary).map_err(io(binary))?;
 
     // Refused rather than warned about: an archive with the wrong binary in it
@@ -559,6 +611,28 @@ pub fn contents(
 
     let mut entries = vec![Entry::program(platform.binary_name(), program)];
 
+    if let Some(desktop) = desktop {
+        let window = std::fs::read(desktop).map_err(io(desktop))?;
+        match built_for(&window) {
+            Some(actual) if actual != platform => {
+                return Err(PackageError::Invalid(format!(
+                    "{} is {}, but this is a {} package.",
+                    desktop.display(),
+                    describe(actual),
+                    platform.name()
+                )));
+            }
+            None => {
+                return Err(PackageError::Invalid(format!(
+                    "{} does not look like a program at all.",
+                    desktop.display()
+                )));
+            }
+            Some(_) => {}
+        }
+        entries.push(Entry::program(platform.desktop_name(), window));
+    }
+
     if let Some(library) = library {
         entries.push(Entry::file(
             platform.library_name(),
@@ -585,6 +659,90 @@ pub fn contents(
     Ok(entries)
 }
 
+/// The menu entry a package manager installs for everybody on the machine.
+fn desktop_entry() -> String {
+    "[Desktop Entry]\n\
+     Type=Application\n\
+     Name=Onionskin\n\
+     GenericName=Overprinting\n\
+     Comment=Add words to a page that is already printed\n\
+     Exec=onionskin-desktop\n\
+     Icon=onionskin\n\
+     Terminal=false\n\
+     Categories=Office;Publishing;Scanning;\n\
+     Keywords=print;pdf;scan;delta;overprint;\n\
+     StartupWMClass=onionskin\n"
+        .to_string()
+}
+
+/// The archive laid out as a macOS application bundle.
+///
+/// A bare executable on macOS is a terminal command: double-clicking it opens
+/// Terminal and runs it there, with no icon, no name in the Dock and no window
+/// worth looking at. An application is a *folder* of a particular shape with a
+/// `.app` on the end, and the Finder treats that folder as one thing. So the
+/// window goes inside one, and the command line program goes beside it, where
+/// somebody who wants it can find it.
+pub fn mac_bundle(entries: &[Entry], version: &str) -> Vec<Entry> {
+    const APP: &str = "Onionskin.app/Contents";
+    let mut out = vec![
+        Entry::directory("Onionskin.app"),
+        Entry::directory(APP),
+        Entry::directory(&format!("{APP}/MacOS")),
+        Entry::directory(&format!("{APP}/Resources")),
+        Entry::file(&format!("{APP}/Info.plist"), info_plist(version).into_bytes()),
+        // The Finder reads this to know the folder is an application even
+        // before it looks at the plist.
+        Entry::file(&format!("{APP}/PkgInfo"), b"APPL????".to_vec()),
+    ];
+
+    for entry in entries {
+        let name = match entry.name.as_str() {
+            // The window, and the renderer it loads, live inside the bundle.
+            "Onionskin" => format!("{APP}/MacOS/Onionskin"),
+            "libpdfium.dylib" => format!("{APP}/MacOS/libpdfium.dylib"),
+            // The command line program goes beside the app rather than inside
+            // it, because a path buried in a bundle is not one anybody types.
+            "onionskin" => "onionskin".to_string(),
+            other => other.to_string(),
+        };
+        out.push(Entry {
+            name,
+            ..entry.clone()
+        });
+    }
+    out
+}
+
+/// What macOS reads to learn the application's name, version and icon.
+fn info_plist(version: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n\
+         \x20 <key>CFBundleName</key><string>Onionskin</string>\n\
+         \x20 <key>CFBundleDisplayName</key><string>Onionskin</string>\n\
+         \x20 <key>CFBundleIdentifier</key><string>org.onionskin.Onionskin</string>\n\
+         \x20 <key>CFBundleVersion</key><string>{version}</string>\n\
+         \x20 <key>CFBundleShortVersionString</key><string>{version}</string>\n\
+         \x20 <key>CFBundleExecutable</key><string>Onionskin</string>\n\
+         \x20 <key>CFBundlePackageType</key><string>APPL</string>\n\
+         \x20 <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n\
+         \x20 <key>LSMinimumSystemVersion</key><string>10.15</string>\n\
+         \x20 <!-- The window draws its own interface at whatever resolution the\n\
+         \x20      screen has. Without this, macOS runs it at half resolution and\n\
+         \x20      scales the result up, and every letter is soft. -->\n\
+         \x20 <key>NSHighResolutionCapable</key><true/>\n\
+         \x20 <key>NSSupportsAutomaticGraphicsSwitching</key><true/>\n\
+         \x20 <key>NSHumanReadableCopyright</key>\n\
+         \x20 <string>MIT licensed. See LICENCE.</string>\n\
+         </dict>\n\
+         </plist>\n"
+    )
+}
+
 /// The same contents, laid out where a Debian package puts them.
 ///
 /// Every parent directory is listed too. `tar` makes missing directories on
@@ -593,7 +751,7 @@ pub fn contents(
 /// archive, and the message it gives ("No such file or directory") reads like
 /// something is wrong with the machine rather than with the package.
 pub fn deb_contents(entries: &[Entry]) -> Vec<Entry> {
-    let placed: Vec<Entry> = entries
+    let mut placed: Vec<Entry> = entries
         .iter()
         .map(|entry| {
             let name = if entry.mode & 0o111 != 0 {
@@ -609,6 +767,16 @@ pub fn deb_contents(entries: &[Entry]) -> Vec<Entry> {
             }
         })
         .collect();
+
+    // A menu entry, if there is a window to launch. Without it the window is
+    // installed and invisible: somebody who installs a package expects to find
+    // the application in the applications menu, not to learn a command.
+    if entries.iter().any(|e| e.name == "onionskin-desktop") {
+        placed.push(Entry::file(
+            "./usr/share/applications/onionskin.desktop",
+            desktop_entry().into_bytes(),
+        ));
+    }
 
     // Each directory once, and in order: a reader unpacking in sequence needs
     // ./usr before ./usr/lib.
@@ -640,15 +808,36 @@ pub fn build(
     version: &str,
     out_dir: &Path,
 ) -> Result<Vec<PathBuf>, PackageError> {
+    build_with_window(platform, binary, None, library, licence, version, out_dir)
+}
+
+/// The same, with the desktop window in the archive as well.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_window(
+    platform: Platform,
+    binary: &Path,
+    desktop: Option<&Path>,
+    library: Option<&Path>,
+    licence: &Path,
+    version: &str,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>, PackageError> {
     std::fs::create_dir_all(out_dir).map_err(io(out_dir))?;
-    let entries = contents(platform, binary, library, licence)?;
+    let entries = contents_with_window(platform, binary, desktop, library, licence)?;
     let mut written = Vec::new();
+
+    // On macOS the window has to be inside an application bundle, or a double
+    // click opens Terminal instead of a window.
+    let laid_out = match platform {
+        Platform::MacOs if desktop.is_some() => mac_bundle(&entries, version),
+        _ => entries.clone(),
+    };
 
     let stem = format!("onionskin-{version}-{}", platform.name());
     let archive = out_dir.join(format!("{stem}.{}", platform.archive_extension()));
     let bytes = match platform {
-        Platform::Windows => zip(&entries),
-        _ => gzip(&tar(&entries)),
+        Platform::Windows => zip(&laid_out),
+        _ => gzip(&tar(&laid_out)),
     };
     std::fs::write(&archive, &bytes).map_err(io(&archive))?;
     written.push(archive);
