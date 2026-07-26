@@ -11,11 +11,13 @@ use clap::{Parser, Subcommand};
 use onionskin::acquire::{
     acquire, list_devices, scanning_available, unavailable_reason, AcquireOptions, PLACEMENT_ADVICE,
 };
+use onionskin::calibrate;
 use onionskin::document::{Document, Item};
 use onionskin::font::{suggest_system_font, EmbeddedFont};
 use onionskin::geometry::{parse_page, PageSize};
 use onionskin::letters;
 use onionskin::pdf::{write_delta, Font, LineFont, PlacedLine};
+use onionskin::pipeline;
 use onionskin::scan::{register, ScanOptions, ScanRegistration};
 
 #[derive(Parser)]
@@ -57,6 +59,133 @@ enum Command {
     Print(PrintArgs),
     /// Read the letters off a scanned page.
     Read(ReadArgs),
+
+    /// Compare two documents and write a delta of what the edit added.
+    Delta(DeltaArgs),
+    /// Compare two documents and report, without writing anything.
+    Compare(CompareArgs),
+    /// Measure a printer's second-pass registration, once per printer.
+    #[command(subcommand)]
+    Calibrate(CalibrateCommand),
+    /// Check this machine has what Onionskin needs.
+    Doctor,
+    /// Open the browser interface, on this machine only.
+    Serve(ServeArgs),
+}
+
+#[derive(clap::Args)]
+struct ServeArgs {
+    /// Which address to listen on. Anything but 127.0.0.1 lets other machines
+    /// in, and there is no password.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    #[arg(long, default_value_t = 8737)]
+    port: u16,
+}
+
+#[derive(clap::Args)]
+struct DeltaArgs {
+    /// The document as it was printed.
+    original: PathBuf,
+    /// The edited copy.
+    edited: PathBuf,
+    /// Delta PDF to write.
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// How to build it: 'raster' prints exactly the new pixels and can never
+    /// re-print existing ink; 'vector' keeps the text as text but clips to
+    /// rectangles.
+    #[arg(long, default_value = "raster")]
+    mode: String,
+    /// Rendering resolution. Higher is more exact and slower.
+    #[arg(long, default_value_t = onionskin::pipeline::DEFAULT_DPI)]
+    dpi: f64,
+    /// A calibration profile (see `onionskin calibrate list`).
+    #[arg(long)]
+    profile: Option<String>,
+    /// Warn about additions closer than this to an edge, in mm.
+    #[arg(long, default_value_t = onionskin::safety::DEFAULT_MARGIN_MM)]
+    margin: f64,
+    /// Write proof images here, showing where the new ink lands.
+    #[arg(long)]
+    preview: Option<PathBuf>,
+    /// Write the delta even when a check blocks it.
+    #[arg(long)]
+    force: bool,
+    /// Report as JSON instead of for reading.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CompareArgs {
+    /// The document as it was printed.
+    original: PathBuf,
+    /// The edited copy.
+    edited: PathBuf,
+    #[arg(long, default_value_t = onionskin::pipeline::DEFAULT_DPI)]
+    dpi: f64,
+    #[arg(long, default_value_t = onionskin::safety::DEFAULT_MARGIN_MM)]
+    margin: f64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum CalibrateCommand {
+    /// Write the two-pass target to print twice on one sheet.
+    Target(TargetArgs),
+    /// Turn the readings off that sheet into a stored profile.
+    Solve(SolveArgs),
+    /// List the profiles on this machine.
+    List,
+    /// Show one profile in full.
+    Show(ProfileName),
+    /// Delete a profile.
+    Delete(ProfileName),
+}
+
+#[derive(clap::Args)]
+struct TargetArgs {
+    /// Where to write the target.
+    #[arg(short, long)]
+    output: PathBuf,
+    /// The paper it will be printed on.
+    #[arg(long, default_value = "a4")]
+    page: String,
+    /// How far in to place the corner crosshairs, in mm.
+    #[arg(long)]
+    inset: Option<f64>,
+}
+
+// Readings are routinely negative, and a leading minus would otherwise be
+// taken for the start of another flag.
+#[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
+struct SolveArgs {
+    /// What to call this printer.
+    #[arg(long)]
+    name: String,
+    /// A reading off the sheet: 'P1:dx,dy' in millimetres, right and down
+    /// positive. Give one per crosshair.
+    #[arg(long = "point", value_name = "P1:DX,DY", allow_hyphen_values = true)]
+    points: Vec<String>,
+    /// The paper the target was printed on.
+    #[arg(long, default_value = "a4")]
+    page: String,
+    /// The inset the target was drawn with, if it was not the default.
+    #[arg(long)]
+    inset: Option<f64>,
+    /// Anything worth remembering about this printer.
+    #[arg(long, default_value = "")]
+    notes: String,
+}
+
+#[derive(clap::Args)]
+struct ProfileName {
+    /// The profile's name.
+    name: String,
 }
 
 #[derive(clap::Args)]
@@ -421,6 +550,14 @@ fn run() -> Result<ExitCode, String> {
         Command::Erase(args) => cmd_erase(args),
         Command::Print(args) => cmd_print(args),
         Command::Read(args) => cmd_read(args),
+        Command::Delta(args) => cmd_delta(args),
+        Command::Compare(args) => cmd_compare(args),
+        Command::Calibrate(command) => cmd_calibrate(command),
+        Command::Doctor => cmd_doctor(),
+        Command::Serve(args) => {
+            onionskin::web::serve(&args.host, args.port).map_err(|e| e.to_string())?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -1013,6 +1150,12 @@ fn parse_placement(spec: &str) -> Result<((f64, f64), String), String> {
 }
 
 fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
+    // A PDF or a Word file is a document, not a photograph of one: it already
+    // knows its own page size and needs no registering. Only the scanned-image
+    // path has a sheet to find.
+    if is_document(&args.scan) {
+        return add_to_document(args);
+    }
     if args.at_scan.is_empty() && args.at_page.is_empty() {
         return Err(
             "nothing to add. Use --at 'X,Y:the words' with coordinates read off the \
@@ -1260,4 +1403,443 @@ fn write_preview(
     image
         .save(out)
         .map_err(|e| format!("could not write the proof image: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Comparing two documents
+// ---------------------------------------------------------------------------
+
+fn delta_options(
+    mode: &str,
+    dpi: f64,
+    margin: f64,
+    profile: Option<String>,
+    preview: Option<PathBuf>,
+) -> Result<pipeline::Options, String> {
+    let mode = pipeline::Mode::parse(mode)
+        .ok_or_else(|| format!("mode must be 'raster' or 'vector', not '{mode}'"))?;
+    Ok(pipeline::Options {
+        dpi,
+        mode,
+        margin_mm: margin,
+        profile,
+        preview_dir: preview,
+        ..Default::default()
+    })
+}
+
+/// Print the checks. Anything worse than a note goes to stderr, so a script
+/// piping stdout to a file still sees the warnings on the terminal.
+fn report_checks(checks: &[onionskin::safety::Check]) {
+    for check in checks {
+        match check.severity {
+            onionskin::safety::Severity::Note => println!("{}", check.format()),
+            _ => eprintln!("{}", check.format()),
+        }
+    }
+}
+
+fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
+    check_writable(&args.output, "delta")?;
+    let options = delta_options(
+        &args.mode,
+        args.dpi,
+        args.margin,
+        args.profile,
+        args.preview.clone(),
+    )?;
+
+    let outcome = pipeline::run(&args.original, &args.edited, &args.output, &options)
+        .map_err(|e| e.to_string())?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outcome.to_json()).map_err(|e| e.to_string())?
+        );
+        return Ok(if outcome.blocked() && !args.force {
+            ExitCode::from(2)
+        } else {
+            ExitCode::SUCCESS
+        });
+    }
+
+    report_checks(&outcome.checks);
+
+    if outcome.blocked() && !args.force {
+        // The file was written — the checks are about whether it is safe to
+        // print, not whether it could be built — so say plainly that it is
+        // there, and why it should not go in the tray.
+        eprintln!(
+            "\nBlocked. '{}' was written, but printing it onto the existing sheet \
+             will not line up.\nPrint the affected pages fresh, or --force if you \
+             know better.",
+            args.output.display()
+        );
+        return Ok(ExitCode::from(2));
+    }
+
+    let pages = outcome.pages_with_additions();
+    println!(
+        "\n{}: {} addition{} on page{} {}.",
+        args.output.display(),
+        outcome.total_regions(),
+        if outcome.total_regions() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        if pages.len() == 1 { "" } else { "s" },
+        pages
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for path in &outcome.previews {
+        println!("proof: {}", path.display());
+    }
+    println!("\n{PRINT_INSTRUCTIONS}");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_compare(args: CompareArgs) -> Result<ExitCode, String> {
+    // Somewhere to put the delta that is thrown away afterwards, so that
+    // "report, write nothing" really does write nothing anyone will find.
+    let scratch = onionskin::render::Workspace::new(false).map_err(|e| e.to_string())?;
+    let options = delta_options("raster", args.dpi, args.margin, None, None)?;
+
+    let outcome = pipeline::run(
+        &args.original,
+        &args.edited,
+        &scratch.path.join("delta.pdf"),
+        &options,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outcome.to_json()).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!(
+            "{} page{}, {} addition{}, {:.1} mm² of new ink.",
+            outcome.pages.len(),
+            if outcome.pages.len() == 1 { "" } else { "s" },
+            outcome.total_regions(),
+            if outcome.total_regions() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            outcome.total_added_mm2()
+        );
+        for page in &outcome.pages {
+            if !page.has_additions() {
+                continue;
+            }
+            println!("\nPage {}:", page.index + 1);
+            for region in &page.added_regions {
+                println!(
+                    "  {:>6.1},{:<6.1} mm  {:>5.1} × {:<5.1} mm",
+                    region.x0_mm,
+                    region.y0_mm,
+                    region.width_mm(),
+                    region.height_mm()
+                );
+            }
+        }
+        println!();
+        report_checks(&outcome.checks);
+    }
+    Ok(if outcome.blocked() {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Is this a document Onionskin can lay text onto directly?
+///
+/// A PDF or a Word file already knows its own page size. An image is a
+/// photograph of a sheet, and has to be measured before anything can be placed
+/// on it — a different job, with different ways to go wrong.
+fn is_document(path: &Path) -> bool {
+    let suffix = path
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    onionskin::render::CONVERTIBLE.contains(&suffix.as_str())
+        || onionskin::render::PASSTHROUGH.contains(&suffix.as_str())
+}
+
+/// Type words onto a document at millimetres measured on the paper.
+fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
+    if !args.at_scan.is_empty() {
+        return Err(
+            "--at takes coordinates read off a scanned image, and this is a \
+             document.\nUse --at-mm with millimetres measured on the paper: \
+             --at-mm '45,63:Approved'"
+                .into(),
+        );
+    }
+    if args.at_page.is_empty() {
+        return Err(
+            "nothing to add. Say where the words go, in millimetres from the \
+             top-left of the paper:\n    --at-mm '45,63:Approved'"
+                .into(),
+        );
+    }
+    check_writable(&args.output, "delta")?;
+    let font = load_font(args.font_file.as_deref(), args.font_index)?;
+    let face = if font.is_some() {
+        "file".to_string()
+    } else {
+        args.font.clone()
+    };
+
+    let mut items = Vec::new();
+    for placement in &args.at_page {
+        let ((x_mm, y_mm), text) = parse_placement(placement)?;
+        items.push(Item {
+            id: 0,
+            page: 1,
+            x_mm,
+            y_mm,
+            text: unescape(&text),
+            size_pt: args.size,
+            font: face.clone(),
+            width_mm: None,
+            rotation_deg: args.rotation,
+            colour: "#000000".into(),
+            leading: 1.2,
+        });
+    }
+
+    let options = pipeline::Options {
+        margin_mm: args.margin,
+        preview_dir: args.preview.clone(),
+        ..Default::default()
+    };
+    let outcome = pipeline::compose_run(&args.scan, &items, &args.output, font.as_ref(), &options)
+        .map_err(|e| e.to_string())?;
+
+    report_checks(&outcome.checks);
+    if outcome.blocked() {
+        eprintln!("\nBlocked — see above. Nothing worth printing was produced.");
+        return Ok(ExitCode::from(2));
+    }
+    println!(
+        "\n{}: {} addition{}.",
+        args.output.display(),
+        outcome.total_regions(),
+        if outcome.total_regions() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    for path in &outcome.previews {
+        println!("proof: {}", path.display());
+    }
+    println!("\n{PRINT_INSTRUCTIONS}");
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// Calibration
+// ---------------------------------------------------------------------------
+
+fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
+    match command {
+        CalibrateCommand::Target(args) => {
+            let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+            check_writable(&args.output, "target")?;
+            calibrate::make_target(&args.output, page, args.inset).map_err(|e| e.to_string())?;
+
+            println!("{}: a {} target.", args.output.display(), page.describe());
+            println!(
+                "\n1. Print it on BLANK paper at 100% / \"Actual size\", with \"Fit to \
+                 page\" off.\n2. Put that same sheet back in the tray, the same way \
+                 up, and print it AGAIN.\n3. Each crosshair now has two impressions. \
+                 Read where the second one's arms\n   cross the printed scales — right \
+                 and down are positive.\n4. onionskin calibrate solve --name office \
+                 --point 'P1:+0.40,-0.15' ..."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+
+        CalibrateCommand::Solve(args) => {
+            if args.points.len() < 2 {
+                return Err(
+                    "at least two readings are needed to fit anything. With one point \
+                     only a shift can be seen, and rotation and scale are what \
+                     calibration is for."
+                        .into(),
+                );
+            }
+            let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+            let mut offsets = Vec::new();
+            for spec in &args.points {
+                offsets.push(calibrate::parse_point(spec).map_err(|e| e.to_string())?);
+            }
+
+            let fit = calibrate::solve_from_offsets(&offsets, page, args.inset)
+                .map_err(|e| e.to_string())?;
+            let profile = calibrate::Profile {
+                name: args.name.clone(),
+                error: fit.transform,
+                page,
+                rms_residual_mm: Some(fit.rms_residual_mm),
+                max_residual_mm: Some(fit.max_residual_mm),
+                n_points: offsets.len(),
+                created: calibrate::now(),
+                notes: args.notes.clone(),
+            };
+            let path = calibrate::save_profile(&profile).map_err(|e| e.to_string())?;
+
+            println!("{}", profile.describe());
+            println!("\nsaved to {}", path.display());
+
+            // A fit that does not fit is worth saying out loud: it usually
+            // means a reading was taken off the wrong crosshair.
+            if fit.max_residual_mm > 0.3 {
+                eprintln!(
+                    "\nwarning: one reading is {:.2} mm away from the fitted \
+                     transform.\n    That is more than the ruler's resolution, so \
+                     check the readings — most often two\n    have been swapped, or \
+                     one was taken off the wrong crosshair.",
+                    fit.max_residual_mm
+                );
+            }
+            println!(
+                "\nUse it:\n  onionskin delta a.docx b.docx -o delta.pdf --profile {}",
+                args.name
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+
+        CalibrateCommand::List => {
+            let profiles = calibrate::list_profiles().map_err(|e| e.to_string())?;
+            if profiles.is_empty() {
+                println!(
+                    "No calibration profiles yet.\n\nMake one:\n  onionskin calibrate \
+                     target -o target.pdf"
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("Calibration profiles:");
+            for profile in &profiles {
+                println!(
+                    "  {:<16} {:<28} {}",
+                    profile.name,
+                    profile.page.describe(),
+                    profile.error.describe()
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        CalibrateCommand::Show(args) => {
+            let profile = calibrate::load_profile(&args.name).map_err(|e| e.to_string())?;
+            println!("{}", profile.describe());
+            Ok(ExitCode::SUCCESS)
+        }
+
+        CalibrateCommand::Delete(args) => {
+            if calibrate::delete_profile(&args.name).map_err(|e| e.to_string())? {
+                println!("deleted profile '{}'", args.name);
+                Ok(ExitCode::SUCCESS)
+            } else {
+                Err(format!("no calibration profile '{}'", args.name))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Checking the machine
+// ---------------------------------------------------------------------------
+
+/// Say what works here and what does not, before anyone wastes a sheet.
+fn cmd_doctor() -> Result<ExitCode, String> {
+    let mut everything_works = true;
+    println!("Onionskin {}\n", env!("CARGO_PKG_VERSION"));
+
+    // Rendering: needed by everything except the document editor.
+    match onionskin::render::engine() {
+        Ok(_) => println!("  PDF rendering   ok"),
+        Err(e) => {
+            everything_works = false;
+            println!("  PDF rendering   MISSING\n      {e}");
+        }
+    }
+
+    // LibreOffice: needed only for Word documents.
+    match onionskin::render::find_soffice() {
+        Some(path) => println!("  Word documents  ok ({})", path.display()),
+        None => println!(
+            "  Word documents  not available\n      LibreOffice was not found. PDFs \
+             still work; .docx and .odt do not.\n      Install it from \
+             https://www.libreoffice.org/download/"
+        ),
+    }
+
+    // Scanning: needed only to acquire a sheet here rather than elsewhere.
+    if scanning_available() {
+        match list_devices() {
+            Ok(devices) if !devices.is_empty() => {
+                println!("  Scanning        ok ({} found)", devices.len());
+                for device in &devices {
+                    println!("      {}", device.description);
+                }
+            }
+            _ => println!(
+                "  Scanning        no scanner found\n      The tool is there, but \
+                 nothing is plugged in and switched on."
+            ),
+        }
+    } else {
+        println!(
+            "  Scanning        not available\n      {}",
+            unavailable_reason()
+        );
+    }
+
+    // Fonts: the built-ins always work; a system font is needed only for other
+    // alphabets.
+    match suggest_system_font() {
+        Some(path) => println!("  Other alphabets ok ({})", path.display()),
+        None => println!(
+            "  Other alphabets no system font found\n      Western European text \
+             works regardless. For anything else, pass\n      --font-file with a \
+             .ttf or .otf that covers your language."
+        ),
+    }
+
+    // Profiles: not a fault, but worth knowing.
+    match calibrate::list_profiles() {
+        Ok(profiles) if profiles.is_empty() => println!(
+            "  Calibration     none yet (expect about ±2 mm)\n      onionskin \
+             calibrate target -o target.pdf"
+        ),
+        Ok(profiles) => println!(
+            "  Calibration     {} profile(s): {}",
+            profiles.len(),
+            profiles
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(e) => println!("  Calibration     unreadable\n      {e}"),
+    }
+
+    println!("\nOnionskin never uses the network. Everything above is on this machine.");
+    Ok(if everything_works {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }

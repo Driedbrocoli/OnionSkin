@@ -479,7 +479,10 @@ fn the_report_is_json_a_script_can_read() {
     assert_eq!(json["mode"], "raster");
     assert_eq!(json["blocked"], false);
     assert!(json["pages"].as_array().unwrap().len() == 1);
-    assert!(!json["pages"][0]["added_regions"].as_array().unwrap().is_empty());
+    assert!(!json["pages"][0]["added_regions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert!(json["checks"]
         .as_array()
         .unwrap()
@@ -550,4 +553,164 @@ fn the_workspace_does_not_survive_the_run() {
         })
         .unwrap_or(0);
     assert!(after <= before, "a workspace was left behind");
+}
+
+// ---------------------------------------------------------------------------
+// Typing onto an existing document
+// ---------------------------------------------------------------------------
+
+fn item(page: usize, x_mm: f64, y_mm: f64, text: &str) -> crate::document::Item {
+    crate::document::Item {
+        id: 0,
+        page,
+        x_mm,
+        y_mm,
+        text: text.into(),
+        size_pt: 12.0,
+        font: "Helvetica".into(),
+        width_mm: None,
+        rotation_deg: 0.0,
+        colour: "#000000".into(),
+        leading: 1.2,
+    }
+}
+
+#[test]
+fn words_typed_onto_a_document_land_where_they_were_asked_for() {
+    let Ok(engine) = render::engine() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let form = a_pdf(dir.path(), "form.pdf", &[("Name:", 60.0), ("Date:", 80.0)]);
+    let output = dir.path().join("delta.pdf");
+
+    let outcome = compose_run(
+        &form,
+        &[item(1, 60.0, 60.0, "J. Bezzina")],
+        &output,
+        None,
+        &quick(),
+    )
+    .unwrap();
+
+    assert!(!outcome.blocked(), "{:?}", outcome.checks);
+    assert!(output.is_file());
+
+    let page = engine.open(&output).unwrap().render(0, 150.0).unwrap();
+    let px_per_mm = 150.0 / crate::geometry::MM_PER_INCH;
+    let (mut left, mut bottom) = (usize::MAX, 0usize);
+    for y in 0..page.height {
+        for x in 0..page.width {
+            if page.gray[y * page.width + x] < 128 {
+                left = left.min(x);
+                bottom = bottom.max(y);
+            }
+        }
+    }
+    assert!(bottom > 0, "the delta rendered blank");
+    assert!(
+        ((left as f64 / px_per_mm) - 60.0).abs() < 1.0,
+        "the words start at {:.1} mm, asked for 60",
+        left as f64 / px_per_mm
+    );
+    assert!(
+        ((bottom as f64 / px_per_mm) - 60.0).abs() < 1.0,
+        "the baseline is at {:.1} mm, asked for 60",
+        bottom as f64 / px_per_mm
+    );
+}
+
+#[test]
+fn typing_on_a_page_can_never_reflow_anything() {
+    // The reason this path exists at all: the text is placed at a millimetre
+    // someone chose, so nothing on the page can move, so the check that blocks
+    // the two-document workflow has nothing to fire on.
+    let Ok(_) = render::engine() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let form = a_pdf(dir.path(), "form.pdf", &[("Name:", 60.0)]);
+
+    let outcome = compose_run(
+        &form,
+        &[item(1, 60.0, 60.0, "J. Bezzina")],
+        &dir.path().join("delta.pdf"),
+        None,
+        &quick(),
+    )
+    .unwrap();
+    assert!(!outcome.checks.iter().any(|c| c.code == "reflow"));
+    assert!(!outcome.blocked());
+}
+
+#[test]
+fn typing_in_the_dead_border_is_warned_about() {
+    let Ok(_) = render::engine() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let form = a_pdf(dir.path(), "form.pdf", &[("Name:", 60.0)]);
+
+    let outcome = compose_run(
+        &form,
+        &[item(1, 1.0, 60.0, "too close to the edge")],
+        &dir.path().join("delta.pdf"),
+        None,
+        &quick(),
+    )
+    .unwrap();
+    assert!(
+        outcome.checks.iter().any(|c| c.code == "margin"),
+        "{:?}",
+        outcome.checks
+    );
+}
+
+#[test]
+fn typing_on_a_page_that_is_not_there_says_so() {
+    let Ok(_) = render::engine() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let form = a_pdf(dir.path(), "form.pdf", &[("Name:", 60.0)]);
+
+    let err = compose_run(
+        &form,
+        &[item(4, 60.0, 60.0, "nowhere")],
+        &dir.path().join("delta.pdf"),
+        None,
+        &quick(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("there is no page 4"), "{err}");
+}
+
+#[test]
+fn typing_nothing_blocks_rather_than_printing_a_blank_sheet() {
+    let Ok(_) = render::engine() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let form = a_pdf(dir.path(), "form.pdf", &[("Name:", 60.0)]);
+
+    let outcome = compose_run(&form, &[], &dir.path().join("delta.pdf"), None, &quick()).unwrap();
+    assert!(outcome.blocked());
+    assert!(outcome.checks.iter().any(|c| c.code == "empty_delta"));
+}
+
+#[test]
+fn typing_in_another_alphabet_works_with_a_supplied_font() {
+    let Ok(_) = render::engine() else { return };
+    let path = std::path::PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+    if !path.is_file() {
+        return;
+    }
+    let font = crate::font::EmbeddedFont::load(&path).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let form = a_pdf(dir.path(), "form.pdf", &[("Name:", 60.0)]);
+
+    let mut cyrillic = item(1, 60.0, 60.0, "Утверждено");
+    cyrillic.font = "file".into();
+
+    let outcome = compose_run(
+        &form,
+        &[cyrillic],
+        &dir.path().join("delta.pdf"),
+        Some(&font),
+        &quick(),
+    )
+    .unwrap();
+    assert!(!outcome.blocked(), "{:?}", outcome.checks);
+    assert!(outcome.total_regions() >= 1, "nothing was drawn");
 }

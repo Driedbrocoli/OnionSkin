@@ -205,6 +205,157 @@ fn blank_gray(size: PageSize, dpi: f64) -> Vec<u8> {
     vec![255u8; (w as usize) * (h as usize)]
 }
 
+/// Place text at fixed positions on a document's pages.
+///
+/// Everything downstream of the delta is shared with [`run`] — the same margin
+/// and coverage checks, the same proof images, the same calibration. What is
+/// absent is the reflow check, and not by omission: absolutely positioned text
+/// cannot displace anything, so no ink can move. That is the whole reason this
+/// path exists.
+pub fn compose_run(
+    source: &Path,
+    items: &[crate::document::Item],
+    output: &Path,
+    font: Option<&crate::font::EmbeddedFont>,
+    options: &Options,
+) -> Result<Outcome, PipelineError> {
+    options.validate()?;
+    guard_output(output, &[source])?;
+
+    let profile = match &options.profile {
+        Some(name) => Some(calibrate::load_profile(name)?),
+        None => None,
+    };
+    if let Some(dir) = &options.preview_dir {
+        std::fs::create_dir_all(dir).map_err(|source| PipelineError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+    }
+
+    let engine = render::engine()?;
+    let workspace = Workspace::new(false)?;
+    let work = &workspace.path;
+
+    let source_pdf = render::to_pdf(source, work, 180)?;
+    let doc = engine.open(&source_pdf)?;
+    let sizes = doc.page_sizes.clone();
+
+    // Lay the text out against the pages it is going onto.
+    let mut per_page: Vec<Vec<crate::pdf::PlacedLine>> = vec![Vec::new(); sizes.len()];
+    for item in items {
+        let index = item.page.saturating_sub(1);
+        if index >= per_page.len() {
+            return Err(PipelineError::Invalid(format!(
+                "there is no page {} — the document has {}",
+                item.page,
+                sizes.len()
+            )));
+        }
+        per_page[index].extend(
+            item.lines(font)
+                .map_err(|e| PipelineError::Invalid(e.to_string()))?,
+        );
+    }
+
+    let staged = work.join("delta-raw.pdf");
+    crate::pdf::write_delta(&staged, &sizes, &per_page, "Onionskin delta", font)
+        .map_err(|e| PipelineError::Invalid(e.to_string()))?;
+
+    // Read back what was actually drawn, so the checks and the proof see the
+    // ink rather than the intent. A line that runs off the paper, or lands in
+    // the border a printer cannot reach, shows up here and nowhere else.
+    let composed = engine.open(&staged)?;
+    let mut diffs: Vec<PageDiff> = Vec::new();
+    let mut previews: Vec<PathBuf> = Vec::new();
+
+    for (index, size) in sizes.iter().enumerate() {
+        let drawn = composed.render(index, options.dpi)?;
+        let added = crate::diff::ink_mask(
+            &drawn.gray,
+            drawn.width,
+            drawn.height,
+            options.diff.ink_threshold,
+        );
+        let mut diff = PageDiff {
+            index,
+            size: *size,
+            dpi: options.dpi,
+            added_px: added.count(),
+            removed_px: 0,
+            added_regions: crate::diff::label_regions(
+                &added,
+                options.dpi,
+                options.diff.group_mm,
+                options.diff.min_region_mm2,
+            ),
+            removed_regions: Vec::new(),
+            removed: crate::diff::Mask::blank(drawn.width, drawn.height),
+            added,
+        };
+
+        if let Some(dir) = &options.preview_dir {
+            let page = doc.render(index, options.dpi)?;
+            let image = preview_page(&diff, &page.gray, page.width);
+            let path = dir.join(format!("page-{:03}.png", index + 1));
+            image.save(&path)?;
+            previews.push(path);
+        }
+        diff.release();
+        diffs.push(diff);
+    }
+
+    let mut checks = Vec::new();
+    for diff in &diffs {
+        checks.extend(safety::check_margins(diff, options.margin_mm));
+        checks.extend(safety::check_coverage(diff));
+    }
+    checks.extend(safety::check_empty(&diffs));
+    checks.extend(safety::check_calibration(
+        profile.is_some(),
+        profile.as_ref().map(|p| p.name.as_str()),
+    ));
+    if let (Some(profile), Some(first)) = (&profile, sizes.first()) {
+        checks.extend(safety::check_profile_page(
+            &profile.name,
+            profile.page,
+            profile.error,
+            *first,
+        ));
+    }
+    safety::sort_checks(&mut checks);
+
+    let correction = profile
+        .as_ref()
+        .map(|p| p.correction())
+        .unwrap_or(Similarity::IDENTITY);
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|source| PipelineError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+    let corrected = apply_correction(
+        &staged,
+        &work.join("delta-corrected.pdf"),
+        correction,
+        &sizes,
+    )?;
+    conform_to_source(&corrected, output, &doc.frames)?;
+
+    Ok(Outcome {
+        output: output.to_path_buf(),
+        pages: diffs,
+        checks,
+        previews,
+        mode: options.mode,
+        dpi: options.dpi,
+        profile,
+    })
+}
+
 /// Compare two documents and write the delta PDF.
 ///
 /// Pages are handled one at a time — render, diff, emit, release — so memory

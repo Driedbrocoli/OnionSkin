@@ -11,3 +11,4 @@ pub mod pipeline;
 pub mod render;
 pub mod safety;
 pub mod scan;
+pub mod web;

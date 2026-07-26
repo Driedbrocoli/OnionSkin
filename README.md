@@ -3,91 +3,99 @@
 Add words to a page that is already printed.
 
 You have a printed sheet. You want to add something to it — a signature line, an
-approval date, a paragraph in a gap — without reprinting the whole page. Give
-Onionskin the original document and an edited copy. It works out which ink is
-new and writes a **delta PDF**: the same page size, blank except for the
-additions. Put the sheet back in the tray, print the delta at 100%, and the new
-words land in the gaps.
+approval date, a paragraph in a gap — without reprinting the whole page.
+Onionskin works out which ink is new and writes a **delta PDF**: the same page
+size, blank except for the additions. Put the sheet back in the tray, print the
+delta at 100%, and the new words land in the gaps.
 
 The name is the point: the delta is a transparent sheet laid over what is
 already there.
 
+It runs entirely on your own machine, never uses the network, and works on
+Linux, Windows and macOS.
+
 ## Install
 
 ```bash
-pip install -e ".[web,dev]"
+cargo build --release        # the binary lands in target/release/onionskin
+onionskin doctor             # what works on this machine, and what is missing
 ```
 
-Word documents are rendered by **LibreOffice**, which must be installed
-([download](https://www.libreoffice.org/download/)). PDFs work without it.
-Check the setup with `onionskin doctor`.
+Two things are needed beyond the binary itself, and `doctor` will tell you if
+either is absent:
 
-## Two ways to work
+* **pdfium** draws PDF pages. Put `libpdfium` beside the binary, or point
+  `ONIONSKIN_PDFIUM` at it.
+* **LibreOffice** converts Word documents, and only those — PDFs work without it
+  ([download](https://www.libreoffice.org/download/)).
 
-**Type on the page.** One file in, no editing round trip. Say where the words
-go and Onionskin puts them there:
+## Four ways to work
+
+### Make a document, print it, and keep adding to it
+
+Start from a blank sheet, and print only what you add afterwards. This is the
+one place where the delta is *exact*: the document records precisely which words
+went on the paper, so what is new is what is not in that record.
 
 ```bash
-onionskin add po.docx -o delta.pdf --text '1:45,63:J. Bezzina — approved 25 July'
+onionskin new order.onionskin --page a4
+onionskin write order.onionskin --at '25,35:PURCHASE ORDER 4471' --size 16 --font bold
+onionskin write order.onionskin --at '25,90:Two hundred widgets, black.' --width 90
+onionskin show order.onionskin                       # numbered, so you can edit it
+onionskin edit order.onionskin 2 --by '0,-2'         # nudge it up 2 mm
+onionskin print order.onionskin -o order.pdf --printed
+
+# later — only the approval goes onto the sheet
+onionskin write order.onionskin --at '25,150:Approved — J. Bezzina, 26 July'
+onionskin print order.onionskin -o delta.pdf --delta
 ```
 
-Coordinates are millimetres from the top-left of the sheet, the way you would
-measure with a ruler. In the browser (`onionskin serve` → *Type on the page*)
-you drop the file in, click where you want the words, and drag to nudge.
+### Type onto a document or a form
+
+One file in, no editing round trip. Say where the words go and Onionskin puts
+them there:
+
+```bash
+onionskin add po.docx -o delta.pdf --at-mm '45,63:J. Bezzina — approved 25 July'
+```
 
 Because the text is placed at an absolute position, **nothing on the page can
-move** — the reflow problem below simply cannot happen. This is the path to
-reach for when you are filling a gap on a form.
+move** — the reflow problem below simply cannot happen.
 
-**Compare two documents.** Edit in Word as you normally would, and let
-Onionskin work out what is new:
+### Fill in a sheet you only have as a scan
+
+```bash
+onionskin scanners                       # what this machine can see
+onionskin acquire -o scan.png            # scan the sheet
+onionskin inspect scan.png --page a4     # how does it sit on the glass?
+onionskin read scan.png --page a4        # where is every letter on it?
+onionskin add scan.png -o delta.pdf --at-mm '60,150:Approved' --preview proof.png
+```
+
+Onionskin finds the paper's outline in the scan, measures how far it is turned,
+and works back to millimetres on the physical sheet. Across 360 combinations of
+page size, resolution, skew, margin and position, a point picked on the scan
+lands within **0.30 mm** of where it belongs on the paper.
+
+### Compare two documents
+
+Edit in Word as you normally would, and let Onionskin work out what is new:
 
 ```bash
 onionskin delta report.docx report-edited.docx -o delta.pdf
-onionskin inspect report.docx report-edited.docx      # analyse, write nothing
+onionskin compare report.docx report-edited.docx      # report, write nothing
 onionskin delta a.docx b.docx -o delta.pdf --preview ./proof
 ```
 
 Either way, put the printed sheet back in the tray and print `delta.pdf` **at
 100% / "Actual size"**, with "Fit to page" turned off.
 
-## Placing text precisely
-
-```bash
-onionskin add form.pdf -o delta.pdf \
-  --text '1:45,63:Approved' \
-  --text '2:20,240:Continued overleaf' \
-  --size 11 --font Times-Roman --width 80 --align right \
-  --save-layout layout.json
-```
-
-`--width` wraps the text at that many millimetres; without it, text stays on
-one line. `onionskin fonts` lists the built-in fonts.
-
-**Writing in any language.** The fonts built into every PDF reader only cover
-Western European characters. Ask for Chinese, Arabic, Cyrillic, Greek, Hebrew or
-an emoji and Onionskin will refuse rather than print a row of black boxes onto
-your sheet. Point it at a font that has the characters and it embeds it:
-
-```bash
-onionskin add form.pdf -o delta.pdf --text '1:30,80:承認済み 2026年7月25日' \
-  --font-file /usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc
-```
-
-`--save-layout` writes the placements out as JSON, and `--layout` reads them
-back — so a monthly form can be filled with one command. Layout files number
-pages from 1, and take every setting a text box has:
-
-```json
-{"boxes": [
-  {"page": 1, "x_mm": 45, "y_mm": 63, "text": "Approved", "size_pt": 11,
-   "font": "Helvetica", "align": "left", "colour": "#000000", "rotation_deg": 0}
-]}
-```
+There is also a browser interface for the two-document workflow, served from
+your own machine: `onionskin serve`, then open <http://127.0.0.1:8737/>.
 
 ## The thing that will bite you: reflow
 
-*(Only when comparing two documents — typing on the page cannot cause it.)*
+*(Only when comparing two documents. The other three ways cannot cause it.)*
 
 Insert a word in the middle of a paragraph and every line after it shifts down.
 The delta is then not just your new word — it is the whole re-flowed remainder
@@ -144,12 +152,42 @@ the inverse:
 onionskin delta a.docx b.docx -o delta.pdf --profile office
 ```
 
-Calibrate once per printer, per tray. Profiles are per-printer, not per-job.
+Calibrate once per printer, per tray. Calibrate on the paper you actually print
+on: a shift carries over to any sheet size, but rotation and scale are applied
+about the centre of the page, so an A4 profile used on Legal leaves some error
+behind. Onionskin says so when it spots the mismatch.
 
-Calibrate on the paper you actually print on. A shift carries over to any sheet
-size — the paper path pushes every page the same way — but rotation and scale
-are applied about the centre of the page, so using an A4 profile on Legal leaves
-some error behind. Onionskin says so when it spots the mismatch.
+## Writing in any language
+
+The fonts built into every PDF reader cover Western European text and nothing
+else. Ask for Chinese, Arabic, Cyrillic, Greek, Hebrew or an emoji and Onionskin
+refuses rather than printing a row of black boxes onto your sheet. Point it at a
+font that has the characters and it carries that font inside the delta, so the
+printer needs nothing installed:
+
+```bash
+onionskin add form.pdf -o delta.pdf --at-mm '30,80:承認済み 2026年7月25日' \
+  --font-file /usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc
+```
+
+Any font file works — `.ttf`, `.ttc`, `.otf`, `.otc`. The two outline formats
+live differently inside a PDF and swapping them gives a file that opens fine and
+prints a blank page, so Onionskin looks at what the font actually carries rather
+than at its extension. That matters for Word in particular: its default faces,
+Calibri and Cambria, are PostScript-flavoured.
+
+## Reading a scanned page
+
+`onionskin read` finds every mark of ink on a scan, groups it into letters,
+words and lines, and reports each in millimetres from the corner of the paper.
+That alone answers the question a delta has to answer before it prints: is this
+gap really a gap.
+
+Given the font the page was set in, it also reads them — the alphabet is
+whatever that font can draw, so the language is whatever the page is in. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for how homoglyphs and right-to-left scripts
+are handled, and for the two honest limits (cursive scripts and combining
+marks).
 
 ## Raster or vector
 
@@ -161,18 +199,6 @@ some error behind. Onionskin says so when it spots the mismatch.
 Raster recovers anti-aliasing as an alpha channel, so glyph edges stay smooth
 rather than printing inside a pale halo.
 
-## Pages that are not the simple case
-
-A page is not always a box starting at (0,0) the right way up. Media boxes have
-non-zero origins, crop boxes shrink the visible area, and `/Rotate` turns a page
-a quarter turn — all three are ordinary in scans and anything that has been
-through a PDF editor, and all three move where ink lands on paper.
-
-Onionskin renders and diffs the page as you see it, then writes the delta back
-into the source's own frame, copying its boxes and rotation exactly. A printer
-places both impressions identically, so they line up. Without that the delta
-would print somewhere other than where the preview showed it.
-
 ## Other checks
 
 * **Dead border** — most printers cannot place ink within ~5 mm of an edge.
@@ -183,58 +209,12 @@ would print somewhere other than where the preview showed it.
   something reflowed in a way the ink test did not catch.
 * **Empty delta** — the two documents render identically.
 
-## Library
-
-```python
-from onionskin import compose, pipeline
-
-# Type on the page
-pipeline.compose_run(
-    "po.docx",
-    [compose.TextBox(page=0, x_mm=45, y_mm=63, text="Approved", size_pt=11)],
-    "delta.pdf",
-    pipeline.Options(profile="office"),
-)
-
-# Or compare two documents
-result = pipeline.run(
-    "report.docx", "report-edited.docx", "delta.pdf",
-    pipeline.Options(dpi=600, mode="vector", profile="office"),
-)
-
-if result.blocked:
-    for check in result.checks:
-        print(check.format())
-else:
-    for page in result.pages:
-        for region in page.added_regions:
-            print(f"page {page.index + 1}: {region.width_mm:.1f}mm at {region.x0_mm:.1f}mm")
-```
-
-`result.to_dict()` is JSON-serialisable; the CLI's `--json` returns exactly it.
-
-## How it works
-
-1. Both documents are rendered to PDF by the same LibreOffice build, then to
-   pixels at the same DPI. Using one engine for both matters — two different
-   renderers disagree about kerning, and every glyph would read as changed.
-2. `added = ink(new) AND NOT dilate(ink(old))`, and the reverse for `removed`.
-   The dilation absorbs sub-pixel jitter so an unmoved glyph does not leave a
-   hairline ghost in the delta.
-3. Added pixels are grouped into regions on a coarse grid — cheap connectivity —
-   with bounding boxes measured back at full resolution.
-4. `removed` is never printed. It is the reflow alarm.
-5. The delta is written at the exact page size, then re-placed through the
-   calibration transform as a single matrix, leaving the media box untouched.
-
-Memory stays flat regardless of document length: each page is rendered,
-diffed, written and released before the next one is touched.
-
 ## Privacy and networking
 
-Onionskin never uses the network. There is no telemetry, no update check, and
-no external asset in the browser UI — verified by running the whole app, and the
-test suite, with every socket call blocked.
+Onionskin never uses the network. There is no telemetry, no update check, and no
+external asset in the browser UI — the page it serves contains nothing fetched
+from anywhere else. Verified by tracing a full run: not one internet socket is
+opened.
 
 `onionskin serve` binds to `127.0.0.1`, so the UI is reachable only from your
 own machine. It has no password: if you override `--host`, anyone who can reach
@@ -248,13 +228,16 @@ from, since that would destroy the sheet you were about to print onto.
 ## Development
 
 ```bash
-python -m pytest
+cargo test
+cargo clippy --all-targets
 ```
 
-Tests that need LibreOffice skip automatically when it is absent.
+Tests that need LibreOffice, a scanner or a particular font skip themselves when
+it is absent. [ARCHITECTURE.md](ARCHITECTURE.md) explains how the pieces fit
+together and why several of them are the shape they are.
 
 ## Licence
 
 MIT. The dependencies are deliberately permissive too — PyMuPDF would be the
-obvious choice for the PDF work, but it is AGPL and would follow anyone
-shipping this.
+obvious choice for the PDF work, but it is AGPL and would follow anyone shipping
+this.

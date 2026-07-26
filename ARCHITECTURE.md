@@ -1,6 +1,30 @@
-# Onionskin in Rust
+# How Onionskin is built
 
-A port of the Python implementation in `../onionskin/`, in progress.
+Notes on the parts that are not obvious, and on why several of them are the
+shape they are. For what the program *does*, see [README.md](README.md).
+
+Everything is Rust. There was a Python implementation; it was ported module by
+module and removed, and the differential harness that checked the two agreed
+went with it.
+
+## The modules
+
+| | |
+|---|---|
+| `geometry` | Page sizes, and the similarity transform calibration fits |
+| `render`   | LibreOffice for Word documents, pdfium for pixels, page frames |
+| `diff`     | What ink is new, what ink is gone |
+| `delta`    | Writing the delta PDF, raster or vector |
+| `safety`   | The checks that run before paper is committed |
+| `calibrate`| The two-pass target, the fit, and the stored profiles |
+| `pipeline` | The whole job, end to end |
+| `scan`     | Finding the sheet in a scan and measuring how it sits |
+| `letters`  | Reading the ink off a registered scan |
+| `document` | A document made from nothing and edited |
+| `font`     | Embedding a font so the printer needs nothing installed |
+| `pdf`      | Writing text into a PDF |
+| `acquire`  | Driving a scanner through SANE |
+| `web`      | A local HTTP server with no dependency and no external asset |
 
 ## Making a document, and adding to it after it is printed
 
