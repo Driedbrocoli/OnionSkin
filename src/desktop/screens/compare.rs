@@ -22,7 +22,29 @@ pub struct State {
     mode: pipeline::Mode,
     profile: String,
     show_settings: bool,
+    /// Draw a box round every change.
+    outline: bool,
+    /// Which colour those boxes are, by name.
+    outline_colour: usize,
+    /// Keep the delta beside the edited document instead of in Onionskin's own
+    /// folder. Off, because most deltas are printed once and never wanted
+    /// again — see [`onionskin::delta::scratch_path`].
+    keep_beside: bool,
 }
+
+/// The colours a box can be drawn in, in the order they are offered.
+///
+/// Named rather than a colour wheel: somebody marking up a proof wants "red",
+/// and the three-number form is on the command line for the rare case where
+/// a particular red is meant.
+const OUTLINE_COLOURS: &[(&str, (f64, f64, f64))] = &[
+    ("Red", (0.80, 0.10, 0.10)),
+    ("Blue", (0.10, 0.30, 0.85)),
+    ("Green", (0.00, 0.55, 0.20)),
+    ("Orange", (0.95, 0.45, 0.00)),
+    ("Magenta", (0.85, 0.10, 0.60)),
+    ("Black", (0.0, 0.0, 0.0)),
+];
 
 impl Default for State {
     fn default() -> Self {
@@ -35,6 +57,9 @@ impl Default for State {
             mode: pipeline::Mode::Raster,
             profile: String::new(),
             show_settings: false,
+            outline: false,
+            outline_colour: 0,
+            keep_beside: false,
         }
     }
 }
@@ -73,6 +98,40 @@ pub fn show(state: &mut State, room: &mut Room) {
         DOCUMENT_KINDS,
         room.dropped,
     );
+
+    room.ui.add_space(6.0);
+    room.ui.checkbox(
+        &mut state.outline,
+        "Draw a box round every change, so it is easy to see",
+    );
+    if state.outline {
+        room.ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            ui.label("Colour");
+            egui::ComboBox::from_id_salt("outline-colour")
+                .selected_text(OUTLINE_COLOURS[state.outline_colour].0)
+                .show_ui(ui, |ui| {
+                    for (index, (name, _)) in OUTLINE_COLOURS.iter().enumerate() {
+                        ui.selectable_value(&mut state.outline_colour, index, *name);
+                    }
+                });
+            widgets::hint(ui, "the box is printed onto the paper too");
+        });
+    }
+    room.ui.checkbox(
+        &mut state.keep_beside,
+        "Save the delta next to the edited document",
+    );
+    if !state.keep_beside {
+        room.ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            widgets::hint(
+                ui,
+                "otherwise it is kept in Onionskin's own folder — print it, or \
+                 save a copy afterwards",
+            );
+        });
+    }
 
     room.ui.add_space(6.0);
     room.ui
@@ -155,19 +214,38 @@ fn start(state: &mut State, room: &mut Room) {
         return;
     };
 
-    // Where it goes: beside the edited copy unless somebody has said otherwise,
-    // because that is the folder they are already working in.
-    let output = state.output.clone().unwrap_or_else(|| {
-        let mut path = edited.clone();
-        path.set_file_name("delta.pdf");
-        path
-    });
+    // Beside the edited copy only if that was asked for. Otherwise Onionskin's
+    // own folder, so a job that is printed once does not leave a file behind in
+    // somebody's documents and does not make them name one to continue.
+    let output = match state.output.clone() {
+        Some(chosen) => chosen,
+        None if state.keep_beside => {
+            let mut path = edited.clone();
+            path.set_file_name("delta.pdf");
+            path
+        }
+        None => {
+            let name = edited
+                .file_stem()
+                .map(|stem| format!("{}-delta.pdf", stem.to_string_lossy()))
+                .unwrap_or_else(|| "delta.pdf".to_string());
+            onionskin::delta::scratch_path(&name)
+        }
+    };
+    // Anything left from a previous run goes now, keeping the one about to be
+    // written. Tidying when the program closes never happens to a program that
+    // is killed.
+    onionskin::delta::tidy_scratch(Some(&output));
 
     let options = pipeline::Options {
         dpi: state.dpi,
         mode: state.mode,
         margin_mm: state.margin_mm,
         profile: Some(state.profile.trim().to_string()).filter(|p| !p.is_empty()),
+        outline: state.outline.then(|| onionskin::delta::Outline {
+            colour: OUTLINE_COLOURS[state.outline_colour].1,
+            ..Default::default()
+        }),
         ..Default::default()
     };
 

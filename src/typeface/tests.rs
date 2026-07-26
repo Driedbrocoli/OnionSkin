@@ -569,3 +569,68 @@ fn describe_says_what_was_found() {
         format!("Times-Roman at about 11.5 pt, from {} words", PROSE.len())
     );
 }
+
+// ---------------------------------------------------------------------------
+// Typewriter faces, which are recognised by their spacing rather than by shape
+// ---------------------------------------------------------------------------
+
+/// Gaps on a given pitch, with a repeatable unevenness either side of it.
+///
+/// Repeatable rather than random so that a failure can be looked at, and so
+/// that a test that passes today passes tomorrow for the same reason.
+fn gaps_on_a_pitch(pitch_mm: f64, wobble_mm: f64, count: usize) -> Vec<f64> {
+    (0..count)
+        .map(|index| {
+            if index % 2 == 0 {
+                pitch_mm + wobble_mm
+            } else {
+                pitch_mm - wobble_mm
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn evenly_spaced_letters_are_recognised_as_a_typewriter_face() {
+    // No shapes involved: this is the measurement that still works when the
+    // page could not be read at all, which is the ordinary case for Courier on
+    // a machine whose only monospaced font is a sans one.
+    let pitch = monospaced_from(&gaps_on_a_pitch(2.54, 0.0, 30))
+        .expect("evenly spaced letters were not noticed");
+    assert!((pitch - 2.54).abs() < 0.01, "{pitch}");
+}
+
+#[test]
+fn a_proportional_page_is_not_mistaken_for_a_typewriter_one() {
+    // A third of a letter's width of variation, well inside what a
+    // proportional face does to its own letters.
+    assert!(monospaced_from(&gaps_on_a_pitch(2.54, 0.9, 30)).is_none());
+}
+
+#[test]
+fn a_few_stray_gaps_do_not_outvote_an_even_page() {
+    // A scan always produces some wild gaps — two letters that touched and
+    // were read as one, a speck taken for a full stop. The middle four-fifths
+    // is what is judged, so a handful of those must not change the answer.
+    let mut gaps = gaps_on_a_pitch(2.54, 0.0, 40);
+    gaps[0] = 22.0;
+    gaps[1] = 19.0;
+    gaps[39] = 0.6;
+    let pitch = monospaced_from(&gaps).expect("a few strays changed the answer");
+    assert!((pitch - 2.54).abs() < 0.01, "{pitch}");
+}
+
+#[test]
+fn too_little_to_go_on_is_not_a_typewriter_face() {
+    // Three letters on a page are evenly spaced quite often, and that is a
+    // coincidence rather than a measurement.
+    assert!(monospaced_from(&gaps_on_a_pitch(2.54, 0.0, 3)).is_none());
+    assert!(monospaced_from(&[]).is_none());
+}
+
+#[test]
+fn a_pitch_of_nothing_is_refused_rather_than_divided_by() {
+    // Every letter reported at the same place. Not a typewriter face: a bug
+    // upstream, and one that would otherwise divide by zero here.
+    assert!(monospaced_from(&vec![0.0; 30]).is_none());
+}

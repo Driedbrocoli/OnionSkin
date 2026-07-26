@@ -108,10 +108,11 @@ impl Typeface {
     /// precision the paper cannot support.
     pub fn describe(&self) -> String {
         format!(
-            "{} at about {:.1} pt, from {} words",
+            "{} at about {:.1} pt, from {} word{}",
             self.font.base_name(),
             self.size_pt,
-            self.words_measured
+            self.words_measured,
+            if self.words_measured == 1 { "" } else { "s" }
         )
     }
 }
@@ -140,7 +141,110 @@ const LARGEST_PT: f64 = 200.0;
 /// `None` when the page has not given enough away: fewer than three readable
 /// words of two letters or more, or a size that comes out absurd.
 pub fn detect(page: &PageText) -> Option<Typeface> {
+    // A typewriter face is worth asking about first, because it can be
+    // recognised from the geometry alone and the width fit cannot reliably
+    // tell it apart from anything else. See [`monospaced`].
+    if let Some(advance_mm) = monospaced(page) {
+        let size_pt = advance_mm / COURIER_ADVANCE_EM * PT_PER_MM;
+        if (SMALLEST_PT..=LARGEST_PT).contains(&size_pt) {
+            let font = match page_coverage(page) {
+                Some(ink) if ink > BOLD_ABOVE => pdf::Font::CourierBold,
+                _ => pdf::Font::Courier,
+            };
+            return Some(Typeface {
+                font,
+                size_pt,
+                // Evenly spaced letters are not something a proportional face
+                // does by accident, so this is about as sure as this module
+                // gets — but it is one measurement rather than two.
+                confidence: 0.9,
+                words_measured: measurable(page).len(),
+            });
+        }
+    }
     detect_measured(&measurable(page), page_coverage(page))
+}
+
+/// Every letter in Courier is exactly this wide, in ems. Not approximately:
+/// that is what makes it a typewriter face.
+const COURIER_ADVANCE_EM: f64 = 0.6;
+
+/// Points per millimetre, for turning a measured advance into a type size.
+const PT_PER_MM: f64 = 72.0 / 25.4;
+
+/// Is this page set in a typewriter face, and if so how wide is a letter?
+///
+/// Worth a separate measurement because the width fit cannot answer it well.
+/// Reading letters off a scan means matching their shapes against some font,
+/// and the only monospaced faces on most machines are sans ones — DejaVu Sans
+/// Mono and its relatives — which look nothing like Courier's slab serifs. A
+/// Courier page read against them comes back mostly unread, and a fit with
+/// nothing to fit gives no answer at all.
+///
+/// The geometry gives it away without any font being involved. In a
+/// proportional face an `i` and an `m` take very different amounts of room; in
+/// a typewriter face every letter is on the same pitch, so the gaps between
+/// the left edges of consecutive letters are all the same number. Measuring
+/// how much those gaps vary separates the two cleanly, and does it on letters
+/// that were never successfully read.
+pub fn monospaced(page: &PageText) -> Option<f64> {
+    monospaced_from(&letter_gaps(page))
+}
+
+/// The gap between the left edge of each letter and the next, within words.
+///
+/// Only within a word: the gap across a space is a space, not an advance.
+fn letter_gaps(page: &PageText) -> Vec<f64> {
+    let mut gaps = Vec::new();
+    for line in &page.lines {
+        for word in &line.words {
+            for pair in word.letters.windows(2) {
+                let gap = pair[1].rect.x_mm - pair[0].rect.x_mm;
+                // A negative or absurd gap is a mis-segmented letter, not a
+                // measurement of anything.
+                if gap > 0.05 && gap < 40.0 {
+                    gaps.push(gap);
+                }
+            }
+        }
+    }
+    gaps
+}
+
+/// The same, from measured gaps rather than from a page.
+///
+/// Public for the same reason as [`detect_measured`]: this is where the
+/// arithmetic is, and a page of letters is an awkward thing to build by hand,
+/// which would otherwise leave the maths tested only through the thing that
+/// produces it.
+pub fn monospaced_from(gaps: &[f64]) -> Option<f64> {
+    // Too few gaps and any number is a coincidence. Twelve is two short words.
+    if gaps.len() < 12 {
+        return None;
+    }
+    let mut gaps = gaps.to_vec();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let middle = gaps[gaps.len() / 2];
+    if middle <= 0.0 {
+        return None;
+    }
+    // Judged on the middle four-fifths. A scan always produces a few wild
+    // gaps — two letters that touched and were read as one, a speck taken for
+    // a full stop — and a handful of those should not outvote a page that is
+    // otherwise perfectly even.
+    let low = gaps.len() / 10;
+    let high = gaps.len() - gaps.len() / 10;
+    let trimmed = &gaps[low..high.max(low + 1)];
+    let spread = trimmed
+        .iter()
+        .map(|gap| (gap - middle).abs() / middle)
+        .sum::<f64>()
+        / trimmed.len() as f64;
+
+    // A tenth is generous for a typewriter face and far tighter than any
+    // proportional one manages: Helvetica's own letters vary by about half
+    // their own width from each other.
+    (spread < 0.10).then_some(middle)
 }
 
 /// The same, from measurements rather than from a page.

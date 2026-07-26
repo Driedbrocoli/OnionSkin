@@ -109,6 +109,47 @@ fn pdf_rects(regions: &[Region], page: PageSize) -> String {
         .join(" ")
 }
 
+/// Where a delta goes when nobody has asked to keep it.
+///
+/// Most deltas are looked at once and printed once. Writing every one of them
+/// into the folder somebody keeps their documents in leaves that folder full of
+/// `delta.pdf`, `delta (1).pdf`, `delta (2).pdf` — and makes choosing a name a
+/// step in a job that did not need one. So the default is a file here, inside
+/// Onionskin's own folder, and saving a copy somewhere is something a person
+/// does when they want to rather than something they must do to continue.
+///
+/// Under the Onionskin home rather than the system temporary directory,
+/// because a delta is made from somebody's document and a shared `/tmp` is
+/// world-readable on most machines.
+pub fn scratch_path(name: &str) -> PathBuf {
+    let folder = crate::calibrate::home_dir().join("deltas");
+    let _ = std::fs::create_dir_all(&folder);
+    crate::render::restrict(&folder);
+    folder.join(name)
+}
+
+/// Delete deltas left behind by earlier runs, keeping one if asked.
+///
+/// Called when a new one is made rather than when the program closes: a
+/// program that is killed never runs its tidying, and the folder then grows
+/// forever. Failures are ignored — a file that cannot be deleted is not a
+/// reason to refuse to make the next delta.
+pub fn tidy_scratch(keep: Option<&Path>) {
+    let folder = crate::calibrate::home_dir().join("deltas");
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep.map(|kept| kept == path).unwrap_or(false) {
+            continue;
+        }
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// A box drawn round each change, so it can be seen.
 ///
 /// Off unless asked for, and deliberately: a delta is printed onto the paper

@@ -12,6 +12,7 @@ use onionskin::acquire::{
     acquire, list_devices, scanning_available, unavailable_reason, AcquireOptions, PLACEMENT_ADVICE,
 };
 use onionskin::calibrate;
+use onionskin::discover;
 use onionskin::document::{Document, Item};
 use onionskin::font::{suggest_system_font, EmbeddedFont};
 use onionskin::geometry::{parse_page, PageSize};
@@ -154,6 +155,12 @@ struct PrintersArgs {
     /// USB printer appears; give a printer's own address to ask it directly.
     #[arg(long, default_value = "ipp://127.0.0.1:631/")]
     server: String,
+    /// Do not look on the network, only ask the print server.
+    #[arg(long)]
+    no_network: bool,
+    /// How long to listen for printers announcing themselves, in seconds.
+    #[arg(long, default_value_t = 2.0)]
+    listen: f64,
 }
 
 #[derive(clap::Args)]
@@ -623,12 +630,17 @@ struct AddArgs {
     /// Size of the paper that was scanned.
     #[arg(long, default_value = "a4")]
     page: String,
-    /// Type size in points.
-    #[arg(long, default_value_t = 11.0)]
-    size: f64,
-    /// One of the built-in fonts (see `onionskin fonts`).
-    #[arg(long, default_value = "Helvetica")]
-    font: String,
+    /// Type size in points. Without it, measured off the words already on the
+    /// page.
+    #[arg(long)]
+    size: Option<f64>,
+    /// One of the built-in fonts (see `onionskin fonts`). Without it, matched
+    /// against the words already on the page.
+    #[arg(long)]
+    font: Option<String>,
+    /// Do not look at the page: use Helvetica at 11 pt unless told otherwise.
+    #[arg(long)]
+    no_match_font: bool,
     /// A .ttf or .ttc to write with, carried inside the delta. Needed for any
     /// alphabet the built-in fonts do not cover.
     #[arg(long)]
@@ -1364,15 +1376,41 @@ fn export_page(
 }
 
 fn cmd_scanners() -> Result<ExitCode, String> {
-    let devices = list_devices().map_err(|e| e.to_string())?;
-    if devices.is_empty() {
-        println!("No scanners found. Check the scanner is switched on and plugged in.");
-        return Ok(ExitCode::from(1));
+    // Anything attached to this machine, through SANE. An error here means no
+    // scanning tool is installed, which is worth saying once at the end rather
+    // than instead of the network scanners that may well be there.
+    let attached = list_devices().unwrap_or_default();
+    if !attached.is_empty() {
+        println!("Attached to this machine:");
+        for device in &attached {
+            println!("  {}", device.description);
+            println!("    --device {}", device.name);
+        }
     }
-    println!("Scanners this machine can see:");
-    for device in &devices {
-        println!("  {}", device.description);
-        println!("    --device {}", device.name);
+
+    if attached.is_empty() {
+        println!("Looking for scanners…");
+    }
+    let network = discover::scanners(discover::LISTEN_FOR);
+    if !network.is_empty() {
+        println!("\nAnnouncing themselves on this network:");
+        for found in &network {
+            println!("\n  {}", found.name);
+            if let Some(model) = found.model() {
+                println!("    {model}");
+            }
+            println!("    --scanner {}", found.uri);
+        }
+    }
+
+    if attached.is_empty() && network.is_empty() {
+        println!(
+            "No scanners found.\n\n\
+             Check it is switched on, and plugged in or on this network. Onionskin\n\
+             drives an attached scanner through SANE's 'scanimage' — install it with\n\
+             your package manager, for example:  sudo apt install sane-utils"
+        );
+        return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1691,11 +1729,10 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
                 .into(),
         );
     }
-    if !(args.size.is_finite() && args.size > 0.0 && args.size <= 400.0) {
-        return Err(format!(
-            "type size {} pt is out of range (1 to 400)",
-            args.size
-        ));
+    if let Some(size) = args.size {
+        if !(size.is_finite() && size > 0.0 && size <= 400.0) {
+            return Err(format!("type size {size} pt is out of range (1 to 400)"));
+        }
     }
     if !args.rotation.is_finite() {
         return Err("rotation must be a real number".into());
@@ -1708,14 +1745,41 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         }
         None => None,
     };
+
+    // Nothing said, so read it off the page. Somebody adding a line to a form
+    // wants it to look like the rest of the form, and the page itself knows
+    // what the rest of the form is set in — asking them to name a font is
+    // asking a question the program can answer.
+    let asked = args.font.as_deref().map(str::to_string);
+    let matched = if embedded.is_some() || args.no_match_font || (asked.is_some() && args.size.is_some())
+    {
+        None
+    } else {
+        match_the_page(&args.scan, &args.page, args.cropped, args.square)
+    };
+    if let Some(found) = &matched {
+        println!("Matched the page: {}", found.describe());
+        println!("  Say --font or --size to choose for yourself.\n");
+    }
+
+    let chosen = asked.unwrap_or_else(|| {
+        matched
+            .map(|found| found.font.base_name().to_string())
+            .unwrap_or_else(|| "Helvetica".to_string())
+    });
+    let size = args
+        .size
+        .or_else(|| matched.map(|found| found.size_pt))
+        .unwrap_or(11.0);
+
     let line_font = match &embedded {
         Some(_) => LineFont::Embedded,
-        None => LineFont::Builtin(Font::parse(&args.font).ok_or_else(|| {
+        None => LineFont::Builtin(Font::parse(&chosen).ok_or_else(|| {
             let names: Vec<&str> = Font::all().iter().map(|f| f.base_name()).collect();
             format!(
                 "unknown font '{}'. Available: {}\n\
                  For another alphabet, pass --font-file with a .ttf.",
-                args.font,
+                chosen,
                 names.join(", ")
             )
         })?),
@@ -1768,12 +1832,12 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
             }
             // Successive lines step down by the type size; the y given is the
             // baseline of the first.
-            let step = onionskin::geometry::pt_to_mm(args.size * 1.15) * index as f64;
+            let step = onionskin::geometry::pt_to_mm(size * 1.15) * index as f64;
             lines.push(PlacedLine {
                 text: part.to_string(),
                 x_mm: position_mm.0,
                 y_mm: position_mm.1 + step,
-                size_pt: args.size,
+                size_pt: size,
                 font: line_font,
                 rotation_deg: base_rotation,
                 colour: (0.0, 0.0, 0.0),
@@ -2237,8 +2301,11 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
     let face = if font.is_some() {
         "file".to_string()
     } else {
-        args.font.clone()
+        // A document is not a scan: there is no ink to measure, so a face that
+        // was not named falls back rather than being guessed at.
+        args.font.clone().unwrap_or_else(|| "Helvetica".to_string())
     };
+    let size = args.size.unwrap_or(11.0);
 
     let mut items = Vec::new();
     for placement in &args.at_page {
@@ -2249,7 +2316,7 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
             x_mm,
             y_mm,
             text: unescape(&text),
-            size_pt: args.size,
+            size_pt: size,
             font: face.clone(),
             width_mm: None,
             rotation_deg: args.rotation,
@@ -2534,32 +2601,57 @@ fn cmd_doctor() -> Result<ExitCode, String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_printers(args: PrintersArgs) -> Result<ExitCode, String> {
-    let found = printer::printers(&args.server).map_err(|e| e.to_string())?;
-    if found.is_empty() {
+    // The print server first, because that is where a printer plugged into
+    // this machine by USB appears, and asking it costs nothing.
+    let queues = printer::printers(&args.server).unwrap_or_default();
+    if !queues.is_empty() {
+        println!("Set up on this machine, including anything plugged in by USB:");
+        for p in &queues {
+            println!("\n  {}", p.name);
+            for line in [&p.model, &p.location, &p.state] {
+                if !line.is_empty() {
+                    println!("    {line}");
+                }
+            }
+            println!(
+                "    --printer {}",
+                if p.uri.is_empty() { &p.name } else { &p.uri }
+            );
+        }
+    }
+
+    // Then the network, where a printer that was never set up on this machine
+    // announces itself and can be printed to with nothing installed at all.
+    let network = if args.no_network {
+        Vec::new()
+    } else {
+        if queues.is_empty() {
+            println!("Looking for printers…");
+        }
+        discover::printers(std::time::Duration::from_secs_f64(args.listen.max(0.1)))
+    };
+    if !network.is_empty() {
+        println!("\nAnnouncing themselves on this network:");
+        for found in &network {
+            println!("\n  {}", found.name);
+            if let Some(model) = found.model() {
+                println!("    {model}");
+            }
+            if let Some(where_) = found.location() {
+                println!("    {where_}");
+            }
+            println!("    --printer {}", found.plain_uri());
+        }
+    }
+
+    if queues.is_empty() && network.is_empty() {
         println!(
-            "No printers at {}.\n\nIf the printer is on the network rather than \
-             attached to this\nmachine, give its own address instead:\n  onionskin \
-             printers --server ipp://printer.local/",
-            args.server
+            "No printers found.\n\n\
+             Check it is switched on, and on the same network or plugged in. If it\n\
+             is on the network but does not announce itself, give its address:\n  \
+             onionskin printers --server ipp://printer.local/"
         );
         return Ok(ExitCode::from(1));
-    }
-    println!("Printers at {}:", args.server);
-    for p in &found {
-        println!("\n  {}", p.name);
-        if !p.model.is_empty() {
-            println!("    {}", p.model);
-        }
-        if !p.location.is_empty() {
-            println!("    {}", p.location);
-        }
-        if !p.state.is_empty() {
-            println!("    {}", p.state);
-        }
-        println!(
-            "    --printer {}",
-            if p.uri.is_empty() { &p.name } else { &p.uri }
-        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -2747,6 +2839,151 @@ fn cmd_uninstall(args: InstallArgs) -> Result<ExitCode, String> {
         println!("\n{note}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The faces worth trying to read a page against, and what each stands for.
+///
+/// Reading letters off a scan means comparing the ink to a font's own glyph
+/// shapes, so the answer depends on which font is doing the comparing: Times
+/// text read against a sans face comes back as gibberish, with almost every
+/// letter unsure. That is not a defeat, it is the measurement — the face whose
+/// shapes match best is the face the page is set in.
+///
+/// These are the metric-compatible clones that ship with nearly every system
+/// and with LibreOffice, paired with the built-in PDF face each one stands in
+/// for. Whichever is actually on the machine gets tried.
+const READING_FACES: &[(&[&str], Font)] = &[
+    (
+        &["Liberation Serif", "Times New Roman", "Nimbus Roman", "DejaVu Serif"],
+        Font::TimesRoman,
+    ),
+    (
+        &["Liberation Sans", "Arial", "Nimbus Sans", "DejaVu Sans"],
+        Font::Helvetica,
+    ),
+    (
+        &["Liberation Mono", "Courier New", "Nimbus Mono", "DejaVu Sans Mono"],
+        Font::Courier,
+    ),
+];
+
+/// What the words already on a scan are set in, if that can be worked out.
+///
+/// Somebody adding a line to a form wants it to look like the rest of the
+/// form, and the page itself knows what the rest of the form is set in — so
+/// asking them to name a font is asking a question the program can answer.
+///
+/// Two measurements, because neither alone is enough. Reading the page against
+/// each candidate face says which *shapes* match, which is what tells serif
+/// from sans. Then the widths of the words that were read are fitted against
+/// the exact published metrics, which is what gives the size — and confirms
+/// the family, or disagrees with it.
+///
+/// Everything here is allowed to fail into `None`. A page with no text on it,
+/// a scan too poor to read, no font on the machine to read it against: all of
+/// them mean "use the default", and none of them is worth stopping a job that
+/// was not about fonts in the first place.
+fn match_the_page(
+    scan: &Path,
+    page: &str,
+    cropped: bool,
+    square: bool,
+) -> Option<onionskin::typeface::Typeface> {
+    let page = parse_page(page).ok()?;
+    let image = image::open(scan).ok()?;
+    let registration = register(
+        &image,
+        ScanOptions {
+            page,
+            assume_cropped: cropped,
+            assume_square: square,
+            ..ScanOptions::new(page)
+        },
+    )
+    .ok()?;
+    let gray = image.to_luma8();
+
+    let mut best: Option<(f64, Font, letters::PageText)> = None;
+    for (names, face) in READING_FACES {
+        let Some(found) = names.iter().find_map(|name| onionskin::font::find_font(name)) else {
+            continue;
+        };
+        let Ok(reference) = EmbeddedFont::load(&found) else {
+            continue;
+        };
+        // The common Latin shapes rather than everything the font can draw.
+        // DejaVu carries some six thousand glyphs, and asking which of six
+        // thousand a smudged `o` is gets a worse answer than asking which of
+        // eighty — every near-identical shape in some other script is another
+        // chance to be wrong, and it is thirty times the work.
+        let Ok(text) = letters::read_with_font(
+            &gray,
+            &registration,
+            &letters::ReadOptions::default(),
+            &reference,
+            Some(letters::COMMON_LATIN),
+        ) else {
+            continue;
+        };
+
+        // How much of the page this face could actually account for. Letters
+        // it could not read count against it, which is the whole signal: a
+        // page of Times read against a sans face leaves most letters unsure.
+        let letters: Vec<&onionskin::letters::Letter> = text.letters().collect();
+        if letters.is_empty() {
+            continue;
+        }
+        let score = letters
+            .iter()
+            .map(|letter| if letter.text.is_some() { letter.confidence } else { 0.0 })
+            .sum::<f64>()
+            / letters.len() as f64;
+        if best.as_ref().map(|(seen, _, _)| score > *seen).unwrap_or(true) {
+            best = Some((score, *face, text));
+        }
+    }
+
+    let (score, shape_says, text) = best?;
+
+    // A typewriter face is recognised from the spacing of the letters and not
+    // from their shapes, so it is asked before the gate below — which is the
+    // very gate a Courier page trips. The only monospaced faces on most
+    // machines are sans ones, DejaVu Sans Mono and its relatives, which look
+    // nothing like Courier's slab serifs: the page comes back barely read, and
+    // then gets thrown away for being barely read, having been perfectly
+    // recognisable the whole time by how evenly it was spaced.
+    if onionskin::typeface::monospaced(&text).is_some() {
+        if let Some(found) = onionskin::typeface::detect(&text) {
+            return Some(found);
+        }
+    }
+
+    // Too little of the page read for the answer to mean anything. Better to
+    // say nothing and use the default than to set somebody's addition in a
+    // face picked by noise.
+    if score < 0.35 {
+        return None;
+    }
+
+    let mut found = onionskin::typeface::detect(&text)?;
+    // The two measurements disagreeing is not a tie to be broken quietly. The
+    // shapes are the better witness for the family — that is what a person
+    // looking at the page would compare — so they win, and the width fit keeps
+    // the size it measured.
+    if family_of(found.font) != family_of(shape_says) {
+        found.font = shape_says;
+        found.confidence *= 0.5;
+    }
+    Some(found)
+}
+
+/// Which of the three families a built-in face belongs to.
+fn family_of(font: Font) -> Font {
+    match font {
+        Font::Helvetica | Font::HelveticaBold | Font::HelveticaOblique => Font::Helvetica,
+        Font::TimesRoman | Font::TimesBold | Font::TimesItalic => Font::TimesRoman,
+        Font::Courier | Font::CourierBold => Font::Courier,
+    }
 }
 
 // ---------------------------------------------------------------------------
