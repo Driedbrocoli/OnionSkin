@@ -18,6 +18,7 @@ use onionskin::geometry::{parse_page, PageSize};
 use onionskin::letters;
 use onionskin::pdf::{write_delta, Font, LineFont, PlacedLine};
 use onionskin::pipeline;
+use onionskin::printer;
 use onionskin::scan::{register, ScanOptions, ScanRegistration};
 
 #[derive(Parser)]
@@ -71,6 +72,72 @@ enum Command {
     Doctor,
     /// Open the browser interface, on this machine only.
     Serve(ServeArgs),
+
+    /// List the printers a print server knows about.
+    Printers(PrintersArgs),
+    /// Send a PDF straight to a printer, at 100% and without scaling.
+    Send(SendArgs),
+    /// Scan a sheet from a multifunction printer over the network.
+    Fetch(FetchArgs),
+}
+
+#[derive(clap::Args)]
+struct PrintersArgs {
+    /// The print server. The default is CUPS on this machine, which is where a
+    /// USB printer appears; give a printer's own address to ask it directly.
+    #[arg(long, default_value = "ipp://127.0.0.1:631/")]
+    server: String,
+}
+
+#[derive(clap::Args)]
+struct SendArgs {
+    /// The PDF to print.
+    file: PathBuf,
+    /// The printer: 'ipp://printer.local/ipp/print', or the name of one from
+    /// `onionskin printers`.
+    #[arg(long)]
+    printer: String,
+    /// The print server to look a name up on.
+    #[arg(long, default_value = "ipp://127.0.0.1:631/")]
+    server: String,
+    #[arg(long, default_value_t = 1)]
+    copies: u32,
+    /// The paper by its IPP name, such as iso_a4_210x297mm. The printer's own
+    /// default if not given.
+    #[arg(long)]
+    media: Option<String>,
+    /// What to call the job in the queue.
+    #[arg(long, default_value = "Onionskin delta")]
+    job_name: String,
+    /// Print on both sides. Off by default — a delta on the back of the sheet
+    /// it was meant for is a wasted sheet.
+    #[arg(long)]
+    two_sided: bool,
+}
+
+#[derive(clap::Args)]
+struct FetchArgs {
+    /// Where to write the scan.
+    #[arg(short, long)]
+    output: PathBuf,
+    /// The scanner: 'http://printer.local/eSCL'.
+    #[arg(long)]
+    scanner: String,
+    /// Dots per inch.
+    #[arg(long, default_value_t = 300)]
+    resolution: u32,
+    /// Scan in colour rather than greyscale.
+    #[arg(long)]
+    colour: bool,
+    /// Take the sheet from the document feeder rather than the glass.
+    #[arg(long)]
+    feeder: bool,
+    /// The paper size to scan, so the whole sheet is captured.
+    #[arg(long, default_value = "a4")]
+    page: String,
+    /// Report what the scanner can do, and take no scan.
+    #[arg(long)]
+    capabilities: bool,
 }
 
 #[derive(clap::Args)]
@@ -558,6 +625,9 @@ fn run() -> Result<ExitCode, String> {
             onionskin::web::serve(&args.host, args.port).map_err(|e| e.to_string())?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Printers(args) => cmd_printers(args),
+        Command::Send(args) => cmd_send(args),
+        Command::Fetch(args) => cmd_fetch(args),
     }
 }
 
@@ -1786,26 +1856,39 @@ fn cmd_doctor() -> Result<ExitCode, String> {
         ),
     }
 
-    // Scanning: needed only to acquire a sheet here rather than elsewhere.
+    // Scanning over the network needs nothing installed at all — the protocol
+    // is spoken here — so it is always available, whatever SANE's state.
+    println!(
+        "  Scanning        ok, from any network printer\n      onionskin fetch -o \
+         scan.png --scanner http://printer.local/eSCL"
+    );
+
+    // Scanning through SANE, for a scanner attached to this machine.
     if scanning_available() {
         match list_devices() {
             Ok(devices) if !devices.is_empty() => {
-                println!("  Scanning        ok ({} found)", devices.len());
+                println!("  Attached scanner ok ({} found)", devices.len());
                 for device in &devices {
                     println!("      {}", device.description);
                 }
             }
             _ => println!(
-                "  Scanning        no scanner found\n      The tool is there, but \
-                 nothing is plugged in and switched on."
+                "  Attached scanner none\n      SANE is installed, but nothing is \
+                 plugged in and switched on."
             ),
         }
     } else {
         println!(
-            "  Scanning        not available\n      {}",
+            "  Attached scanner not available\n      {}",
             unavailable_reason()
         );
     }
+
+    // Printing straight to a printer, which also needs nothing installed.
+    println!(
+        "  Printing        ok, to any network printer\n      onionskin send \
+         delta.pdf --printer ipp://printer.local/ipp/print"
+    );
 
     // Fonts: the built-ins always work; a system font is needed only for other
     // alphabets.
@@ -1836,10 +1919,168 @@ fn cmd_doctor() -> Result<ExitCode, String> {
         Err(e) => println!("  Calibration     unreadable\n      {e}"),
     }
 
-    println!("\nOnionskin never uses the network. Everything above is on this machine.");
+    // Worth being exact about rather than sweeping: Onionskin does now open a
+    // socket, and pretending otherwise would be the kind of half-truth this
+    // program is meant not to tell.
+    println!(
+        "\nOnionskin never phones home: no telemetry, no update check, nothing \
+         about\nyour documents leaving this machine. The only time it opens a \
+         socket is\nwhen you name a printer — and then it talks to that printer, \
+         and to nothing\nelse."
+    );
     Ok(if everything_works {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
     })
+}
+
+// ---------------------------------------------------------------------------
+// Talking to the printer
+// ---------------------------------------------------------------------------
+
+fn cmd_printers(args: PrintersArgs) -> Result<ExitCode, String> {
+    let found = printer::printers(&args.server).map_err(|e| e.to_string())?;
+    if found.is_empty() {
+        println!(
+            "No printers at {}.\n\nIf the printer is on the network rather than \
+             attached to this\nmachine, give its own address instead:\n  onionskin \
+             printers --server ipp://printer.local/",
+            args.server
+        );
+        return Ok(ExitCode::from(1));
+    }
+    println!("Printers at {}:", args.server);
+    for p in &found {
+        println!("\n  {}", p.name);
+        if !p.model.is_empty() {
+            println!("    {}", p.model);
+        }
+        if !p.location.is_empty() {
+            println!("    {}", p.location);
+        }
+        if !p.state.is_empty() {
+            println!("    {}", p.state);
+        }
+        println!(
+            "    --printer {}",
+            if p.uri.is_empty() { &p.name } else { &p.uri }
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Turn whatever was typed into a printer URI.
+///
+/// A name is looked up on the print server; anything with a scheme or a dot in
+/// it is taken as an address. Somebody who reads a name out of
+/// `onionskin printers` should be able to type it straight back in.
+fn resolve_printer(printer: &str, server: &str) -> Result<String, String> {
+    if printer.contains("://") {
+        return Ok(printer.to_string());
+    }
+    match printer::printers(server) {
+        Ok(found) => {
+            if let Some(p) = found.iter().find(|p| p.name == printer) {
+                return Ok(if p.uri.is_empty() {
+                    printer.to_string()
+                } else {
+                    p.uri.clone()
+                });
+            }
+            if found.is_empty() {
+                return Ok(printer.to_string());
+            }
+            Err(format!(
+                "no printer called '{printer}' on {server}.\nThere is: {}",
+                found
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+        // No print server to ask. The name may still be a hostname.
+        Err(_) => Ok(printer.to_string()),
+    }
+}
+
+fn cmd_send(args: SendArgs) -> Result<ExitCode, String> {
+    if !args.file.is_file() {
+        return Err(format!("no such file: {}", args.file.display()));
+    }
+    let uri = resolve_printer(&args.printer, &args.server)?;
+    let options = printer::PrintOptions {
+        copies: args.copies,
+        job_name: args.job_name.clone(),
+        media: args.media.clone(),
+        two_sided: args.two_sided,
+    };
+
+    let job = printer::print_file(&uri, &args.file, &options).map_err(|e| e.to_string())?;
+    println!(
+        "{} sent to {}{}.",
+        args.file.display(),
+        uri,
+        if job > 0 {
+            format!(" as job {job}")
+        } else {
+            String::new()
+        }
+    );
+    println!(
+        "\nSent with 'do not scale', so the page goes on the paper at its true \
+         size.\nThat is the setting every print dialogue gets wrong."
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_fetch(args: FetchArgs) -> Result<ExitCode, String> {
+    if args.capabilities {
+        let capabilities = printer::capabilities(&args.scanner).map_err(|e| e.to_string())?;
+        println!("{}", args.scanner);
+        if !capabilities.make_and_model.is_empty() {
+            println!("  {}", capabilities.make_and_model);
+        }
+        println!(
+            "  glass: {}    feeder: {}",
+            if capabilities.has_platen { "yes" } else { "no" },
+            if capabilities.has_feeder { "yes" } else { "no" }
+        );
+        if !capabilities.resolutions.is_empty() {
+            println!(
+                "  resolutions: {}",
+                capabilities
+                    .resolutions
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+    check_writable(&args.output, "scan")?;
+    println!("{PLACEMENT_ADVICE}\n");
+
+    let request = printer::ScanRequest {
+        resolution: args.resolution,
+        colour: args.colour,
+        feeder: args.feeder,
+        // The whole sheet, with a little over: the paper's outline is what the
+        // page is measured from, and a scan cropped to the paper has lost it.
+        area_mm: Some((page.width_mm + 6.0, page.height_mm + 6.0)),
+    };
+    let written =
+        printer::scan_to(&args.scanner, &request, &args.output).map_err(|e| e.to_string())?;
+
+    println!("{}: scanned at {} dpi.", written.display(), args.resolution);
+    println!(
+        "\nCheck it before adding anything:\n  onionskin inspect {} --page {}",
+        written.display(),
+        args.page
+    );
+    Ok(ExitCode::SUCCESS)
 }

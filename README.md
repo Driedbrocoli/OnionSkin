@@ -65,12 +65,18 @@ move** — the reflow problem below simply cannot happen.
 ### Fill in a sheet you only have as a scan
 
 ```bash
-onionskin scanners                       # what this machine can see
-onionskin acquire -o scan.png            # scan the sheet
+onionskin fetch -o scan.png --scanner http://printer.local/eSCL   # from the printer
 onionskin inspect scan.png --page a4     # how does it sit on the glass?
 onionskin read scan.png --page a4        # where is every letter on it?
 onionskin add scan.png -o delta.pdf --at-mm '60,150:Approved' --preview proof.png
+onionskin send delta.pdf --printer ipp://printer.local/ipp/print  # back to the paper
 ```
+
+That is the whole loop on one machine: scan the sheet from the printer, work
+out what to add, print it back onto the same paper.
+
+For a scanner plugged into this computer rather than one on the network, there
+is `onionskin scanners` and `onionskin acquire` instead, which go through SANE.
 
 Onionskin finds the paper's outline in the scan, measures how far it is turned,
 and works back to millimetres on the physical sheet. Across 360 combinations of
@@ -209,12 +215,38 @@ rather than printing inside a pale halo.
   something reflowed in a way the ink test did not catch.
 * **Empty delta** — the two documents render identically.
 
+## Talking to the printer
+
+Onionskin speaks two printer protocols itself, in Rust, with nothing underneath
+them but a socket — no CUPS libraries, no scanning software, nothing to install:
+
+* **IPP** to print. `onionskin send` puts the delta on the paper directly, and
+  sends `print-scaling: none` with it. That is the point of not going through a
+  print dialogue: every dialogue in the world defaults to fitting the page,
+  which scales by a percent or two and puts every word in the wrong place.
+* **eSCL** to scan — the protocol behind AirScan, which every multifunction
+  printer made in the last decade speaks. `onionskin fetch` asks for the whole
+  platen with no auto-crop, no auto-deskew and no auto-rotate, because those
+  throw away the paper's outline that the page is measured from.
+
+```bash
+onionskin printers                                   # what CUPS knows about
+onionskin printers --server ipp://printer.local/     # or ask a printer directly
+onionskin fetch -o scan.png --scanner http://printer.local/eSCL --capabilities
+onionskin send delta.pdf --printer ipp://printer.local/ipp/print --copies 2
+```
+
 ## Privacy and networking
 
-Onionskin never uses the network. There is no telemetry, no update check, and no
+Onionskin never phones home. There is no telemetry, no update check, and no
 external asset in the browser UI — the page it serves contains nothing fetched
-from anywhere else. Verified by tracing a full run: not one internet socket is
-opened.
+from anywhere else. Verified by tracing a full delta run: not one internet
+socket is opened.
+
+The one time it opens a socket is when **you name a printer**. Then it talks to
+that printer, on your own network, and to nothing else. There is no discovery
+beacon and no directory service; if you never name a printer, nothing leaves the
+machine.
 
 `onionskin serve` binds to `127.0.0.1`, so the UI is reachable only from your
 own machine. It has no password: if you override `--host`, anyone who can reach

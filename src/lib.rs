@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod letters;
 pub mod pdf;
 pub mod pipeline;
+pub mod printer;
 pub mod render;
 pub mod safety;
 pub mod scan;
