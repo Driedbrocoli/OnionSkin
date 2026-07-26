@@ -1,0 +1,30 @@
+[package]
+name = "onionskin"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Add words to a page that is already printed."
+license = "MIT"
+readme = "../README.md"
+
+[dependencies]
+# PDF structure: read boxes and rotation, transform content, write pages.
+lopdf = "0.32"
+# Same rendering engine as the Python version, so rasters match bit for bit.
+pdfium-render = { version = "0.8", features = ["thread_safe"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+approx = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

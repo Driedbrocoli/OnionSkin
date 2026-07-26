@@ -12,3 +12,6 @@ venv/
 onionskin-target.pdf
 proof/
 .onionskin/
+
+# Rust build artifacts
+rust/target/
