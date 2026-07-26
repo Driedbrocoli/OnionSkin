@@ -149,8 +149,10 @@ pub fn encode_winansi(text: &str) -> Result<Vec<u8>, PdfError> {
         let more = if missing.len() > 8 { " …" } else { "" };
         return Err(PdfError::Text(format!(
             "the built-in fonts cannot write these characters: {shown}{more}\n\
-             They only cover Western European text. Supply a font file that has \
-             them, and Onionskin will embed it."
+             They cover Western European text only. Onionskin will not print a \
+             row of blocks in their place, so this line is refused rather than \
+             spoiled — writing in other alphabets needs an embedded font, which \
+             the scanned-page command cannot do yet."
         )));
     }
     Ok(out)
@@ -468,6 +470,8 @@ mod tests {
                 message.contains("cannot write these characters"),
                 "unexpected: {message}"
             );
+            // The advice must not name a way out that does not exist.
+            assert!(!message.contains("--font-file"), "{message}");
         }
     }
 

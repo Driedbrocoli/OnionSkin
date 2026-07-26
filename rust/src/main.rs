@@ -192,7 +192,11 @@ fn run() -> Result<ExitCode, String> {
             for font in Font::all() {
                 println!("  {}", font.base_name());
             }
-            println!("\nThey cover Western European text only.");
+            println!(
+                "\nThey cover Western European text only. Writing in other \
+                 alphabets needs an\nembedded font, which this command cannot do \
+                 yet — it refuses such text rather\nthan printing blocks in its place."
+            );
             Ok(ExitCode::SUCCESS)
         }
         Command::Inspect(args) => cmd_inspect(args),
