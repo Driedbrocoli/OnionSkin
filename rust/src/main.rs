@@ -9,7 +9,12 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use onionskin::geometry::{parse_page, PageSize};
-use onionskin::pdf::{write_delta, Font, PlacedLine};
+use onionskin::acquire::{
+    acquire, list_devices, scanning_available, unavailable_reason, AcquireOptions,
+    PLACEMENT_ADVICE,
+};
+use onionskin::font::{suggest_system_font, EmbeddedFont};
+use onionskin::pdf::{write_delta, Font, LineFont, PlacedLine};
 use onionskin::scan::{register, ScanOptions, ScanRegistration};
 
 #[derive(Parser)]
@@ -30,8 +35,31 @@ enum Command {
     Inspect(InspectArgs),
     /// Write a delta PDF that adds words to the scanned sheet.
     Add(AddArgs),
+    /// Scan a sheet, ready to add words to.
+    Acquire(AcquireArgs),
+    /// List the scanners this machine can see.
+    Scanners,
     /// List the fonts available.
     Fonts,
+}
+
+#[derive(clap::Args)]
+struct AcquireArgs {
+    /// Where to write the scan.
+    #[arg(short, long)]
+    output: PathBuf,
+    /// Which scanner, when there is more than one (see `onionskin scanners`).
+    #[arg(long)]
+    device: Option<String>,
+    /// Dots per inch.
+    #[arg(long, default_value_t = 300)]
+    resolution: u32,
+    /// Scan in colour rather than greyscale.
+    #[arg(long)]
+    colour: bool,
+    /// The paper size, so the scan can be checked once it is taken.
+    #[arg(long, default_value = "a4")]
+    page: String,
 }
 
 #[derive(clap::Args)]
@@ -83,6 +111,13 @@ struct AddArgs {
     /// One of the built-in fonts (see `onionskin fonts`).
     #[arg(long, default_value = "Helvetica")]
     font: String,
+    /// A .ttf or .ttc to write with, carried inside the delta. Needed for any
+    /// alphabet the built-in fonts do not cover.
+    #[arg(long)]
+    font_file: Option<PathBuf>,
+    /// Which face to take from a .ttc collection.
+    #[arg(long, default_value_t = 0)]
+    font_index: u32,
     /// Turn the words, degrees clockwise on the page.
     #[arg(long, default_value_t = 0.0)]
     rotation: f64,
@@ -193,14 +228,86 @@ fn run() -> Result<ExitCode, String> {
                 println!("  {}", font.base_name());
             }
             println!(
-                "\nThey cover Western European text only. Writing in other \
-                 alphabets needs an\nembedded font, which this command cannot do \
-                 yet — it refuses such text rather\nthan printing blocks in its place."
+                "\nThese cover Western European text only. For any other alphabet, \
+                 pass\n--font-file with a .ttf or .ttc and it will be carried inside \
+                 the delta."
             );
+            if let Some(path) = suggest_system_font() {
+                println!("\nThere is one on this machine: {}", path.display());
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Inspect(args) => cmd_inspect(args),
         Command::Add(args) => cmd_add(args),
+        Command::Acquire(args) => cmd_acquire(args),
+        Command::Scanners => cmd_scanners(),
+    }
+}
+
+fn cmd_scanners() -> Result<ExitCode, String> {
+    let devices = list_devices().map_err(|e| e.to_string())?;
+    if devices.is_empty() {
+        println!("No scanners found. Check the scanner is switched on and plugged in.");
+        return Ok(ExitCode::from(1));
+    }
+    println!("Scanners this machine can see:");
+    for device in &devices {
+        println!("  {}", device.description);
+        println!("    --device {}", device.name);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_acquire(args: AcquireArgs) -> Result<ExitCode, String> {
+    // Nothing has been scanned yet, so a bad destination costs nothing to
+    // catch here and a whole scan to discover later.
+    check_writable(&args.output, "scan")?;
+    parse_page(&args.page)?;
+    if !(72..=2400).contains(&args.resolution) {
+        return Err(format!(
+            "{} dpi is outside what a scanner will do (72 to 2400)",
+            args.resolution
+        ));
+    }
+    // Before telling anyone how to lay the sheet on the glass.
+    if !scanning_available() {
+        return Err(unavailable_reason());
+    }
+
+    println!("{PLACEMENT_ADVICE}\n");
+    println!("Scanning at {} dpi…", args.resolution);
+
+    let options = AcquireOptions {
+        device: args.device,
+        resolution: args.resolution,
+        colour: args.colour,
+    };
+    let path = acquire(&options, &args.output).map_err(|e| e.to_string())?;
+    println!("Wrote {}", path.display());
+
+    // Say straight away whether the scan is usable, rather than letting the
+    // trouble surface after the sheet has been taken off the glass.
+    match load_registration(&path, &args.page, false, false) {
+        Ok((registration, dimensions)) => {
+            println!("  image      : {} × {} px", dimensions.0, dimensions.1);
+            println!("  paper      : {}", registration.page.describe());
+            println!("  resolution : {:.0} dpi", registration.dpi());
+            println!("  skew       : {:+.2}°", registration.skew_deg);
+            println!(
+                "\nNow pick a spot on it and add your words:\n  \
+                 onionskin add {} -o delta.pdf --at 'X,Y:the words'",
+                path.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(message) => {
+            println!(
+                "\nThe scan was saved, but Onionskin cannot measure the sheet in it:\n  \
+                 {message}\n\nThe sheet is still on the glass — it is usually quicker to \
+                 fix the placement\nand scan again than to work around it."
+            );
+            Ok(ExitCode::from(1))
+        }
     }
 }
 
@@ -290,14 +397,26 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     if !args.rotation.is_finite() {
         return Err("rotation must be a real number".into());
     }
-    let font = Font::parse(&args.font).ok_or_else(|| {
-        let names: Vec<&str> = Font::all().iter().map(|f| f.base_name()).collect();
-        format!(
-            "unknown font '{}'. Available: {}",
-            args.font,
-            names.join(", ")
-        )
-    })?;
+    // A supplied font wins: asking for one and silently getting Helvetica is
+    // how the Python side once made --font-file appear to do nothing.
+    let embedded = match &args.font_file {
+        Some(path) => Some(
+            EmbeddedFont::load_indexed(path, args.font_index).map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
+    let line_font = match &embedded {
+        Some(_) => LineFont::Embedded,
+        None => LineFont::Builtin(Font::parse(&args.font).ok_or_else(|| {
+            let names: Vec<&str> = Font::all().iter().map(|f| f.base_name()).collect();
+            format!(
+                "unknown font '{}'. Available: {}\n\
+                 For another alphabet, pass --font-file with a .ttf.",
+                args.font,
+                names.join(", ")
+            )
+        })?),
+    };
 
     // Check the destinations before doing any work, so a mistake costs a
     // message rather than the scan.
@@ -348,7 +467,7 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
                 x_mm: position_mm.0,
                 y_mm: position_mm.1 + step,
                 size_pt: args.size,
-                font,
+                font: line_font,
                 rotation_deg: base_rotation,
                 colour: (0.0, 0.0, 0.0),
             });
@@ -359,11 +478,35 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         return Err("every placement was blank, so the delta would print nothing".into());
     }
 
-    write_delta(&args.output, &[page], &[lines.clone()], "Onionskin delta")
-        .map_err(|e| e.to_string())?;
+    write_delta(
+        &args.output,
+        &[page],
+        &[lines.clone()],
+        "Onionskin delta",
+        embedded.as_ref(),
+    )
+    .map_err(|message| {
+        // Point at a font that is actually on this machine, rather than
+        // leaving someone to hunt for one.
+        let text = message.to_string();
+        match (text.contains("cannot write these characters"), suggest_system_font()) {
+            (true, Some(path)) => format!(
+                "{text}\n    There is one on this machine: --font-file {}",
+                path.display()
+            ),
+            _ => text,
+        }
+    })?;
 
     println!("Wrote {}", args.output.display());
     println!("  paper      : {}", page.describe());
+    if let Some(font) = &embedded {
+        println!(
+            "  font       : {} embedded ({} KB)",
+            font.name,
+            font.program().len() / 1024
+        );
+    }
     println!(
         "  scan       : {:.0} dpi, sheet turned {:+.2}°",
         registration.dpi(),

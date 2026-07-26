@@ -898,3 +898,151 @@ fn many_additions_stay_a_small_file() {
     // Text is text: the whole page of it should still be a few kilobytes.
     assert!(out.metadata().unwrap().len() < 20_000);
 }
+
+// --- writing in other alphabets --------------------------------------------
+
+fn a_font_with_cyrillic() -> Option<&'static str> {
+    let path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    Path::new(path).is_file().then_some(path)
+}
+
+/// The built-in faces cover Western Europe and nothing else. Refusing is right;
+/// leaving the person with no way forward is not.
+#[test]
+fn other_alphabets_work_with_a_supplied_font() {
+    let Some(font) = a_font_with_cyrillic() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let out = dir.path().join("ru.pdf");
+
+    let result = run(&[
+        "add", scan_path.to_str().unwrap(), "-o", out.to_str().unwrap(),
+        "--at-mm", "40,100:Утверждено 26 июля",
+        "--font-file", font,
+    ]);
+
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("embedded"), "{}", result.stdout);
+    // The font programme must actually be in the file, or the printer has
+    // nothing to draw with.
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.len() > 50_000, "font does not appear to be embedded");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("FontFile2"), "no embedded font programme");
+    assert!(text.contains("Identity-H"), "not a composite font");
+}
+
+#[test]
+fn without_a_font_the_refusal_points_somewhere_useful() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+
+    let result = run(&[
+        "add", scan_path.to_str().unwrap(),
+        "-o", dir.path().join("d.pdf").to_str().unwrap(),
+        "--at-mm", "40,100:Утверждено",
+    ]);
+
+    assert_eq!(result.code, 1);
+    assert!(result.stderr.contains("--font-file"), "{}", result.stderr);
+}
+
+/// A font that loads but lacks the language is a different problem from no
+/// font at all, and needs a different fix.
+#[test]
+fn a_font_missing_the_language_says_which_characters() {
+    let Some(font) = a_font_with_cyrillic() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+
+    // DejaVu has no CJK.
+    let result = run(&[
+        "add", scan_path.to_str().unwrap(),
+        "-o", dir.path().join("d.pdf").to_str().unwrap(),
+        "--at-mm", "40,100:承認済み",
+        "--font-file", font,
+    ]);
+
+    assert_eq!(result.code, 1);
+    assert!(result.stderr.contains("no glyph for"), "{}", result.stderr);
+    assert!(result.stderr.contains('承'), "{}", result.stderr);
+}
+
+#[test]
+fn a_font_file_that_is_not_a_font_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan_path = dir.path().join("scan.png");
+    Scan::build(A4, 150.0, 60, 0.0, 20).save(&scan_path);
+    let fake = dir.path().join("fake.ttf");
+    std::fs::write(&fake, b"not a font").unwrap();
+
+    for (path, expected) in [
+        (fake.to_str().unwrap(), "not a font"),
+        ("/nonexistent/f.ttf", "no font file"),
+    ] {
+        let result = run(&[
+            "add", scan_path.to_str().unwrap(),
+            "-o", dir.path().join("d.pdf").to_str().unwrap(),
+            "--at-mm", "40,100:hello", "--font-file", path,
+        ]);
+        assert_eq!(result.code, 1);
+        assert!(result.stderr.contains(expected), "{}", result.stderr);
+    }
+}
+
+// --- scanning the sheet directly -------------------------------------------
+
+/// With no scanner on the machine, every command must explain itself and point
+/// at the way that still works — passing a file.
+#[test]
+fn without_a_scanner_the_commands_explain_themselves() {
+    let dir = tempfile::tempdir().unwrap();
+    if onionskin::acquire::scanning_available() {
+        return; // a real scanner is present; nothing to assert about its absence
+    }
+
+    let scan_path = dir.path().join("s.png");
+    let scan_path = scan_path.to_str().unwrap();
+    for args in [vec!["scanners"], vec!["acquire", "-o", scan_path]] {
+        let result = run(&args);
+        assert_ne!(result.code, 0, "{args:?} should not claim success");
+        let all = format!("{}{}", result.stdout, result.stderr);
+        assert!(all.contains("scanimage"), "{args:?}: {all}");
+        assert!(all.contains("pass the image file instead"), "{args:?}: {all}");
+        assert!(!all.contains("panicked"), "{args:?}: {all}");
+    }
+}
+
+/// A bad destination or resolution must be caught before anyone is asked to
+/// lay a sheet on the glass.
+#[test]
+fn acquire_checks_its_arguments_before_asking_for_a_sheet() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope").join("s.png");
+    let ok_path = dir.path().join("s.png");
+    let (missing, ok_path) = (
+        missing.to_str().unwrap().to_string(),
+        ok_path.to_str().unwrap().to_string(),
+    );
+    let cases = [
+        (vec!["acquire", "-o", &missing], "does not exist"),
+        (
+            vec!["acquire", "-o", &ok_path, "--resolution", "99999"],
+            "outside what a scanner will do",
+        ),
+        (
+            vec!["acquire", "-o", &ok_path, "--page", "nonsense"],
+            "unknown page size",
+        ),
+    ];
+    for (args, expected) in cases {
+        let result = run(&args);
+        assert_eq!(result.code, 1, "{args:?}");
+        assert!(result.stderr.contains(expected), "{args:?}: {}", result.stderr);
+        // Nothing about laying the sheet down, since we never got that far.
+        assert!(!result.stdout.contains("Before scanning"), "{}", result.stdout);
+    }
+}

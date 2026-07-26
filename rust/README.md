@@ -9,14 +9,56 @@ and an image of it; point at a spot on the scan and Onionskin writes a delta
 that puts those words on the paper.
 
 ```bash
-onionskin inspect scan.png --page a4
+onionskin scanners                       # what this machine can see
+onionskin acquire -o scan.png            # scan the sheet
+onionskin inspect scan.png --page a4     # how does it sit?
 onionskin add scan.png -o delta.pdf --at '527,916:J. Bezzina' --preview proof.png
+```
+
+Or work from an image you already have:
+
+```bash
 onionskin add form.jpg -o delta.pdf --page letter --at-mm '60,150:Approved'
 ```
 
 `--at` takes coordinates read straight off an image viewer, in scan pixels.
 `--at-mm` takes millimetres measured on the paper with a ruler. Either way the
 delta comes out at the sheet's true size, to be printed onto the sheet itself.
+
+### Scanning it here
+
+`onionskin acquire` drives the scanner through SANE, and that is worth more
+than the step it saves. The settings a scanning program turns on by default are
+the ones that ruin this: **auto-crop** throws away the backing around the sheet,
+and with it the outline the page is measured from; **auto-deskew** straightens
+the image, which sounds helpful and quietly rewrites the geometry the delta has
+to match; **auto-rotate** can turn the page a quarter turn without saying so.
+Asking for the scan ourselves means asking for a plain one.
+
+It also checks the scan before you take the sheet off the glass, since it is
+quicker to lay it down again than to work around a bad scan later.
+
+Where SANE is not available — Windows, or a machine without it — every command
+says so and points at the path that still works: scan with whatever software you
+like and pass the file.
+
+### Writing in other alphabets
+
+The fonts built into every PDF reader cover Western European text and nothing
+else. Onionskin will not let a reader substitute for the rest, because that
+prints a row of solid blocks onto a sheet that may be the only copy. Supply a
+font instead and it is carried inside the delta, so the printer needs nothing
+installed:
+
+```bash
+onionskin add scan.png -o delta.pdf --font-file /path/to/NotoSans.ttf \
+  --at-mm '40,100:承認済み 2026年7月25日'
+```
+
+TrueType outlines only (`.ttf`, `.ttc`) — a font with PostScript outlines says
+so rather than producing a file that reads as valid and prints nothing. The
+whole font is embedded rather than subset, so a CJK delta runs to a few
+megabytes: a large file that prints correctly beats a small one that does not.
 
 ### Why a scan needs registering
 
@@ -56,6 +98,8 @@ Onionskin declines rather than guessing when:
 | `geometry` — units, page sizes, the calibration transform | yes | 582 values, identical to 5e-10 |
 | `pdf` — writing the delta | yes | ink measured in place, 0.2 mm |
 | `scan` — registering a scanned sheet | yes | new; no Python counterpart |
+| `font` — embedding a font to write any alphabet | yes | new; no Python counterpart |
+| `acquire` — driving the scanner | yes | new; no Python counterpart |
 | `render` — LibreOffice conversion, page frames, rasterising | no | |
 | `diff` — added/removed masks, region labelling | no | |
 | `delta` — raster and vector writers, calibration, frame conforming | no | |

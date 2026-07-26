@@ -12,6 +12,7 @@ use std::path::Path;
 use lopdf::content::{Content, Operation};
 use lopdf::{dictionary, Document, Object, Stream};
 
+use crate::font::EmbeddedFont;
 use crate::geometry::{mm_to_pt, PageSize};
 
 /// The fonts built into every PDF reader.
@@ -72,6 +73,19 @@ impl Font {
     }
 }
 
+/// Which face a line is set in.
+///
+/// One embedded font at a time is enough for the job — a person adding words
+/// to a form writes them in one hand — and it keeps the delta to a single
+/// copy of what is often a very large file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineFont {
+    /// One of the faces every PDF reader already has.
+    Builtin(Font),
+    /// The font supplied alongside, carried inside the delta.
+    Embedded,
+}
+
 /// A single line of text, positioned in page space (mm from the top-left).
 ///
 /// `y_mm` is the text *baseline*, not the top of the block — the caller has
@@ -83,7 +97,7 @@ pub struct PlacedLine {
     pub x_mm: f64,
     pub y_mm: f64,
     pub size_pt: f64,
-    pub font: Font,
+    pub font: LineFont,
     pub rotation_deg: f64,
     pub colour: (f64, f64, f64),
 }
@@ -92,6 +106,10 @@ pub struct PlacedLine {
 pub enum PdfError {
     #[error("{0}")]
     Text(String),
+    #[error("{0}")]
+    Font(#[from] crate::font::FontError),
+    #[error("a line asks for the supplied font, but none was given")]
+    NoEmbeddedFont,
     #[error("could not write the PDF: {0}")]
     Io(#[from] std::io::Error),
     #[error("could not build the PDF: {0}")]
@@ -149,10 +167,9 @@ pub fn encode_winansi(text: &str) -> Result<Vec<u8>, PdfError> {
         let more = if missing.len() > 8 { " …" } else { "" };
         return Err(PdfError::Text(format!(
             "the built-in fonts cannot write these characters: {shown}{more}\n\
-             They cover Western European text only. Onionskin will not print a \
-             row of blocks in their place, so this line is refused rather than \
-             spoiled — writing in other alphabets needs an embedded font, which \
-             the scanned-page command cannot do yet."
+             They cover Western European text only, and Onionskin will not print \
+             a row of blocks in their place. Pass --font-file with a .ttf that \
+             covers your language and it will be carried inside the delta."
         )));
     }
     Ok(out)
@@ -200,41 +217,83 @@ fn winansi_byte(ch: char) -> Option<u8> {
 }
 
 /// Build a delta PDF: blank pages of the given sizes, carrying only these lines.
+///
+/// `embedded` is the font supplied by the user, if any; lines marked
+/// [`LineFont::Embedded`] are set in it and it travels inside the file.
 pub fn write_delta(
     path: &Path,
     pages: &[PageSize],
     lines_per_page: &[Vec<PlacedLine>],
     title: &str,
+    embedded: Option<&EmbeddedFont>,
 ) -> Result<(), PdfError> {
     let mut doc = Document::with_version("1.4");
     let pages_id = doc.new_object_id();
 
-    // One font object per base font actually used, shared across pages.
+    // One font object per built-in face actually used, shared across pages.
     let mut font_ids: BTreeMap<&'static str, Object> = BTreeMap::new();
+    let mut uses_embedded = false;
     for lines in lines_per_page {
         for line in lines {
-            let name = line.font.base_name();
-            font_ids.entry(name).or_insert_with(|| {
-                Object::Reference(doc.add_object(dictionary! {
-                    "Type" => "Font",
-                    "Subtype" => "Type1",
-                    "BaseFont" => name,
-                    "Encoding" => "WinAnsiEncoding",
-                }))
-            });
+            match line.font {
+                LineFont::Builtin(font) => {
+                    let name = font.base_name();
+                    font_ids.entry(name).or_insert_with(|| {
+                        Object::Reference(doc.add_object(dictionary! {
+                            "Type" => "Font",
+                            "Subtype" => "Type1",
+                            "BaseFont" => name,
+                            "Encoding" => "WinAnsiEncoding",
+                        }))
+                    });
+                }
+                LineFont::Embedded => uses_embedded = true,
+            }
         }
     }
-
-    let mut font_dict = lopdf::Dictionary::new();
-    for (index, (name, id)) in font_ids.iter().enumerate() {
-        let _ = name;
-        font_dict.set(format!("F{index}"), id.clone());
+    if uses_embedded && embedded.is_none() {
+        return Err(PdfError::NoEmbeddedFont);
     }
+
     let font_key: BTreeMap<&str, String> = font_ids
         .keys()
         .enumerate()
         .map(|(index, name)| (*name, format!("F{index}")))
         .collect();
+
+    let mut font_dict = lopdf::Dictionary::new();
+    for (name, id) in font_ids.iter() {
+        font_dict.set(font_key[name].clone(), id.clone());
+    }
+
+    // Shape every embedded line up front: it validates the text against the
+    // font before anything is written, and collects the widths the PDF needs.
+    let mut shaped: Vec<Vec<Option<Vec<crate::font::Glyph>>>> = Vec::new();
+    let mut used_glyphs: BTreeMap<u16, f64> = BTreeMap::new();
+    for lines in lines_per_page {
+        let mut page_shapes = Vec::new();
+        for line in lines {
+            match line.font {
+                LineFont::Embedded => {
+                    let font = embedded.ok_or(PdfError::NoEmbeddedFont)?;
+                    let glyphs = font.shape(&line.text)?;
+                    for glyph in &glyphs {
+                        used_glyphs.insert(glyph.id, glyph.advance_1000);
+                    }
+                    page_shapes.push(Some(glyphs));
+                }
+                LineFont::Builtin(_) => page_shapes.push(None),
+            }
+        }
+        shaped.push(page_shapes);
+    }
+
+    const EMBEDDED_KEY: &str = "FE";
+    if uses_embedded {
+        let font = embedded.expect("checked above");
+        let id = add_embedded_font(&mut doc, font, &used_glyphs);
+        font_dict.set(EMBEDDED_KEY, id);
+    }
 
     let resources_id = doc.add_object(dictionary! { "Font" => font_dict });
 
@@ -242,7 +301,9 @@ pub fn write_delta(
     for (index, size) in pages.iter().enumerate() {
         let empty: Vec<PlacedLine> = Vec::new();
         let lines = lines_per_page.get(index).unwrap_or(&empty);
-        let content = page_content(size, lines, &font_key)?;
+        let no_shapes: Vec<Option<Vec<crate::font::Glyph>>> = Vec::new();
+        let shapes = shaped.get(index).unwrap_or(&no_shapes);
+        let content = page_content(size, lines, shapes, &font_key, EMBEDDED_KEY)?;
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
         let page_id = doc.add_object(dictionary! {
@@ -286,6 +347,76 @@ pub fn write_delta(
     Ok(())
 }
 
+/// Write the supplied font into the document as a composite font.
+///
+/// Identity-H encoding means the character codes in the content stream are the
+/// font's own glyph numbers, which sidesteps every question of what encoding
+/// the text was in — the glyphs have already been chosen.
+fn add_embedded_font(
+    doc: &mut Document,
+    font: &EmbeddedFont,
+    used_glyphs: &BTreeMap<u16, f64>,
+) -> Object {
+    let program = font.program();
+    let mut stream = Stream::new(
+        dictionary! { "Length1" => program.len() as i64 },
+        program.to_vec(),
+    );
+    // Compressing the font programme is what keeps a delta sane: the file is
+    // often several megabytes and the printer has to receive all of it.
+    let _ = stream.compress();
+    let file_id = doc.add_object(stream);
+
+    let (x0, y0, x1, y1) = font.bbox();
+    let descriptor_id = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => Object::Name(font.name.clone().into_bytes()),
+        // Symbolic: the text is addressed by glyph, not by a named encoding.
+        "Flags" => 4_i64,
+        "FontBBox" => vec![
+            Object::Real(x0 as f32), Object::Real(y0 as f32),
+            Object::Real(x1 as f32), Object::Real(y1 as f32),
+        ],
+        "ItalicAngle" => Object::Real(font.italic_angle() as f32),
+        "Ascent" => Object::Real(font.ascender() as f32),
+        "Descent" => Object::Real(font.descender() as f32),
+        "CapHeight" => Object::Real(font.cap_height() as f32),
+        // Nominal: nothing in a print path reads it, but it is required.
+        "StemV" => 80_i64,
+        "FontFile2" => file_id,
+    });
+
+    // Widths for the glyphs actually drawn, one entry each.
+    let mut widths: Vec<Object> = Vec::new();
+    for (glyph, advance) in used_glyphs {
+        widths.push(Object::Integer(*glyph as i64));
+        widths.push(Object::Array(vec![Object::Real(*advance as f32)]));
+    }
+
+    let cid_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => Object::Name(font.name.clone().into_bytes()),
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0_i64,
+        },
+        "FontDescriptor" => descriptor_id,
+        "DW" => 1000_i64,
+        "W" => Object::Array(widths),
+        "CIDToGIDMap" => "Identity",
+    });
+
+    Object::Reference(doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => Object::Name(font.name.clone().into_bytes()),
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(cid_id)],
+    }))
+}
+
 fn round6(value: f64) -> f64 {
     (value * 1e6).round() / 1e6
 }
@@ -293,19 +424,40 @@ fn round6(value: f64) -> f64 {
 fn page_content(
     size: &PageSize,
     lines: &[PlacedLine],
+    shapes: &[Option<Vec<crate::font::Glyph>>],
     font_key: &BTreeMap<&str, String>,
+    embedded_key: &str,
 ) -> Result<Vec<u8>, PdfError> {
     let mut operations: Vec<Operation> = Vec::new();
 
-    for line in lines {
-        let encoded = encode_winansi(&line.text)?;
+    for (index, line) in lines.iter().enumerate() {
+        // Character codes, and the resource name to set them in.
+        let (encoded, name, hex) = match line.font {
+            LineFont::Builtin(font) => {
+                let bytes = encode_winansi(&line.text)?;
+                let name = font_key
+                    .get(font.base_name())
+                    .cloned()
+                    .unwrap_or_else(|| "F0".to_string());
+                (bytes, name, false)
+            }
+            LineFont::Embedded => {
+                let glyphs = shapes
+                    .get(index)
+                    .and_then(|g| g.as_ref())
+                    .ok_or(PdfError::NoEmbeddedFont)?;
+                // Identity-H: two bytes per glyph, big-endian.
+                let mut bytes = Vec::with_capacity(glyphs.len() * 2);
+                for glyph in glyphs {
+                    bytes.push((glyph.id >> 8) as u8);
+                    bytes.push((glyph.id & 0xFF) as u8);
+                }
+                (bytes, embedded_key.to_string(), true)
+            }
+        };
         if encoded.is_empty() {
             continue;
         }
-        let name = font_key
-            .get(line.font.base_name())
-            .cloned()
-            .unwrap_or_else(|| "F0".to_string());
 
         // Page space is y-down from the top-left; PDF is y-up from the bottom.
         let x = mm_to_pt(line.x_mm);
@@ -323,7 +475,10 @@ fn page_content(
         operations.push(Operation::new("BT", vec![]));
         operations.push(Operation::new(
             "Tf",
-            vec![Object::Name(name.into_bytes()), Object::Real(line.size_pt as f32)],
+            vec![
+                Object::Name(name.into_bytes()),
+                Object::Real(line.size_pt as f32),
+            ],
         ));
 
         if line.rotation_deg.abs() > 1e-9 {
@@ -348,10 +503,15 @@ fn page_content(
             ));
         }
 
-        operations.push(Operation::new("Tj", vec![Object::String(
-            encoded,
-            lopdf::StringFormat::Literal,
-        )]));
+        let format = if hex {
+            lopdf::StringFormat::Hexadecimal
+        } else {
+            lopdf::StringFormat::Literal
+        };
+        operations.push(Operation::new(
+            "Tj",
+            vec![Object::String(encoded, format)],
+        ));
         operations.push(Operation::new("ET", vec![]));
         operations.push(Operation::new("Q", vec![]));
     }
@@ -370,7 +530,7 @@ mod tests {
             x_mm: 20.0,
             y_mm: 40.0,
             size_pt: 12.0,
-            font: Font::Helvetica,
+            font: LineFont::Builtin(Font::Helvetica),
             rotation_deg: 0.0,
             colour: (0.0, 0.0, 0.0),
         }
@@ -382,7 +542,7 @@ mod tests {
         let path = dir.path().join("d.pdf");
         let a4 = PageSize::new(210.0, 297.0);
 
-        write_delta(&path, &[a4], &[vec![line("Approved")]], "test").unwrap();
+        write_delta(&path, &[a4], &[vec![line("Approved")]], "test", None).unwrap();
 
         let doc = Document::load(&path).unwrap();
         let pages = doc.get_pages();
@@ -406,7 +566,7 @@ mod tests {
         let path = dir.path().join("d.pdf");
         let a4 = PageSize::new(210.0, 297.0);
 
-        write_delta(&path, &[a4, a4], &[vec![line("x")], vec![]], "test").unwrap();
+        write_delta(&path, &[a4, a4], &[vec![line("x")], vec![]], "test", None).unwrap();
 
         let doc = Document::load(&path).unwrap();
         assert_eq!(doc.get_pages().len(), 2);
@@ -422,7 +582,7 @@ mod tests {
             PageSize::new(215.9, 355.6),
         ];
 
-        write_delta(&path, &sizes, &[vec![], vec![], vec![]], "t").unwrap();
+        write_delta(&path, &sizes, &[vec![], vec![], vec![]], "t", None).unwrap();
 
         let doc = Document::load(&path).unwrap();
         let pages = doc.get_pages();
@@ -470,8 +630,8 @@ mod tests {
                 message.contains("cannot write these characters"),
                 "unexpected: {message}"
             );
-            // The advice must not name a way out that does not exist.
-            assert!(!message.contains("--font-file"), "{message}");
+            // The advice must name the way out, which now exists.
+            assert!(message.contains("--font-file"), "{message}");
         }
     }
 
@@ -485,6 +645,7 @@ mod tests {
             &[PageSize::new(210.0, 297.0)],
             &[vec![line(r"a (b) \c\ (((")]],
             "t",
+            None,
         )
         .unwrap();
         assert!(Document::load(&path).is_ok());
