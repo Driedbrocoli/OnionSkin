@@ -30,7 +30,7 @@ fn main() {
     let (dpi, margin, skew) = (200.0, 35u32, 1.5f64);
     let (scan, sw, sh) = synthetic(a4, dpi, margin, skew, 24);
     let gray = scan.to_luma8();
-    let b = find_sheet(&gray);
+    let b = find_sheet(&gray).unwrap();
     let reg = register(&scan, ScanOptions::new(a4)).unwrap();
 
     let ppm = dpi / 25.4;

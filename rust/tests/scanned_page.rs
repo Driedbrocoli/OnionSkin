@@ -18,11 +18,25 @@ const A4: PageSize = PageSize {
     height_mm: 297.0,
 };
 
+/// How a synthetic scan looks: how much text, and the three grey levels.
+#[derive(Clone, Copy)]
+struct Look {
+    lines: usize,
+    backing: [u8; 3],
+    paper: u8,
+    ink: u8,
+}
+
+impl Look {
+    fn plain(lines: usize) -> Look {
+        Look { lines, backing: [38, 40, 44], paper: 245, ink: 25 }
+    }
+}
+
 /// A synthetic flatbed scan: a sheet of "text" turned by `skew_deg`, sitting on
 /// dark scanner backing with a margin around it.
 struct Scan {
     image: DynamicImage,
-    page: PageSize,
     dpi: f64,
     margin: u32,
     skew_deg: f64,
@@ -31,19 +45,11 @@ struct Scan {
 
 impl Scan {
     fn build(page: PageSize, dpi: f64, margin: u32, skew_deg: f64, lines: usize) -> Scan {
-        Scan::build_with(page, dpi, margin, skew_deg, lines, [38, 40, 44], 245, 25)
+        Scan::build_with(page, dpi, margin, skew_deg, Look::plain(lines))
     }
 
-    fn build_with(
-        page: PageSize,
-        dpi: f64,
-        margin: u32,
-        skew_deg: f64,
-        lines: usize,
-        backing: [u8; 3],
-        paper: u8,
-        ink: u8,
-    ) -> Scan {
+    fn build_with(page: PageSize, dpi: f64, margin: u32, skew_deg: f64, look: Look) -> Scan {
+        let Look { lines, backing, paper, ink } = look;
         let px_per_mm = dpi / 25.4;
         let sheet_w = (page.width_mm * px_per_mm) as u32;
         let sheet_h = (page.height_mm * px_per_mm) as u32;
@@ -78,7 +84,6 @@ impl Scan {
 
         Scan {
             image: DynamicImage::ImageRgb8(img),
-            page,
             dpi,
             margin,
             skew_deg,
@@ -204,14 +209,14 @@ fn skew_is_recovered_across_the_usual_range() {
 #[test]
 fn a_pale_scan_still_registers() {
     // Some scanners wash everything out; the split has to come from the image.
-    let scan = Scan::build_with(A4, 150.0, 90, 1.0, 20, [150, 150, 150], 252, 190);
+    let scan = Scan::build_with(A4, 150.0, 90, 1.0, Look { lines: 20, backing: [150, 150, 150], paper: 252, ink: 190 });
     let registration = register(&scan.image, ScanOptions::new(A4)).unwrap();
     assert!((registration.dpi() - 150.0).abs() < 6.0);
 }
 
 #[test]
 fn a_dark_scan_still_registers() {
-    let scan = Scan::build_with(A4, 150.0, 90, 1.0, 20, [5, 5, 5], 160, 20);
+    let scan = Scan::build_with(A4, 150.0, 90, 1.0, Look { lines: 20, backing: [5, 5, 5], paper: 160, ink: 20 });
     let registration = register(&scan.image, ScanOptions::new(A4)).unwrap();
     assert!((registration.dpi() - 150.0).abs() < 6.0);
 }
@@ -560,4 +565,85 @@ fn fonts_are_listed() {
     assert_eq!(result.code, 0);
     assert!(result.stdout.contains("Helvetica"));
     assert!(result.stdout.contains("Times-Roman"));
+}
+
+// --- images that are not scans of a page -----------------------------------
+
+fn plain_image(width: u32, height: u32, level: u8) -> DynamicImage {
+    DynamicImage::ImageRgb8(RgbImage::from_pixel(
+        width,
+        height,
+        image::Rgb([level, level, level]),
+    ))
+}
+
+/// Nothing here may panic, and nothing may quietly invent a resolution.
+/// A confident wrong answer puts ink in the wrong place; an error does not.
+#[test]
+fn images_that_are_not_scans_are_refused_not_guessed_at() {
+    let cases: Vec<(&str, DynamicImage)> = vec![
+        ("all black", plain_image(800, 1000, 0)),
+        ("uniform grey", plain_image(800, 1000, 128)),
+        ("one pixel", plain_image(1, 1, 255)),
+        ("a sliver", plain_image(1, 4000, 250)),
+        ("wrong shape", plain_image(800, 1000, 255)),
+    ];
+
+    for (label, image) in cases {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            register(&image, ScanOptions::new(A4))
+        }));
+        let result = outcome.unwrap_or_else(|_| panic!("{label} panicked"));
+        assert!(
+            result.is_err(),
+            "{label} should be refused, got {:?}",
+            result.map(|r| r.describe())
+        );
+    }
+}
+
+#[test]
+fn pure_noise_is_refused() {
+    let mut noisy = RgbImage::new(900, 1200);
+    let mut seed = 12345u32;
+    for pixel in noisy.pixels_mut() {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        let value = (seed >> 16) as u8;
+        *pixel = image::Rgb([value, value, value]);
+    }
+    assert!(register(&DynamicImage::ImageRgb8(noisy), ScanOptions::new(A4)).is_err());
+}
+
+/// Two pages on the glass read as one enormous sheet, and every addition would
+/// then be placed at a scale derived from it.
+#[test]
+fn two_sheets_on_the_glass_are_refused() {
+    let mut two = RgbImage::from_pixel(1600, 1200, image::Rgb([30, 30, 30]));
+    for y in 100..1100 {
+        for x in 100..700 {
+            two.put_pixel(x, y, image::Rgb([245, 245, 245]));
+        }
+        for x in 900..1500 {
+            two.put_pixel(x, y, image::Rgb([245, 245, 245]));
+        }
+    }
+    let result = register(&DynamicImage::ImageRgb8(two), ScanOptions::new(A4));
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("wrong shape"));
+}
+
+/// Naming the wrong paper size is an easy mistake, and it silently rescales
+/// every addition. The shape of the sheet gives it away.
+#[test]
+fn the_wrong_page_size_is_caught_by_the_sheet_shape() {
+    let scan = Scan::build(A4, 200.0, 90, 0.0, 24);
+
+    // A4 and A5 are the same shape, so those must still be accepted.
+    assert!(register(&scan.image, ScanOptions::new(PageSize::new(148.0, 210.0))).is_ok());
+
+    // Letter and A3-landscape are not.
+    for wrong in [PageSize::new(215.9, 279.4), PageSize::new(420.0, 297.0)] {
+        let result = register(&scan.image, ScanOptions::new(wrong));
+        assert!(result.is_err(), "{wrong:?} should have been caught");
+    }
 }

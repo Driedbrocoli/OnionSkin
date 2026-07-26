@@ -144,7 +144,14 @@ pub fn register(
     let bounds = if options.assume_cropped {
         Bounds { x0: 0, y0: 0, x1: width, y1: height }
     } else {
-        find_sheet(&gray)
+        find_sheet(&gray).ok_or_else(|| {
+            ScanError::Detection(
+                "no sheet of paper could be found in this image — it has no bright \
+                 region at all.\n    Check it is a scan of a document, or pass \
+                 --cropped if the image really is the sheet."
+                    .into(),
+            )
+        })?
     };
 
     if bounds.width() < 8 || bounds.height() < 8 {
@@ -196,6 +203,26 @@ pub fn register(
 
     // Average the two axes. A scanner's axes can differ very slightly, and a
     // single similarity has to settle on one number for both.
+    // The sheet found should be the shape of the paper the user named. When it
+    // is not, something is wrong that no amount of arithmetic will fix — the
+    // wrong page size, two sheets on the glass, a photo with the desk in it —
+    // and every addition would land at a scale quietly derived from it.
+    let found_aspect = sheet_w / sheet_h;
+    let page_aspect = options.page.width_mm / options.page.height_mm;
+    if page_aspect > 0.0 && (found_aspect / page_aspect - 1.0).abs() > 0.08 {
+        let implied = PageSize::new(
+            options.page.height_mm * found_aspect,
+            options.page.height_mm,
+        );
+        return Err(ScanError::Detection(format!(
+            "the sheet found in this scan is the wrong shape for {}.\n    \
+             It looks more like {}. Check the --page size, and that only one \
+             sheet is on the glass.",
+            options.page.describe(),
+            implied.describe()
+        )));
+    }
+
     let px_per_mm = (sheet_w / options.page.width_mm + sheet_h / options.page.height_mm) / 2.0;
     if !(px_per_mm.is_finite() && px_per_mm > 0.0) {
         return Err(ScanError::Detection(
@@ -277,8 +304,8 @@ pub fn otsu_threshold(gray: &GrayImage) -> u8 {
     // track the whole winning plateau and take its middle.
     let (mut first_best, mut last_best) = (128usize, 128usize);
 
-    for level in 0..256usize {
-        weight_background += histogram[level] as f64;
+    for (level, count) in histogram.iter().enumerate() {
+        weight_background += *count as f64;
         if weight_background == 0.0 {
             continue;
         }
@@ -286,7 +313,7 @@ pub fn otsu_threshold(gray: &GrayImage) -> u8 {
         if weight_foreground == 0.0 {
             break;
         }
-        sum_background += level as f64 * histogram[level] as f64;
+        sum_background += level as f64 * *count as f64;
         let mean_background = sum_background / weight_background;
         let mean_foreground = (sum_all - sum_background) / weight_foreground;
         let between = weight_background
@@ -317,7 +344,7 @@ pub fn otsu_threshold(gray: &GrayImage) -> u8 {
 /// Many scanners already crop to the page, in which case the whole image is
 /// the sheet and this returns its full extent — the right answer, not a
 /// failure.
-pub fn find_sheet(gray: &GrayImage) -> Bounds {
+pub fn find_sheet(gray: &GrayImage) -> Option<Bounds> {
     let (width, height) = gray.dimensions();
     let threshold = otsu_threshold(gray);
     // Paper is the bright side of the split. Bias upward so heavy text does
@@ -338,20 +365,15 @@ pub fn find_sheet(gray: &GrayImage) -> Bounds {
         })
         .collect();
 
-    let y0 = row_has_sheet.iter().position(|v| *v).unwrap_or(0) as u32;
-    let y1 = row_has_sheet
-        .iter()
-        .rposition(|v| *v)
-        .map(|i| i as u32 + 1)
-        .unwrap_or(height);
-    let x0 = col_has_sheet.iter().position(|v| *v).unwrap_or(0) as u32;
-    let x1 = col_has_sheet
-        .iter()
-        .rposition(|v| *v)
-        .map(|i| i as u32 + 1)
-        .unwrap_or(width);
+    // No paper anywhere. Falling back to "the whole image" here would hand
+    // back a confident resolution for a photograph of a dark room.
+    let y0 = row_has_sheet.iter().position(|v| *v)? as u32;
+    let y1 = row_has_sheet.iter().rposition(|v| *v)? as u32 + 1;
+    let x0 = col_has_sheet.iter().position(|v| *v)? as u32;
+    let x1 = col_has_sheet.iter().rposition(|v| *v)? as u32 + 1;
+    let _ = (width, height);
 
-    Bounds { x0, y0, x1, y1 }
+    Some(Bounds { x0, y0, x1, y1 })
 }
 
 /// Longest unbroken stretch for which `is_set` holds.
@@ -582,7 +604,9 @@ fn projection_variance(ink: &[(f64, f64)], angle_deg: f64) -> f64 {
     let (min, max) = projected.iter().fold((f64::MAX, f64::MIN), |(lo, hi), v| {
         (lo.min(*v), hi.max(*v))
     });
-    if !(max > min) {
+    // Spelled out rather than `!(max > min)` so the NaN case is obvious: a
+    // degenerate or non-finite spread has no structure to score.
+    if !max.is_finite() || !min.is_finite() || max <= min {
         return 0.0;
     }
 
@@ -675,9 +699,9 @@ mod tests {
         let threshold = otsu_threshold(&gray);
         // It must land strictly between the clusters, so that `<= threshold`
         // selects the dark pixels and nothing else.
-        assert!(threshold >= 20 && threshold < 230, "threshold {threshold}");
-        assert!(20 <= threshold, "dark pixels must count as ink");
-        assert!(230 > threshold, "bright pixels must not count as ink");
+        // It must land strictly between the clusters, so `<= threshold`
+        // selects the dark pixels and nothing else.
+        assert!((20..230).contains(&threshold), "threshold {threshold}");
     }
 
     #[test]
@@ -689,7 +713,7 @@ mod tests {
     #[test]
     fn the_sheet_is_found_inside_its_border() {
         let scan = synthetic_scan(A4, 150.0, 60, 0.0, 20);
-        let bounds = find_sheet(&scan.to_luma8());
+        let bounds = find_sheet(&scan.to_luma8()).unwrap();
 
         assert!((bounds.x0 as i64 - 60).abs() <= 3, "x0 {}", bounds.x0);
         assert!((bounds.y0 as i64 - 60).abs() <= 3, "y0 {}", bounds.y0);
@@ -704,7 +728,7 @@ mod tests {
     #[test]
     fn a_cropped_scan_is_all_sheet() {
         let scan = synthetic_scan(A4, 150.0, 0, 0.0, 20);
-        let bounds = find_sheet(&scan.to_luma8());
+        let bounds = find_sheet(&scan.to_luma8()).unwrap();
         assert_eq!(bounds.x0, 0);
         assert_eq!(bounds.y0, 0);
     }
@@ -714,7 +738,7 @@ mod tests {
         for truth in [-2.0, -0.8, 0.0, 0.7, 1.5, 3.0] {
             let scan = synthetic_scan(A4, 150.0, 40, truth, 24);
             let gray = scan.to_luma8();
-            let bounds = find_sheet(&gray);
+            let bounds = find_sheet(&gray).unwrap();
             let found = estimate_skew(&gray, bounds, 5.0);
             assert!(
                 (found - truth).abs() < 0.25,
@@ -729,7 +753,7 @@ mod tests {
         // worse than admitting there is no evidence.
         let scan = synthetic_scan(A4, 150.0, 40, 2.0, 0);
         let gray = scan.to_luma8();
-        let bounds = find_sheet(&gray);
+        let bounds = find_sheet(&gray).unwrap();
         assert_eq!(estimate_skew(&gray, bounds, 5.0), 0.0);
     }
 

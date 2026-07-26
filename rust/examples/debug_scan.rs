@@ -36,7 +36,7 @@ fn main() {
         let scan = synthetic(a4, 150.0, 40, skew, lines);
         let gray = scan.to_luma8();
         let t = otsu_threshold(&gray);
-        let b = find_sheet(&gray);
+        let b = find_sheet(&gray).unwrap();
         let mut ink = 0u64;
         for y in b.y0..b.y1 { for x in b.x0..b.x1 {
             if gray.get_pixel(x, y).0[0] <= t { ink += 1; } } }

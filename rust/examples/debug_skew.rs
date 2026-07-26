@@ -29,14 +29,14 @@ fn main() {
     for truth in [-4.0f64, -2.0, 0.0, 2.0, 3.7] {
         let scan = synthetic(a4, 200.0, 40, truth, 26);
         let gray = scan.to_luma8();
-        let b = find_sheet(&gray);
+        let b = find_sheet(&gray).unwrap();
         let got = estimate_skew(&gray, b, 5.0);
         println!("truth {truth:+5.1} bounds {}x{} -> found {got:+.3}", b.width(), b.height());
     }
     // Does raising the search range help? (tests whether we're clipping at the edge)
     let scan = synthetic(a4, 200.0, 40, -4.0, 26);
     let gray = scan.to_luma8();
-    let b = find_sheet(&gray);
+    let b = find_sheet(&gray).unwrap();
     for max in [3.0f64, 5.0, 8.0, 12.0] {
         println!("  max_skew {max:4.1} -> {:+.3}", estimate_skew(&gray, b, max));
     }
