@@ -100,13 +100,20 @@ jobs:
             beside: libpdfium.dylib
             exe: ""
             stable: macos-arm64
-          - os: macos-13
+          # The Intel Mac build, made on an Apple silicon runner rather than an
+          # Intel one. GitHub is retiring the macos-13 image, and a job asking
+          # for it sits in a queue that may never come — which is worse than it
+          # sounds, because the one archive that never appears is invisible next
+          # to four that did. Cross-compiling needs nothing Apple's toolchain
+          # does not already have, and it runs on a machine that exists.
+          - os: macos-14
             platform: macos
             pdfium: pdfium-mac-x64.tgz
             library: lib/libpdfium.dylib
             beside: libpdfium.dylib
             exe: ""
             stable: macos-x64
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -118,10 +125,24 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          # Keyed on the archive, not the runner: two jobs now run on macos-14
+          # and they build different things.
+          key: ${{ matrix.stable }}-cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Build both programs
-        run: cargo build --release --locked
+        shell: bash
+        run: |
+          # A cross build needs two: the programs being shipped, and a native
+          # `onionskin` to run `package` with — the packager reads the binary it
+          # is given, so it does not have to be the same architecture as it.
+          cargo build --release --locked
+          if [ -n "${{ matrix.target }}" ]; then
+            rustup target add "${{ matrix.target }}"
+            cargo build --release --locked --target "${{ matrix.target }}"
+            echo "BIN=target/${{ matrix.target }}/release" >> "$GITHUB_ENV"
+          else
+            echo "BIN=target/release" >> "$GITHUB_ENV"
+          fi
 
       # pdfium is a C++ library and is not on crates.io, so it is fetched as a
       # binary from the build everyone uses. BSD and Apache licensed, which is
@@ -133,17 +154,38 @@ jobs:
             "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/${{ matrix.pdfium }}"
           mkdir -p pdfium
           tar -xzf pdfium.tgz -C pdfium
-          cp "pdfium/${{ matrix.library }}" "target/release/${{ matrix.beside }}"
+          cp "pdfium/${{ matrix.library }}" "$BIN/${{ matrix.beside }}"
 
+      # A cross-built program cannot be asked what it can see — it is not for
+      # this machine. What can be checked is that it is for the machine it
+      # claims to be for, which is the mistake worth catching: an archive named
+      # x64 holding an arm64 program runs nowhere and looks fine.
       - name: Check it can see the renderer
+        if: matrix.target == ''
         shell: bash
-        run: ./target/release/onionskin${{ matrix.exe }} doctor || true
+        run: $BIN/onionskin${{ matrix.exe }} doctor || true
 
+      - name: Check it was built for the chip on the label
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          for program in onionskin onionskin-desktop; do
+            file "$BIN/$program"
+            lipo -archs "$BIN/$program" | grep -qw x86_64 \
+              || { echo "$program is not an x86_64 program"; exit 1; }
+          done
+
+      # Told explicitly where everything is rather than left to find it beside
+      # the running program, because on a cross build the running program is
+      # the native one and its neighbours are the wrong architecture.
       - name: Build the archives
         shell: bash
         run: |
           ./target/release/onionskin${{ matrix.exe }} package \
             --platform ${{ matrix.platform }} \
+            --binary "$BIN/onionskin${{ matrix.exe }}" \
+            --desktop "$BIN/onionskin-desktop${{ matrix.exe }}" \
+            --library "$BIN/${{ matrix.beside }}" \
             --version "${{ needs.open.outputs.version }}" \
             --out dist
 
@@ -154,7 +196,12 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          chip=$([ "${{ matrix.os }}" = "macos-14" ] && echo arm64 || echo x64)
+          # Taken from the archive's own name, not from the runner's: both Mac
+          # jobs run on macos-14 now, so the runner no longer says which chip
+          # the archive is for — and two jobs agreeing it is arm64 would have
+          # one silently replace the other on the release.
+          chip="${{ matrix.stable }}"
+          chip="${chip#macos-}"
           for file in dist/*; do
             mv "$file" "${file%.tar.gz}-$chip.tar.gz"
           done

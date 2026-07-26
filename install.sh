@@ -53,8 +53,9 @@ Look at https://github.com/$REPO/releases"
 
 tar -xzf "$work/onionskin.tar.gz" -C "$work"
 
-# The archive holds a folder with the programs in it; find whichever it is
-# rather than assuming the name, which has the version in it.
+# Search rather than assume: the archive currently unpacks its files flat, but
+# whether they arrive loose or inside a folder is a packaging detail, and this
+# script should not need changing the day it becomes the other one.
 program=$(find "$work" -type f -name onionskin -perm -u+x 2>/dev/null | head -n 1)
 [ -n "$program" ] || stop "That archive does not look like Onionskin."
 

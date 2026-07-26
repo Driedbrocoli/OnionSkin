@@ -379,7 +379,13 @@ impl Platform {
     /// The window's name on this platform.
     pub fn desktop_name(&self) -> &'static str {
         match self {
-            Platform::Windows => "Onionskin.exe",
+            // Not "Onionskin.exe", which is the friendlier thing to double
+            // click and also a bug: Windows filenames are case-insensitive, so
+            // it and onionskin.exe are one name. Unpacking the zip wrote one
+            // file, whichever came second, and the archive looked fine right up
+            // until somebody ran it. macOS gets the inviting name honestly,
+            // through a .app bundle, which is a folder and cannot collide.
+            Platform::Windows => "onionskin-desktop.exe",
             // On macOS this is what goes inside the .app bundle, where the
             // name has to match what Info.plist says it is.
             Platform::MacOs => "Onionskin",
@@ -414,11 +420,11 @@ pub fn readme(platform: Platform) -> String {
         Platform::Windows => "onionskin.exe install",
         _ => "./onionskin install",
     };
+    // Both desktop systems stop an unsigned program the first time it is run,
+    // and both do it with wording that reads like the file is broken rather
+    // than merely unsigned. Saying so here is cheaper than the alternative,
+    // which is paying Apple and a certificate authority for a signature.
     let mac_note = match platform {
-        // Gatekeeper stops a downloaded program the first time it is run, and
-        // the message it gives ("cannot be opened because the developer cannot
-        // be verified") reads like the file is broken. Saying so here is
-        // cheaper than the alternative, which is paying Apple for a signature.
         Platform::MacOs => {
             "\nThe first time you run it, macOS may say it cannot check the developer.\n\
              That is what it says about every program not signed with a paid Apple\n\
@@ -427,6 +433,14 @@ pub fn readme(platform: Platform) -> String {
              \x20   xattr -d com.apple.quarantine onionskin\n\
              \n\
              or open it once from Finder with a right-click and choose Open.\n"
+        }
+        // "Windows protected your PC" hides its Run button behind "More info",
+        // so somebody who does not know that sees a dialog with one button on
+        // it saying Don't run. That is where most people stop.
+        Platform::Windows => {
+            "\nThe first time you run it, Windows may show a blue box saying\n\
+             \"Windows protected your PC\". That appears for every program without a\n\
+             paid signing certificate. Click \"More info\", then \"Run anyway\".\n"
         }
         _ => "",
     };

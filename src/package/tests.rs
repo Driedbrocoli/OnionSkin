@@ -534,6 +534,104 @@ fn the_note_tells_a_stranger_what_to_do_next() {
 }
 
 #[test]
+fn no_two_files_in_an_archive_are_the_same_name_twice() {
+    // Windows and macOS do not distinguish Onionskin.exe from onionskin.exe.
+    // Two entries that differ only in case unpack to one file there — the
+    // second one written wins — and the archive gives no sign of it: the
+    // listing shows both, the sizes are right, and the thing simply does not
+    // work on the one platform nobody testing on Linux will notice.
+    for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
+        let dir = tempfile::tempdir().unwrap();
+        let licence = licence_file(dir.path());
+        let cli = binary_for(dir.path(), platform);
+
+        let window = dir.path().join("window");
+        let magic: &[u8] = match platform {
+            Platform::Linux => b"\x7fELF",
+            Platform::MacOs => b"\xcf\xfa\xed\xfe",
+            Platform::Windows => b"MZ",
+        };
+        let mut bytes = magic.to_vec();
+        bytes.extend_from_slice(b" pretend window");
+        std::fs::write(&window, bytes).unwrap();
+
+        let entries = contents_with_window(platform, &cli, Some(&window), None, &licence).unwrap();
+        // What actually goes in the archive, which on macOS is the bundled
+        // layout — that is where `Onionskin` stops sitting beside `onionskin`
+        // and moves inside a folder, so checking before it would report a
+        // collision the download does not have.
+        let entries = if platform == Platform::MacOs {
+            mac_bundle(&entries, "0.0.0")
+        } else {
+            entries
+        };
+
+        let mut seen: Vec<String> = Vec::new();
+        for entry in &entries {
+            let folded = entry.name.to_lowercase();
+            assert!(
+                !seen.contains(&folded),
+                "{platform:?}: two entries called {:?} once case is ignored: {:?}",
+                entry.name,
+                entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+            );
+            seen.push(folded);
+        }
+    }
+}
+
+#[test]
+fn the_window_is_called_what_install_will_go_looking_for() {
+    // `onionskin install` copies the window from beside itself, by name. If
+    // the archive spells that name differently the window is simply never
+    // installed, and the failure is silent — install reports success, because
+    // as far as it can tell no window came along.
+    // install::desktop_name() answers for the machine this was compiled for,
+    // so only that platform's name can be compared against it here. The other
+    // two are pinned to what install.rs would say if it were built there,
+    // which is the whole point of writing them down twice.
+    let here = if cfg!(windows) {
+        Platform::Windows
+    } else if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else {
+        Platform::Linux
+    };
+    if here != Platform::MacOs {
+        assert_eq!(here.desktop_name(), crate::install::desktop_name(), "{here:?}");
+    }
+    assert_eq!(Platform::Windows.desktop_name(), "onionskin-desktop.exe");
+    assert_eq!(Platform::Linux.desktop_name(), "onionskin-desktop");
+    // macOS is the exception on purpose: what install copies is a plain
+    // program, what the archive holds is the same program inside a .app.
+    assert_eq!(Platform::MacOs.desktop_name(), "Onionskin");
+    assert_eq!(crate::install::desktop_name(), "onionskin-desktop");
+}
+
+#[test]
+fn the_note_warns_about_the_unsigned_program_dialog() {
+    // Windows and macOS both refuse an unsigned program on first run, with
+    // wording that sounds like a damaged download. Somebody who believes it
+    // deletes the file and never comes back, so the archive has to say so
+    // before they meet the dialog.
+    let mac = readme(Platform::MacOs);
+    assert!(mac.contains("quarantine"), "{mac}");
+    assert!(mac.contains("right-click"), "{mac}");
+
+    let windows = readme(Platform::Windows);
+    assert!(windows.contains("Windows protected your PC"), "{windows}");
+    // The Run button is behind "More info"; naming only one of the two is the
+    // same as naming neither.
+    assert!(windows.contains("More info"), "{windows}");
+    assert!(windows.contains("Run anyway"), "{windows}");
+
+    // Linux has no such gate, and inventing one would only worry people.
+    let linux = readme(Platform::Linux);
+    assert!(!linux.contains("protected your PC"), "{linux}");
+    assert!(!linux.contains("quarantine"), "{linux}");
+}
+
+#[test]
 fn the_commands_to_type_are_set_apart_from_the_prose() {
     // Rust's line continuation eats the whitespace at the start of the next
     // source line, so an indented line written the obvious way comes out flush

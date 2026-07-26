@@ -74,6 +74,21 @@ applications menu and look for Onionskin, or type `onionskin-desktop`.
 The archives hold everything: both programs, the renderer, and the licences.
 Nothing else has to be installed.
 
+#### If your computer says it will not run it
+
+Onionskin is not signed with a paid certificate, and both Windows and macOS
+say so the first time — in wording that sounds like the file is damaged rather
+than merely unsigned. It is not damaged. Nothing was downloaded twice and
+nothing needs repairing.
+
+- **Windows** shows a blue box, *"Windows protected your PC"*. Click
+  **More info**, then **Run anyway**. The Run button is hidden until you do.
+- **macOS** says it *"cannot verify the developer"*. Right-click the program in
+  Finder and choose **Open**, or run `xattr -d com.apple.quarantine onionskin`.
+
+The one-line `curl` install above avoids both, because those checks apply to
+files a browser downloaded.
+
 > **If the Releases page is empty**, no version has been tagged yet — build it
 > from source below. Anyone with write access to the repository makes the
 > downloads appear by pushing a tag (`git tag v0.1.0 && git push origin v0.1.0`),
