@@ -373,6 +373,36 @@ fn the_name_is_trimmed_before_joining() {
     );
 }
 
+#[test]
+fn arming_the_overwrite_confirmation_also_asks_for_the_name_field_back() {
+    // A `TextEdit` surrenders its own focus the moment Enter is pressed, so
+    // if this did not re-claim it, a second bare Enter would reach the list
+    // instead of the name field — which has nothing selected and does
+    // nothing — and "press Save again" would secretly need a click instead.
+    let at = tempfile::tempdir().unwrap();
+    let mut browsing = browsing_at(at.path());
+    browsing.focus_name = false;
+
+    let answer = apply_save_outcome(&mut browsing, SaveOutcome::NeedsConfirmation);
+
+    assert_eq!(answer, None);
+    assert!(browsing.confirm_overwrite);
+    assert!(browsing.focus_name);
+}
+
+#[test]
+fn answering_hands_back_the_path_without_asking_for_the_keyboard() {
+    let at = tempfile::tempdir().unwrap();
+    let mut browsing = browsing_at(at.path());
+    browsing.focus_name = false;
+    let path = at.path().join("new.onionskin");
+
+    let answer = apply_save_outcome(&mut browsing, SaveOutcome::Answer(path.clone()));
+
+    assert_eq!(answer, Some(path));
+    assert!(!browsing.focus_name);
+}
+
 // ---------------------------------------------------------------------------
 // Moving folders
 // ---------------------------------------------------------------------------

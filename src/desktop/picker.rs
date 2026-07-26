@@ -511,13 +511,13 @@ impl Picker {
                     {
                         let name_given = !browsing.name.trim().is_empty();
                         if name_given {
-                            match decide_save(
+                            let outcome = decide_save(
                                 &browsing.at,
                                 &browsing.name,
                                 browsing.confirm_overwrite,
-                            ) {
-                                SaveOutcome::Answer(path) => answer = Some(path),
-                                SaveOutcome::NeedsConfirmation => browsing.confirm_overwrite = true,
+                            );
+                            if let Some(path) = apply_save_outcome(browsing, outcome) {
+                                answer = Some(path);
                             }
                         }
                     }
@@ -564,13 +564,13 @@ impl Picker {
                             }
                         }
                         Purpose::Save => {
-                            match decide_save(
+                            let outcome = decide_save(
                                 &browsing.at,
                                 &browsing.name,
                                 browsing.confirm_overwrite,
-                            ) {
-                                SaveOutcome::Answer(path) => answer = Some(path),
-                                SaveOutcome::NeedsConfirmation => browsing.confirm_overwrite = true,
+                            );
+                            if let Some(path) = apply_save_outcome(browsing, outcome) {
+                                answer = Some(path);
                             }
                         }
                     }
@@ -851,6 +851,27 @@ fn decide_save(at: &Path, name: &str, already_confirmed: bool) -> SaveOutcome {
         SaveOutcome::NeedsConfirmation
     } else {
         SaveOutcome::Answer(path)
+    }
+}
+
+/// Act on what `decide_save` decided, and hand back the path if it answered.
+///
+/// Arming the confirmation also asks for the name field back. This matters
+/// for the keyboard specifically: a `TextEdit` surrenders its own focus the
+/// instant Enter is pressed, so without this, the first Enter would arm the
+/// prompt and then quietly hand the keyboard to nothing in particular — a
+/// second bare Enter would reach the list instead, which has nothing
+/// selected and does nothing, and "press Save again" would need a click
+/// after all. Re-focusing here means the second press lands back in the
+/// same field it left, whether the first attempt was a click or a keystroke.
+fn apply_save_outcome(browsing: &mut Browsing, outcome: SaveOutcome) -> Option<PathBuf> {
+    match outcome {
+        SaveOutcome::Answer(path) => Some(path),
+        SaveOutcome::NeedsConfirmation => {
+            browsing.confirm_overwrite = true;
+            browsing.focus_name = true;
+            None
+        }
     }
 }
 
