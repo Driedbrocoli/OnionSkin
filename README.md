@@ -37,10 +37,18 @@ either is absent:
 * **pdfium** draws PDF pages. It is inside the archive, and `install` puts it
   where the program looks. Building from source, put `libpdfium` beside the
   binary or point `ONIONSKIN_PDFIUM` at it.
-* **LibreOffice** converts Word documents, and only those — PDFs work without it
-  ([download](https://www.libreoffice.org/download/)). It is deliberately *not*
-  bundled: it is under the MPL, which would put obligations on anyone passing
-  the archive on. See `THIRD-PARTY-LICENCES` in the download.
+* **LibreOffice** opens everything that is not already a PDF or an image —
+  `.docx`, `.odt`, `.rtf`, `.xlsx`, `.ods`, `.pptx`, `.odp`, `.vsdx` and the
+  rest of the list in `render::CONVERTIBLE`
+  ([download](https://www.libreoffice.org/download/)). PDFs and scans need it
+  not at all. It is deliberately *not* bundled: it is under the MPL, which would
+  put obligations on anyone passing the archive on. See `THIRD-PARTY-LICENCES`
+  in the download. Onionskin looks for it wherever it installs — package
+  manager, Snap, Flatpak, `/Applications`, `Program Files` — and
+  `ONIONSKIN_SOFFICE` points at it if it is somewhere else.
+
+  Writing `.docx` and `.odt` needs nothing installed: Onionskin writes them
+  itself.
 
 ### From source
 
@@ -76,6 +84,28 @@ onionskin write order.onionskin --at '25,150:Approved — J. Bezzina, 26 July'
 onionskin print order.onionskin -o delta.pdf --delta
 ```
 
+### Draw on it
+
+Lines, boxes, circles and paths, anywhere on the page, in any colour. Drawings
+go into the delta on the same terms as words: what is new since the sheet was
+printed is what gets printed.
+
+```bash
+onionskin draw form.onionskin --line '20,100:190,100'          # a rule across
+onionskin draw form.onionskin --box '20,40:80x30' --radius 3   # a rounded box
+onionskin draw form.onionskin --box '20,40:80x30' --fill lightgrey --no-outline
+onionskin draw form.onionskin --circle '105,150:20' --colour red --dash '2,1.5'
+onionskin draw form.onionskin --path '20,20 60,50 100,20' --colour '#0033aa'
+onionskin draw form.onionskin --path '20,150 60,150 60,175' --close --fill '#ffdd44'
+```
+
+Colours are `#rrggbb`, the `#rgb` shorthand, or a name — `black`, `white`,
+`grey`, `lightgrey`, `red`, `green`, `blue`, `yellow`, `orange`. Anything that
+is a shade of grey is written to the PDF on the greyscale operator rather than
+as three equal numbers, so a mono printer is never asked for colour ink it has
+not got. Words are always drawn on top of shapes, so a label over a shaded box
+stays readable.
+
 ### Type onto a document or a form
 
 One file in, no editing round trip. Say where the words go and Onionskin puts
@@ -100,6 +130,28 @@ onionskin send delta.pdf --printer ipp://printer.local/ipp/print  # back to the 
 
 That is the whole loop on one machine: scan the sheet from the printer, work
 out what to add, print it back onto the same paper.
+
+### Turn a scan into something you can edit
+
+A scan read against the font it was set in comes back as a Word document, an
+OpenDocument text, or an Onionskin document — each line pinned at the millimetre
+it was found, so what opens looks like the paper rather than a column of
+disconnected phrases.
+
+```bash
+onionskin read scan.png --font-file /path/to/the/font.ttf --to invoice.docx
+onionskin read scan.png --font-file font.ttf --to invoice.odt
+onionskin read scan.png --font-file font.ttf --to invoice.onionskin
+onionskin read scan.png --font-file font.ttf --to notes.docx --flow   # paragraphs
+```
+
+A 100-word A4 page takes about a second at 300 dpi — 0.2 s to find the sheet and
+its skew, 0.7 s to read every letter. Higher resolution is slower and no more
+accurate; 300 dpi is the one to use. Reading is 98–100% right on ordinary prose
+at 8–18 pt when the font is the one the page was set in. Two honest limits: a
+capital `I` and a lowercase `l` are the same rectangle in most sans-serif faces
+and differ by about a pixel, so which you get is a coin toss; and reading a page
+against a *different* typeface from the one it was printed in is markedly worse.
 
 For a scanner plugged into this computer rather than one on the network, there
 is `onionskin scanners` and `onionskin acquire` instead, which go through SANE.

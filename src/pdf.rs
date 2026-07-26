@@ -124,6 +124,65 @@ pub struct PlacedLine {
     pub colour: (f64, f64, f64),
 }
 
+/// A shape, positioned in page space (mm from the top-left, y downwards).
+///
+/// Everything here is measured in millimetres on the paper, like the rest of
+/// Onionskin, and turned into PDF points at the last moment. A drawing put at
+/// 30 mm from the top lands 30 mm from the top of the sheet whatever the paper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedShape {
+    pub drawing: Drawing,
+    /// The outline's colour, or `None` to leave the shape unoutlined.
+    pub stroke: Option<(f64, f64, f64)>,
+    /// The inside's colour, or `None` to leave the shape hollow.
+    pub fill: Option<(f64, f64, f64)>,
+    /// How thick the outline is. Under about 0.2 mm a laser printer starts to
+    /// drop parts of it, which is why nothing here defaults thinner.
+    pub width_mm: f64,
+    /// Dash pattern: how long a dash, how long the gap, both in millimetres.
+    pub dash_mm: Option<(f64, f64)>,
+}
+
+/// What to draw.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Drawing {
+    Line {
+        from: (f64, f64),
+        to: (f64, f64),
+    },
+    /// `radius_mm` rounds the corners; zero leaves them square.
+    Rect {
+        x_mm: f64,
+        y_mm: f64,
+        width_mm: f64,
+        height_mm: f64,
+        radius_mm: f64,
+    },
+    Ellipse {
+        centre: (f64, f64),
+        radius_x_mm: f64,
+        radius_y_mm: f64,
+    },
+    /// A run of points, joined in order. Closed makes it a polygon.
+    Path {
+        points: Vec<(f64, f64)>,
+        closed: bool,
+    },
+}
+
+impl PlacedShape {
+    /// A hairline outline in black, which is what most drawing on a page is.
+    pub fn outline(drawing: Drawing) -> PlacedShape {
+        PlacedShape {
+            drawing,
+            stroke: Some((0.0, 0.0, 0.0)),
+            fill: None,
+            width_mm: 0.35,
+            dash_mm: None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PdfError {
     #[error("{0}")]
@@ -249,6 +308,23 @@ pub fn write_delta(
     title: &str,
     embedded: Option<&EmbeddedFont>,
 ) -> Result<(), PdfError> {
+    write_page_content(path, pages, lines_per_page, &[], title, embedded)
+}
+
+/// The same, with drawings as well as words.
+///
+/// Shapes are drawn before the text on each page, so a filled box behind a
+/// label does not cover the label. Anyone who wants it the other way round can
+/// say so by ordering the pages differently; putting the words on top is the
+/// answer that is right nearly always.
+pub fn write_page_content(
+    path: &Path,
+    pages: &[PageSize],
+    lines_per_page: &[Vec<PlacedLine>],
+    shapes_per_page: &[Vec<PlacedShape>],
+    title: &str,
+    embedded: Option<&EmbeddedFont>,
+) -> Result<(), PdfError> {
     let mut doc = Document::with_version("1.4");
     let pages_id = doc.new_object_id();
 
@@ -323,9 +399,11 @@ pub fn write_delta(
     for (index, size) in pages.iter().enumerate() {
         let empty: Vec<PlacedLine> = Vec::new();
         let lines = lines_per_page.get(index).unwrap_or(&empty);
-        let no_shapes: Vec<Option<Vec<crate::font::Glyph>>> = Vec::new();
-        let shapes = shaped.get(index).unwrap_or(&no_shapes);
-        let content = page_content(size, lines, shapes, &font_key, EMBEDDED_KEY)?;
+        let no_glyphs: Vec<Option<Vec<crate::font::Glyph>>> = Vec::new();
+        let glyphs = shaped.get(index).unwrap_or(&no_glyphs);
+        let no_drawings: Vec<PlacedShape> = Vec::new();
+        let drawings = shapes_per_page.get(index).unwrap_or(&no_drawings);
+        let content = page_content(size, lines, glyphs, drawings, &font_key, EMBEDDED_KEY)?;
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
         let page_id = doc.add_object(dictionary! {
@@ -462,14 +540,242 @@ fn round6(value: f64) -> f64 {
     (value * 1e6).round() / 1e6
 }
 
+fn real(value: f64) -> Object {
+    Object::Real(round6(value) as f32)
+}
+
+/// Set a colour, in the fewest components that say it.
+///
+/// A grey written as three equal numbers is a colour as far as a printer is
+/// concerned, and some will run the colour heads for it, or refuse the job on a
+/// machine that is out of cyan. Written as one number it is unambiguously black
+/// ink. Every shade of grey — including black itself — therefore goes out on
+/// the greyscale operator, and only actual colour uses RGB.
+fn colour_operation(colour: (f64, f64, f64), stroking: bool) -> Operation {
+    let (r, g, b) = colour;
+    if (r - g).abs() < 1e-9 && (g - b).abs() < 1e-9 {
+        Operation::new(if stroking { "G" } else { "g" }, vec![real(r)])
+    } else {
+        Operation::new(
+            if stroking { "RG" } else { "rg" },
+            vec![real(r), real(g), real(b)],
+        )
+    }
+}
+
+/// How far along a Bézier control point sits to make a quarter of a circle.
+///
+/// PDF has no arc operator, so every curve is a cubic Bézier, and a circle
+/// cannot be drawn by one exactly. This is the constant that makes four of them
+/// agree with a circle everywhere except a few parts in ten thousand, which on
+/// paper is a good deal finer than the toner.
+const KAPPA: f64 = 0.552_284_749_831;
+
+/// The operators that draw one shape.
+///
+/// Page space is y-down from the top-left and PDF is y-up from the bottom, so
+/// every y is turned over here — once, in one place, rather than at each call.
+fn shape_operations(size: &PageSize, shape: &PlacedShape) -> Vec<Operation> {
+    let mut ops: Vec<Operation> = Vec::new();
+    // Nothing to see: no outline and no fill would emit a path that draws
+    // nothing, which is a waste of bytes and confusing in a content stream.
+    if shape.stroke.is_none() && shape.fill.is_none() {
+        return ops;
+    }
+
+    ops.push(Operation::new("q", vec![]));
+    if let Some(colour) = shape.fill {
+        ops.push(colour_operation(colour, false));
+    }
+    if let Some(colour) = shape.stroke {
+        ops.push(colour_operation(colour, true));
+        ops.push(Operation::new(
+            "w",
+            vec![real(mm_to_pt(shape.width_mm.max(0.0)))],
+        ));
+        // Round ends and joins. A drawn line with square ends overshoots its
+        // own corner by half its width, which is visible on anything thick.
+        ops.push(Operation::new("J", vec![Object::Integer(1)]));
+        ops.push(Operation::new("j", vec![Object::Integer(1)]));
+        if let Some((on, off)) = shape.dash_mm {
+            ops.push(Operation::new(
+                "d",
+                vec![
+                    Object::Array(vec![real(mm_to_pt(on)), real(mm_to_pt(off))]),
+                    Object::Integer(0),
+                ],
+            ));
+        }
+    }
+
+    let mut path = PathBuilder::new(size);
+    match &shape.drawing {
+        Drawing::Line { from, to } => {
+            path.move_to(from.0, from.1);
+            path.line_to(to.0, to.1);
+        }
+        Drawing::Rect {
+            x_mm,
+            y_mm,
+            width_mm,
+            height_mm,
+            radius_mm,
+        } => {
+            // A rectangle given from any corner: negative sizes are somebody
+            // dragging up and to the left, and refusing that would be silly.
+            let left = x_mm.min(x_mm + width_mm);
+            let top = y_mm.min(y_mm + height_mm);
+            let w = width_mm.abs();
+            let h = height_mm.abs();
+            let r = radius_mm.min(w / 2.0).min(h / 2.0).max(0.0);
+            if r <= 0.0 {
+                path.rect(left, top, w, h);
+            } else {
+                path.rounded_rect(left, top, w, h, r);
+            }
+        }
+        Drawing::Ellipse {
+            centre,
+            radius_x_mm,
+            radius_y_mm,
+        } => path.ellipse(*centre, radius_x_mm.abs(), radius_y_mm.abs()),
+        Drawing::Path { points, closed } => {
+            let Some(first) = points.first() else {
+                return Vec::new();
+            };
+            path.move_to(first.0, first.1);
+            for point in &points[1..] {
+                path.line_to(point.0, point.1);
+            }
+            if *closed {
+                path.close();
+            }
+        }
+    }
+    ops.extend(path.ops);
+
+    // A closed shape can be filled; a line cannot, whatever it was asked for.
+    let fillable = !matches!(shape.drawing, Drawing::Line { .. })
+        && !matches!(shape.drawing, Drawing::Path { closed: false, .. });
+    let paint = match (shape.fill.is_some() && fillable, shape.stroke.is_some()) {
+        (true, true) => "B",
+        (true, false) => "f",
+        _ => "S",
+    };
+    ops.push(Operation::new(paint, vec![]));
+    ops.push(Operation::new("Q", vec![]));
+    ops
+}
+
+/// A path in page space, built as millimetre points and turned over once.
+///
+/// Written as a builder rather than a set of closures because every one of
+/// these needs to append to the same list while reading the same coordinate
+/// mapping, which is the one shape a closure cannot take.
+struct PathBuilder {
+    height_pt: f64,
+    ops: Vec<Operation>,
+}
+
+impl PathBuilder {
+    fn new(size: &PageSize) -> PathBuilder {
+        PathBuilder {
+            height_pt: size.height_pt(),
+            ops: Vec::new(),
+        }
+    }
+
+    /// Page space is y-down from the top-left; PDF is y-up from the bottom.
+    fn at(&self, x_mm: f64, y_mm: f64) -> (Object, Object) {
+        (
+            real(mm_to_pt(x_mm)),
+            real(self.height_pt - mm_to_pt(y_mm)),
+        )
+    }
+
+    fn move_to(&mut self, x: f64, y: f64) {
+        let (px, py) = self.at(x, y);
+        self.ops.push(Operation::new("m", vec![px, py]));
+    }
+
+    fn line_to(&mut self, x: f64, y: f64) {
+        let (px, py) = self.at(x, y);
+        self.ops.push(Operation::new("l", vec![px, py]));
+    }
+
+    fn curve_to(&mut self, c1: (f64, f64), c2: (f64, f64), end: (f64, f64)) {
+        let (a, b) = self.at(c1.0, c1.1);
+        let (c, d) = self.at(c2.0, c2.1);
+        let (e, f) = self.at(end.0, end.1);
+        self.ops.push(Operation::new("c", vec![a, b, c, d, e, f]));
+    }
+
+    fn close(&mut self) {
+        self.ops.push(Operation::new("h", vec![]));
+    }
+
+    fn rect(&mut self, left: f64, top: f64, w: f64, h: f64) {
+        let (px, py) = self.at(left, top + h);
+        self.ops.push(Operation::new(
+            "re",
+            vec![px, py, real(mm_to_pt(w)), real(mm_to_pt(h))],
+        ));
+    }
+
+    /// Four Bézier arcs, starting at the rightmost point.
+    fn ellipse(&mut self, centre: (f64, f64), rx: f64, ry: f64) {
+        let (cx, cy) = centre;
+        let (ox, oy) = (rx * KAPPA, ry * KAPPA);
+        self.move_to(cx + rx, cy);
+        self.curve_to((cx + rx, cy + oy), (cx + ox, cy + ry), (cx, cy + ry));
+        self.curve_to((cx - ox, cy + ry), (cx - rx, cy + oy), (cx - rx, cy));
+        self.curve_to((cx - rx, cy - oy), (cx - ox, cy - ry), (cx, cy - ry));
+        self.curve_to((cx + ox, cy - ry), (cx + rx, cy - oy), (cx + rx, cy));
+        self.close();
+    }
+
+    /// A rectangle with its corners rounded off. `top` is the edge nearer the
+    /// top of the paper.
+    fn rounded_rect(&mut self, left: f64, top: f64, w: f64, h: f64, r: f64) {
+        let right = left + w;
+        let bottom = top + h;
+        let k = r * KAPPA;
+
+        self.move_to(left + r, top);
+        self.line_to(right - r, top);
+        self.curve_to((right - r + k, top), (right, top + r - k), (right, top + r));
+        self.line_to(right, bottom - r);
+        self.curve_to(
+            (right, bottom - r + k),
+            (right - r + k, bottom),
+            (right - r, bottom),
+        );
+        self.line_to(left + r, bottom);
+        self.curve_to(
+            (left + r - k, bottom),
+            (left, bottom - r + k),
+            (left, bottom - r),
+        );
+        self.line_to(left, top + r);
+        self.curve_to((left, top + r - k), (left + r - k, top), (left + r, top));
+        self.close();
+    }
+}
+
 fn page_content(
     size: &PageSize,
     lines: &[PlacedLine],
-    shapes: &[Option<Vec<crate::font::Glyph>>],
+    glyphs_per_line: &[Option<Vec<crate::font::Glyph>>],
+    drawings: &[PlacedShape],
     font_key: &BTreeMap<&str, String>,
     embedded_key: &str,
 ) -> Result<Vec<u8>, PdfError> {
     let mut operations: Vec<Operation> = Vec::new();
+
+    // Drawings first, so a label written over a filled box stays readable.
+    for shape in drawings {
+        operations.extend(shape_operations(size, shape));
+    }
 
     for (index, line) in lines.iter().enumerate() {
         // Character codes, and the resource name to set them in.
@@ -483,7 +789,7 @@ fn page_content(
                 (bytes, name, false)
             }
             LineFont::Embedded => {
-                let glyphs = shapes
+                let glyphs = glyphs_per_line
                     .get(index)
                     .and_then(|g| g.as_ref())
                     .ok_or(PdfError::NoEmbeddedFont)?;
@@ -834,5 +1140,412 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// Two operator lists draw the same thing if every operator matches with
+    /// identical operands, in order — used to prove that two different ways
+    /// of describing one rectangle produce the same path.
+    fn same_operations(a: &[Operation], b: &[Operation]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(x, y)| x.operator == y.operator && x.operands == y.operands)
+    }
+
+    /// The paint operator a shape ends on: it sits just before the closing
+    /// "Q" that every non-empty shape's operators finish with.
+    fn paint_operator(shape: &PlacedShape) -> String {
+        let a4 = PageSize::new(210.0, 297.0);
+        let ops = shape_operations(&a4, shape);
+        ops[ops.len() - 2].operator.clone()
+    }
+
+    #[test]
+    fn a_point_near_the_top_of_the_page_lands_near_the_top_of_pdf_space() {
+        // Page space counts millimetres down from the top of the sheet; PDF
+        // counts points up from the bottom. Get the flip wrong here and every
+        // shape prints upside down relative to the text sitting on the same
+        // page.
+        let a4 = PageSize::new(210.0, 297.0);
+        let path = PathBuilder::new(&a4);
+        let (_, y) = path.at(20.0, 20.0);
+        let got = y.as_float().unwrap() as f64;
+        let expected = mm_to_pt(297.0 - 20.0);
+        assert!(
+            (got - expected).abs() < 1e-3,
+            "expected {expected} pt for y=20mm on a 297mm-tall page, got {got}"
+        );
+    }
+
+    #[test]
+    fn a_grey_is_written_on_the_greyscale_operator_not_as_three_numbers() {
+        // A grey written as three equal numbers is still a colour as far as
+        // a printer is concerned: some run the colour heads for it, or
+        // refuse the job outright on a machine that is out of cyan. Every
+        // shade where r==g==b, including pure black and pure white, must go
+        // out on the one-number greyscale operator instead.
+        for shade in [0.0, 1.0, 0.5, 0.25] {
+            let fill_op = colour_operation((shade, shade, shade), false);
+            assert_eq!(fill_op.operator, "g", "shade {shade}: {fill_op:?}");
+            assert_eq!(fill_op.operands.len(), 1, "shade {shade}: {fill_op:?}");
+
+            let stroke_op = colour_operation((shade, shade, shade), true);
+            assert_eq!(stroke_op.operator, "G", "shade {shade}: {stroke_op:?}");
+            assert_eq!(stroke_op.operands.len(), 1, "shade {shade}: {stroke_op:?}");
+        }
+    }
+
+    #[test]
+    fn an_actual_colour_is_written_as_three_numbers() {
+        let fill_op = colour_operation((0.8, 0.1, 0.2), false);
+        assert_eq!(fill_op.operator, "rg", "{fill_op:?}");
+        assert_eq!(fill_op.operands.len(), 3, "{fill_op:?}");
+
+        let stroke_op = colour_operation((0.8, 0.1, 0.2), true);
+        assert_eq!(stroke_op.operator, "RG", "{stroke_op:?}");
+        assert_eq!(stroke_op.operands.len(), 3, "{stroke_op:?}");
+    }
+
+    #[test]
+    fn a_stroke_alone_paints_with_the_stroke_operator() {
+        let shape = PlacedShape::outline(Drawing::Rect {
+            x_mm: 10.0,
+            y_mm: 10.0,
+            width_mm: 20.0,
+            height_mm: 30.0,
+            radius_mm: 0.0,
+        });
+        assert_eq!(paint_operator(&shape), "S", "{shape:?}");
+    }
+
+    #[test]
+    fn a_fill_alone_on_a_closed_shape_paints_with_the_fill_operator() {
+        let shape = PlacedShape {
+            drawing: Drawing::Rect {
+                x_mm: 10.0,
+                y_mm: 10.0,
+                width_mm: 20.0,
+                height_mm: 30.0,
+                radius_mm: 0.0,
+            },
+            stroke: None,
+            fill: Some((0.2, 0.2, 0.2)),
+            width_mm: 0.35,
+            dash_mm: None,
+        };
+        assert_eq!(paint_operator(&shape), "f", "{shape:?}");
+    }
+
+    #[test]
+    fn a_stroke_and_a_fill_together_paint_with_the_fill_and_stroke_operator() {
+        let shape = PlacedShape {
+            drawing: Drawing::Rect {
+                x_mm: 10.0,
+                y_mm: 10.0,
+                width_mm: 20.0,
+                height_mm: 30.0,
+                radius_mm: 0.0,
+            },
+            stroke: Some((0.0, 0.0, 0.0)),
+            fill: Some((1.0, 1.0, 1.0)),
+            width_mm: 0.35,
+            dash_mm: None,
+        };
+        assert_eq!(paint_operator(&shape), "B", "{shape:?}");
+    }
+
+    #[test]
+    fn a_line_is_never_filled_even_when_a_fill_colour_is_given() {
+        // A line has no inside. If a caller sets a fill as well as a stroke
+        // — wrongly, but it will happen — the safe reading is still to
+        // stroke it, not to silently "fill" a shape with no enclosed area.
+        let shape = PlacedShape {
+            drawing: Drawing::Line {
+                from: (10.0, 10.0),
+                to: (50.0, 10.0),
+            },
+            stroke: Some((0.0, 0.0, 0.0)),
+            fill: Some((0.0, 0.0, 0.0)),
+            width_mm: 0.35,
+            dash_mm: None,
+        };
+        assert_eq!(paint_operator(&shape), "S", "{shape:?}");
+    }
+
+    #[test]
+    fn an_open_path_is_never_filled_even_when_a_fill_colour_is_given() {
+        // Same reasoning as an open line: a path that never closes has no
+        // enclosed area either, so it must still come out stroked.
+        let shape = PlacedShape {
+            drawing: Drawing::Path {
+                points: vec![(10.0, 10.0), (30.0, 10.0), (30.0, 30.0)],
+                closed: false,
+            },
+            stroke: Some((0.0, 0.0, 0.0)),
+            fill: Some((0.0, 0.0, 0.0)),
+            width_mm: 0.35,
+            dash_mm: None,
+        };
+        assert_eq!(paint_operator(&shape), "S", "{shape:?}");
+    }
+
+    #[test]
+    fn a_shape_with_no_stroke_and_no_fill_draws_nothing() {
+        // Nothing asked for means nothing drawn. Anything else would put
+        // bytes into the content stream for a shape nobody can see, and it
+        // would be a live bug the moment something else gets placed there.
+        let a4 = PageSize::new(210.0, 297.0);
+        let shape = PlacedShape {
+            drawing: Drawing::Rect {
+                x_mm: 10.0,
+                y_mm: 10.0,
+                width_mm: 20.0,
+                height_mm: 30.0,
+                radius_mm: 0.0,
+            },
+            stroke: None,
+            fill: None,
+            width_mm: 0.35,
+            dash_mm: None,
+        };
+        let ops = shape_operations(&a4, &shape);
+        assert!(ops.is_empty(), "{ops:?}");
+    }
+
+    #[test]
+    fn a_rectangle_dragged_up_and_left_matches_the_same_rectangle_from_its_other_corner() {
+        // Negative width/height mean someone dragged the rectangle from its
+        // bottom-right corner rather than its top-left one; the box that
+        // ends up on the page must land in exactly the same place either
+        // way.
+        let a4 = PageSize::new(210.0, 297.0);
+        let dragged = PlacedShape::outline(Drawing::Rect {
+            x_mm: 50.0,
+            y_mm: 60.0,
+            width_mm: -20.0,
+            height_mm: -30.0,
+            radius_mm: 0.0,
+        });
+        let plain = PlacedShape::outline(Drawing::Rect {
+            x_mm: 30.0,
+            y_mm: 30.0,
+            width_mm: 20.0,
+            height_mm: 30.0,
+            radius_mm: 0.0,
+        });
+        let dragged_ops = shape_operations(&a4, &dragged);
+        let plain_ops = shape_operations(&a4, &plain);
+        assert!(
+            same_operations(&dragged_ops, &plain_ops),
+            "dragged rect {dragged_ops:?} did not match plain rect {plain_ops:?}"
+        );
+    }
+
+    #[test]
+    fn an_ellipse_is_four_curves_between_a_move_and_a_close() {
+        let a4 = PageSize::new(210.0, 297.0);
+        let mut path = PathBuilder::new(&a4);
+        path.ellipse((100.0, 100.0), 20.0, 15.0);
+        let operators: Vec<&str> = path.ops.iter().map(|op| op.operator.as_str()).collect();
+        assert_eq!(
+            operators,
+            vec!["m", "c", "c", "c", "c", "h"],
+            "{operators:?}"
+        );
+    }
+
+    #[test]
+    fn the_first_ellipse_control_point_sits_at_the_kappa_offset_from_the_start() {
+        // KAPPA is the constant that makes four cubic Béziers agree with a
+        // circle; get the control point wrong and the "circle" prints
+        // visibly lens-shaped or egg-shaped once ink is on paper.
+        let a4 = PageSize::new(210.0, 297.0);
+        let (cx, cy) = (100.0, 120.0);
+        let r = 20.0;
+        let mut path = PathBuilder::new(&a4);
+        path.ellipse((cx, cy), r, r);
+
+        // The curve leaves the start point (cx+r, cy) heading for the top of
+        // the circle; its first control point must sit KAPPA of the radius
+        // along that tangent.
+        let expected = path.at(cx + r, cy + r * KAPPA);
+        let first_curve = &path.ops[1];
+        assert_eq!(first_curve.operator, "c", "{first_curve:?}");
+        assert_eq!(
+            first_curve.operands[0], expected.0,
+            "control point x was {:?}, expected {:?}",
+            first_curve.operands[0], expected.0
+        );
+        assert_eq!(
+            first_curve.operands[1], expected.1,
+            "control point y was {:?}, expected {:?}",
+            first_curve.operands[1], expected.1
+        );
+    }
+
+    #[test]
+    fn a_rounded_rect_radius_larger_than_the_shape_is_clamped_not_broken() {
+        // Somebody will type a corner radius bigger than the box without
+        // thinking about it; the result must still be a sane closed path
+        // rather than a self-intersecting or missing outline.
+        let a4 = PageSize::new(210.0, 297.0);
+        let huge = PlacedShape::outline(Drawing::Rect {
+            x_mm: 10.0,
+            y_mm: 10.0,
+            width_mm: 20.0,
+            height_mm: 10.0,
+            radius_mm: 1000.0,
+        });
+        let clamped = PlacedShape::outline(Drawing::Rect {
+            x_mm: 10.0,
+            y_mm: 10.0,
+            width_mm: 20.0,
+            height_mm: 10.0,
+            radius_mm: 5.0, // half of the shorter, 10mm side
+        });
+        let huge_ops = shape_operations(&a4, &huge);
+        let clamped_ops = shape_operations(&a4, &clamped);
+        assert!(
+            same_operations(&huge_ops, &clamped_ops),
+            "radius 1000mm gave {huge_ops:?}, expected it clamped to match {clamped_ops:?}"
+        );
+    }
+
+    #[test]
+    fn a_zero_radius_rect_uses_the_cheap_rectangle_operator_not_beziers() {
+        // The plain "re" operator is one line of the content stream; four
+        // Béziers for square corners is eight times the bytes for a printer
+        // to parse for no visible difference on the page.
+        let a4 = PageSize::new(210.0, 297.0);
+        let shape = PlacedShape::outline(Drawing::Rect {
+            x_mm: 10.0,
+            y_mm: 10.0,
+            width_mm: 20.0,
+            height_mm: 30.0,
+            radius_mm: 0.0,
+        });
+        let ops = shape_operations(&a4, &shape);
+        let operators: Vec<&str> = ops.iter().map(|op| op.operator.as_str()).collect();
+        assert!(operators.contains(&"re"), "{operators:?}");
+        assert!(!operators.contains(&"c"), "{operators:?}");
+    }
+
+    #[test]
+    fn a_dash_pattern_is_converted_to_points_not_left_in_millimetres() {
+        let a4 = PageSize::new(210.0, 297.0);
+        let shape = PlacedShape {
+            drawing: Drawing::Line {
+                from: (10.0, 10.0),
+                to: (60.0, 10.0),
+            },
+            stroke: Some((0.0, 0.0, 0.0)),
+            fill: None,
+            width_mm: 0.5,
+            dash_mm: Some((3.0, 1.5)),
+        };
+        let ops = shape_operations(&a4, &shape);
+        let dash_op = ops
+            .iter()
+            .find(|op| op.operator == "d")
+            .expect("no dash operator was emitted");
+        let array = dash_op.operands[0]
+            .as_array()
+            .expect("dash operand is not an array");
+        let on = array[0].as_float().unwrap() as f64;
+        let off = array[1].as_float().unwrap() as f64;
+        assert!(
+            (on - mm_to_pt(3.0)).abs() < 1e-3,
+            "expected on-length {} pt, got {on}",
+            mm_to_pt(3.0)
+        );
+        assert!(
+            (off - mm_to_pt(1.5)).abs() < 1e-3,
+            "expected off-length {} pt, got {off}",
+            mm_to_pt(1.5)
+        );
+    }
+
+    #[test]
+    fn the_line_width_is_written_in_points_not_millimetres() {
+        // A 2mm line written as "2 w" would be the better part of an inch of
+        // black on the finished page, since PDF widths are always in
+        // user-space points, never in the page's own units.
+        let a4 = PageSize::new(210.0, 297.0);
+        let shape = PlacedShape {
+            drawing: Drawing::Line {
+                from: (10.0, 10.0),
+                to: (60.0, 10.0),
+            },
+            stroke: Some((0.0, 0.0, 0.0)),
+            fill: None,
+            width_mm: 2.0,
+            dash_mm: None,
+        };
+        let ops = shape_operations(&a4, &shape);
+        let width_op = ops
+            .iter()
+            .find(|op| op.operator == "w")
+            .expect("no width operator was emitted");
+        let got = width_op.operands[0].as_float().unwrap() as f64;
+        let expected = mm_to_pt(2.0);
+        assert!(
+            (got - expected).abs() < 1e-3,
+            "expected {expected} pt, got {got}"
+        );
+    }
+
+    #[test]
+    fn an_empty_path_draws_nothing_and_does_not_panic() {
+        // A path can arrive with no points if whatever built it was
+        // cancelled partway through; this must be a no-op, not a crash that
+        // takes an otherwise-finished print job down with it.
+        let a4 = PageSize::new(210.0, 297.0);
+        let shape = PlacedShape {
+            drawing: Drawing::Path {
+                points: vec![],
+                closed: false,
+            },
+            stroke: Some((0.0, 0.0, 0.0)),
+            fill: Some((0.0, 0.0, 0.0)),
+            width_mm: 0.35,
+            dash_mm: None,
+        };
+        let ops = shape_operations(&a4, &shape);
+        assert!(ops.is_empty(), "{ops:?}");
+    }
+
+    #[test]
+    fn write_page_content_with_shapes_produces_a_loadable_pdf() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("d.pdf");
+        let a4 = PageSize::new(210.0, 297.0);
+
+        let shapes = vec![
+            PlacedShape::outline(Drawing::Rect {
+                x_mm: 20.0,
+                y_mm: 20.0,
+                width_mm: 50.0,
+                height_mm: 30.0,
+                radius_mm: 3.0,
+            }),
+            PlacedShape {
+                drawing: Drawing::Ellipse {
+                    centre: (100.0, 150.0),
+                    radius_x_mm: 15.0,
+                    radius_y_mm: 10.0,
+                },
+                stroke: Some((0.0, 0.0, 0.0)),
+                fill: Some((0.9, 0.2, 0.2)),
+                width_mm: 0.5,
+                dash_mm: Some((2.0, 1.0)),
+            },
+        ];
+
+        write_page_content(&path, &[a4], &[vec![line("Approved")]], &[shapes], "t", None)
+            .unwrap();
+
+        let doc = Document::load(&path).unwrap();
+        let pages = doc.get_pages();
+        assert_eq!(pages.len(), 1, "{pages:?}");
     }
 }

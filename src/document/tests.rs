@@ -29,6 +29,29 @@ fn dejavu() -> Option<EmbeddedFont> {
     path.is_file().then(|| EmbeddedFont::load(&path).unwrap())
 }
 
+/// A drawing with a black outline, no fill, and a 1 mm line — the plainest
+/// thing `check` will accept, ready to be customised by each test.
+fn shape(kind: ShapeKind) -> Shape {
+    Shape {
+        id: 0,
+        page: 1,
+        kind,
+        stroke: Some("#000000".into()),
+        fill: None,
+        width_mm: 1.0,
+        dash_mm: None,
+    }
+}
+
+fn line(x1_mm: f64, y1_mm: f64, x2_mm: f64, y2_mm: f64) -> Shape {
+    shape(ShapeKind::Line {
+        x1_mm,
+        y1_mm,
+        x2_mm,
+        y2_mm,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Making one, and writing on it
 // ---------------------------------------------------------------------------
@@ -594,4 +617,621 @@ fn a_document_becomes_a_pdf_at_the_right_size() {
 
     let written = lopdf::Document::load(&path).unwrap();
     assert_eq!(written.get_pages().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Colours
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_hex_colour_reads_each_channel_separately() {
+    let (r, g, b) = parse_colour("#1a2b3c").unwrap();
+    assert_eq!(r, 0x1a as f64 / 255.0, "red channel wrong: got {r}");
+    assert_eq!(g, 0x2b as f64 / 255.0, "green channel wrong: got {g}");
+    assert_eq!(b, 0x3c as f64 / 255.0, "blue channel wrong: got {b}");
+}
+
+#[test]
+fn the_rgb_shorthand_repeats_each_digit_rather_than_just_padding_it() {
+    // #abc is shorthand for #aabbcc: the digit is repeated (0xa -> 0xaa), not
+    // shifted into the top nibble (0xa -> 0xa0). The two give visibly
+    // different colours, so a box someone drew as "#abc" must come out
+    // identical to one drawn as "#aabbcc".
+    let short = parse_colour("#abc").unwrap();
+    let long = parse_colour("#aabbcc").unwrap();
+    assert_eq!(short, long, "#abc did not expand to #aabbcc: got {short:?}");
+}
+
+#[test]
+fn fff_shorthand_is_exactly_white_not_fifteen_sixteenths_of_it() {
+    // 0xf repeated is 0xff = 255 = full white (multiply by 17). Multiplying by
+    // 16 instead (a common off-by-one for this exact trick) gives 0xf0 = 240,
+    // i.e. 0.9375 — a white that is a shade of grey by the time it is printed.
+    let white = parse_colour("#fff").unwrap();
+    assert_eq!(
+        white,
+        (1.0, 1.0, 1.0),
+        "#fff should be pure white, got {white:?}"
+    );
+}
+
+#[test]
+fn every_named_colour_parses_to_its_documented_value() {
+    // These names exist so nobody has to look up a hex triple to draw a red
+    // box; if one silently mapped to the wrong numbers the box would be the
+    // wrong colour with no error to catch it.
+    let cases = [
+        ("black", (0.0, 0.0, 0.0)),
+        ("white", (1.0, 1.0, 1.0)),
+        ("grey", (0.5, 0.5, 0.5)),
+        ("gray", (0.5, 0.5, 0.5)),
+        ("lightgrey", (0.85, 0.85, 0.85)),
+        ("lightgray", (0.85, 0.85, 0.85)),
+        ("red", (0.8, 0.0, 0.0)),
+        ("green", (0.0, 0.5, 0.0)),
+        ("blue", (0.0, 0.0, 0.8)),
+        ("yellow", (1.0, 0.85, 0.0)),
+        ("orange", (0.95, 0.5, 0.0)),
+    ];
+    for (name, expected) in cases {
+        let got = parse_colour(name).unwrap();
+        assert_eq!(got, expected, "{name:?} parsed as {got:?}, expected {expected:?}");
+    }
+}
+
+#[test]
+fn colour_names_and_hex_digits_do_not_care_about_letter_case() {
+    // A colour is as likely to be typed with caps lock on or pasted from
+    // somewhere that upper-cased it as not; refusing it on case alone would be
+    // a needless surprise.
+    assert_eq!(
+        parse_colour("RED").unwrap(),
+        parse_colour("red").unwrap(),
+        "RED and red should be the same colour"
+    );
+    assert_eq!(
+        parse_colour("#FF0000").unwrap(),
+        parse_colour("#ff0000").unwrap(),
+        "#FF0000 and #ff0000 should be the same colour"
+    );
+    assert_eq!(
+        parse_colour("#ABC").unwrap(),
+        parse_colour("#abc").unwrap(),
+        "#ABC and #abc should be the same colour"
+    );
+}
+
+#[test]
+fn a_stray_space_around_a_colour_is_ignored() {
+    // Colours arrive from the command line or a config file someone hand
+    // edited, and it is easy to leave a space in either without noticing.
+    assert_eq!(
+        parse_colour(" red").unwrap(),
+        parse_colour("red").unwrap(),
+        "a leading space changed the colour"
+    );
+    assert_eq!(
+        parse_colour("red ").unwrap(),
+        parse_colour("red").unwrap(),
+        "a trailing space changed the colour"
+    );
+    assert_eq!(
+        parse_colour(" #abc123 ").unwrap(),
+        parse_colour("#abc123").unwrap(),
+        "surrounding spaces changed a hex colour"
+    );
+}
+
+#[test]
+fn a_colour_that_is_neither_a_name_nor_valid_hex_is_refused_and_named() {
+    // Whoever typed the rubbish colour needs to see exactly what they typed —
+    // not a generic complaint — plus be told the syntax that would work,
+    // otherwise the error is a dead end rather than something they can fix.
+    for bad in ["reddish", "#12345", "#gggggg", "notacolour", "#12"] {
+        let err = parse_colour(bad).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("{bad:?}")),
+            "error for {bad:?} did not name what was typed: {err}"
+        );
+        assert!(
+            err.contains("#rrggbb"),
+            "error for {bad:?} did not say how to write a colour: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: ids are shared with text and never reused
+// ---------------------------------------------------------------------------
+
+#[test]
+fn text_and_drawings_draw_from_one_sequence_of_ids_with_none_repeated() {
+    // A printed record refers to both items and shapes purely by number. If
+    // text and drawings each kept their own counter, a piece of text and a
+    // shape could end up sharing an id, and looking one up in the printed
+    // record would not say which kind it meant.
+    let mut doc = Document::blank(A4, 1);
+    let t1 = doc.add(item("one", 10.0, 10.0)).unwrap();
+    let s1 = doc.draw(line(0.0, 0.0, 10.0, 10.0)).unwrap();
+    let t2 = doc.add(item("two", 10.0, 20.0)).unwrap();
+    let s2 = doc.draw(line(0.0, 0.0, 20.0, 20.0)).unwrap();
+
+    let ids = [t1, s1, t2, s2];
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            assert_ne!(
+                ids[i], ids[j],
+                "ids {ids:?} were not all distinct"
+            );
+        }
+    }
+}
+
+#[test]
+fn erasing_a_drawing_does_not_free_its_id_for_reuse() {
+    // The same reasoning as text: an erased shape's number must never come
+    // back, whether it is handed to a new drawing or a new piece of text.
+    let mut doc = Document::blank(A4, 1);
+    let first = doc.draw(line(0.0, 0.0, 10.0, 10.0)).unwrap();
+    doc.erase_shape(first).unwrap();
+
+    let second_shape = doc.draw(line(5.0, 5.0, 15.0, 15.0)).unwrap();
+    assert_ne!(
+        first, second_shape,
+        "erasing {first} let it be handed straight back out"
+    );
+
+    let text = doc.add(item("after erasing", 10.0, 10.0)).unwrap();
+    assert_ne!(text, first, "text reused an erased drawing's id");
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: what is new since it was printed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn before_printing_every_drawing_counts_as_new() {
+    let mut doc = Document::blank(A4, 1);
+    doc.draw(line(0.0, 0.0, 10.0, 10.0)).unwrap();
+    doc.draw(line(0.0, 0.0, 20.0, 20.0)).unwrap();
+
+    assert_eq!(
+        doc.shapes_added_since_printing().len(),
+        2,
+        "{:?}",
+        doc.shapes_added_since_printing()
+    );
+}
+
+#[test]
+fn after_printing_no_drawing_is_new_until_one_is_added() {
+    let mut doc = Document::blank(A4, 1);
+    doc.draw(line(0.0, 0.0, 10.0, 10.0)).unwrap();
+    doc.mark_printed();
+
+    assert!(
+        doc.shapes_added_since_printing().is_empty(),
+        "a freshly printed drawing was reported as new: {:?}",
+        doc.shapes_added_since_printing()
+    );
+
+    let fresh = doc.draw(line(5.0, 5.0, 15.0, 15.0)).unwrap();
+    let added = doc.shapes_added_since_printing();
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert_eq!(
+        added[0].id, fresh,
+        "the delta contained the wrong drawing: {:?}",
+        added[0]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: a document older than drawing support
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_document_saved_before_drawings_existed_still_loads_without_phantom_shapes() {
+    // A file written by an older Onionskin has `printed` (it has been through
+    // the press once) but no `printed_shapes` key and no `shapes` key at all —
+    // not empty arrays, entirely absent, because those fields did not exist
+    // yet. Treating a missing key as "unknown" rather than "empty" would
+    // either refuse to load a perfectly good document or invent drawings that
+    // were never there.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.onionskin");
+    std::fs::write(
+        &path,
+        r#"{"page":{"width_mm":210,"height_mm":297},"pages":1,
+            "items":[{"id":1,"page":1,"x_mm":10,"y_mm":10,"text":"x","size_pt":11,"font":"Helvetica"}],
+            "printed":[{"id":1,"page":1,"x_mm":10,"y_mm":10,"text":"x","size_pt":11,"font":"Helvetica"}]}"#,
+    )
+    .unwrap();
+
+    let doc = Document::load(&path).unwrap();
+    assert!(
+        doc.shapes.is_empty(),
+        "an old document grew drawings out of nowhere: {:?}",
+        doc.shapes
+    );
+    assert!(
+        doc.shapes_added_since_printing().is_empty(),
+        "an old document claimed phantom new drawings: {:?}",
+        doc.shapes_added_since_printing()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: saving and re-opening
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_document_with_one_of_every_drawing_kind_survives_a_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("drawings.onionskin");
+
+    let mut doc = Document::blank(A4, 1);
+
+    let mut a_line = line(10.0, 10.0, 50.0, 50.0);
+    a_line.fill = Some("#00ff00".into());
+    a_line.width_mm = 2.0;
+    a_line.dash_mm = Some((4.0, 2.0));
+    doc.draw(a_line).unwrap();
+
+    let mut rect = shape(ShapeKind::Rect {
+        x_mm: 10.0,
+        y_mm: 10.0,
+        width_mm: 30.0,
+        height_mm: 20.0,
+        radius_mm: 3.0,
+    });
+    rect.fill = Some("#0000ff".into());
+    rect.width_mm = 1.5;
+    doc.draw(rect).unwrap();
+
+    let mut ellipse = shape(ShapeKind::Ellipse {
+        x_mm: 50.0,
+        y_mm: 50.0,
+        radius_x_mm: 10.0,
+        radius_y_mm: 5.0,
+    });
+    ellipse.fill = Some("#ffff00".into());
+    doc.draw(ellipse).unwrap();
+
+    let mut a_path = shape(ShapeKind::Path {
+        points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)],
+        closed: true,
+    });
+    a_path.fill = Some("#ff00ff".into());
+    a_path.dash_mm = Some((1.0, 1.0));
+    doc.draw(a_path).unwrap();
+
+    doc.save(&path).unwrap();
+    let opened = Document::load(&path).unwrap();
+
+    assert_eq!(
+        opened, doc,
+        "a drawing changed on the way through a file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: bounds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_lines_bounds_extend_half_its_width_past_each_end() {
+    // A pen 2 mm wide does not draw an infinitely thin line: the ink actually
+    // laid down extends 1 mm beyond each endpoint and to each side. Reporting
+    // the bare endpoints as the bounds would understate how much of the page
+    // the drawing actually covers.
+    let mut l = line(0.0, 0.0, 10.0, 0.0);
+    l.width_mm = 2.0;
+    let bounds = l.bounds();
+    assert_eq!(
+        bounds,
+        (-1.0, -1.0, 11.0, 1.0),
+        "a 2 mm line from (0,0) to (10,0) should have bounds (-1,-1,11,1), got {bounds:?}"
+    );
+}
+
+#[test]
+fn a_boxs_bounds_cover_its_corners_plus_its_line_width() {
+    let mut r = shape(ShapeKind::Rect {
+        x_mm: 10.0,
+        y_mm: 20.0,
+        width_mm: 30.0,
+        height_mm: 40.0,
+        radius_mm: 0.0,
+    });
+    r.width_mm = 2.0;
+    let bounds = r.bounds();
+    assert_eq!(
+        bounds,
+        (9.0, 19.0, 41.0, 61.0),
+        "a 30x40 box at (10,20) with a 2 mm outline should have bounds (9,19,41,61), got {bounds:?}"
+    );
+}
+
+#[test]
+fn an_ellipses_bounds_are_its_centre_plus_and_minus_its_radius() {
+    let mut e = shape(ShapeKind::Ellipse {
+        x_mm: 100.0,
+        y_mm: 50.0,
+        radius_x_mm: 20.0,
+        radius_y_mm: 8.0,
+    });
+    e.width_mm = 0.0; // isolate the radius from the line-width padding
+    let bounds = e.bounds();
+    assert_eq!(
+        bounds,
+        (80.0, 42.0, 120.0, 58.0),
+        "an ellipse centred at (100,50) with radii (20,8) should have bounds \
+         (80,42,120,58), got {bounds:?}"
+    );
+}
+
+#[test]
+fn a_paths_bounds_cover_every_point_it_visits() {
+    let mut p = shape(ShapeKind::Path {
+        points: vec![(5.0, 40.0), (30.0, 5.0), (12.0, 20.0)],
+        closed: false,
+    });
+    p.width_mm = 0.0;
+    let bounds = p.bounds();
+    assert_eq!(
+        bounds,
+        (5.0, 5.0, 30.0, 40.0),
+        "the bounds should span the extremes of all three points, got {bounds:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: what check refuses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_drawing_with_no_outline_and_no_fill_is_refused() {
+    // With neither stroke nor fill nothing would appear on the printed page —
+    // it would be a shape that exists in the document but not on the paper,
+    // which is exactly the kind of silent nothing this format is meant to
+    // avoid.
+    let mut doc = Document::blank(A4, 1);
+    let mut invisible = line(0.0, 0.0, 10.0, 10.0);
+    invisible.stroke = None;
+    invisible.fill = None;
+    let err = doc.draw(invisible).unwrap_err().to_string();
+    assert!(
+        err.contains("neither an outline nor a fill"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_negative_line_width_is_refused() {
+    // A negative width is not a thickness at all; letting it through would
+    // also flip the sign of the padding bounds() applies.
+    let mut doc = Document::blank(A4, 1);
+    let mut bad = line(0.0, 0.0, 10.0, 10.0);
+    bad.width_mm = -1.0;
+    let err = doc.draw(bad).unwrap_err().to_string();
+    assert!(err.contains("which is not a width"), "{err}");
+    assert!(err.contains("-1"), "the width itself should be named: {err}");
+}
+
+#[test]
+fn a_non_finite_line_width_is_refused() {
+    // NaN and infinity both need an explicit finiteness check: NaN fails
+    // every ordinary comparison (so a bare "< 0.0" guard would let it slip
+    // through as neither negative nor positive), and infinity is not a real
+    // thickness either.
+    for bad_width in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut doc = Document::blank(A4, 1);
+        let mut bad = line(0.0, 0.0, 10.0, 10.0);
+        bad.width_mm = bad_width;
+        let err = doc.draw(bad).unwrap_err().to_string();
+        assert!(
+            err.contains("which is not a width"),
+            "width {bad_width}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_drawing_with_an_unparsable_colour_is_refused() {
+    let mut doc = Document::blank(A4, 1);
+    let mut bad = line(0.0, 0.0, 10.0, 10.0);
+    bad.stroke = Some("marmalade".into());
+    let err = doc.draw(bad).unwrap_err().to_string();
+    assert!(err.contains("marmalade"), "{err}");
+    assert!(err.contains("#rrggbb"), "{err}");
+}
+
+#[test]
+fn a_path_of_fewer_than_two_points_is_refused() {
+    // A single point has no line to draw between; allowing it would store a
+    // "drawing" that renders as nothing while claiming to be one.
+    let mut doc = Document::blank(A4, 1);
+    let lone = shape(ShapeKind::Path {
+        points: vec![(5.0, 5.0)],
+        closed: false,
+    });
+    let err = doc.draw(lone).unwrap_err().to_string();
+    assert!(err.contains("takes two to"), "{err}");
+    assert!(err.contains("1 point"), "{err}");
+}
+
+#[test]
+fn a_drawing_on_a_page_the_document_does_not_have_is_refused() {
+    // Unlike `add`/`draw`, which grow the document to fit, a document loaded
+    // from disk might have been hand-edited (or come from an older, buggier
+    // version) to reference a page count that does not match its content.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad.onionskin");
+
+    let mut doc = Document::blank(A4, 1);
+    let mut stray = line(0.0, 0.0, 10.0, 10.0);
+    stray.id = 9;
+    stray.page = 4;
+    doc.shapes.push(stray);
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    let err = Document::load(&path).unwrap_err().to_string();
+    assert!(err.contains("drawing 9 is on page 4"), "{err}");
+    assert!(err.contains("1 pages"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: laying out and erasing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shape_layout_places_every_drawing_on_its_own_page_and_drops_nothing() {
+    let mut doc = Document::blank(A4, 3);
+    let mut first = line(0.0, 0.0, 10.0, 10.0);
+    first.page = 1;
+    doc.draw(first).unwrap();
+    let mut second = shape(ShapeKind::Rect {
+        x_mm: 0.0,
+        y_mm: 0.0,
+        width_mm: 5.0,
+        height_mm: 5.0,
+        radius_mm: 0.0,
+    });
+    second.page = 1;
+    doc.draw(second).unwrap();
+    let mut third = shape(ShapeKind::Ellipse {
+        x_mm: 0.0,
+        y_mm: 0.0,
+        radius_x_mm: 5.0,
+        radius_y_mm: 5.0,
+    });
+    third.page = 3;
+    doc.draw(third).unwrap();
+    // Page 2 is deliberately left with nothing on it.
+
+    let all: Vec<&Shape> = doc.shapes.iter().collect();
+    let layout = doc.shape_layout(&all);
+
+    assert_eq!(
+        layout.len(),
+        3,
+        "there should be one list per page, even an empty one: {layout:?}"
+    );
+    assert_eq!(
+        layout[0].len(),
+        2,
+        "page one should keep both its drawings: {:?}",
+        layout[0]
+    );
+    assert!(
+        layout[1].is_empty(),
+        "page two should have nothing drawn on it: {:?}",
+        layout[1]
+    );
+    assert_eq!(
+        layout[2].len(),
+        1,
+        "page three lost its drawing: {:?}",
+        layout[2]
+    );
+}
+
+#[test]
+fn erasing_a_drawing_removes_only_that_one() {
+    let mut doc = Document::blank(A4, 1);
+    let keep = doc.draw(line(0.0, 0.0, 10.0, 10.0)).unwrap();
+    let gone = doc.draw(line(20.0, 20.0, 30.0, 30.0)).unwrap();
+
+    let erased = doc.erase_shape(gone).unwrap();
+    assert_eq!(erased.id, gone, "erase_shape returned the wrong drawing");
+    assert_eq!(doc.shapes.len(), 1, "{:?}", doc.shapes);
+    assert_eq!(
+        doc.shapes[0].id, keep,
+        "erase_shape took the one that should have stayed: {:?}",
+        doc.shapes[0]
+    );
+}
+
+#[test]
+fn erasing_a_drawing_that_is_not_there_says_so() {
+    let mut doc = Document::blank(A4, 1);
+    let err = doc.erase_shape(99).unwrap_err().to_string();
+    assert!(err.contains("no item numbered 99"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Drawing: describing itself
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_shape_describes_itself_by_what_it_looks_like_not_just_its_stored_kind() {
+    // A box and a rounded box are the same enum variant with a different
+    // radius, and a circle is really an ellipse whose two radii happen to
+    // match — describe() has to look past the variant name to tell these
+    // apart, which is exactly the sort of thing that silently stops working
+    // if the radius comparison is ever dropped or its threshold loosened too
+    // far.
+    let cases: Vec<(Shape, &str)> = vec![
+        (line(0.0, 0.0, 1.0, 1.0), "line"),
+        (
+            shape(ShapeKind::Rect {
+                x_mm: 0.0,
+                y_mm: 0.0,
+                width_mm: 10.0,
+                height_mm: 10.0,
+                radius_mm: 0.0,
+            }),
+            "box",
+        ),
+        (
+            shape(ShapeKind::Rect {
+                x_mm: 0.0,
+                y_mm: 0.0,
+                width_mm: 10.0,
+                height_mm: 10.0,
+                radius_mm: 2.0,
+            }),
+            "rounded box",
+        ),
+        (
+            shape(ShapeKind::Ellipse {
+                x_mm: 0.0,
+                y_mm: 0.0,
+                radius_x_mm: 5.0,
+                radius_y_mm: 5.0,
+            }),
+            "circle",
+        ),
+        (
+            shape(ShapeKind::Ellipse {
+                x_mm: 0.0,
+                y_mm: 0.0,
+                radius_x_mm: 5.0,
+                radius_y_mm: 8.0,
+            }),
+            "ellipse",
+        ),
+        (
+            shape(ShapeKind::Path {
+                points: vec![(0.0, 0.0), (1.0, 1.0)],
+                closed: false,
+            }),
+            "path of 2 points",
+        ),
+        (
+            shape(ShapeKind::Path {
+                points: vec![(0.0, 0.0), (1.0, 1.0), (1.0, 0.0)],
+                closed: true,
+            }),
+            "polygon of 3 points",
+        ),
+    ];
+    for (s, expected) in cases {
+        let got = s.describe();
+        assert_eq!(
+            got, expected,
+            "{:?} described itself as {got:?}, expected {expected:?}",
+            s.kind
+        );
+    }
 }

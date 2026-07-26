@@ -15,8 +15,25 @@ use crate::geometry::PageSize;
 
 /// Extensions LibreOffice will convert. Anything else is refused up front
 /// rather than failing deep inside a subprocess.
+///
+/// Everything LibreOffice opens, not only the word-processor formats. A
+/// spreadsheet and a slide deck are printed onto paper like anything else, and
+/// somebody adding a line to a printed invoice does not care that the invoice
+/// began life in Calc. Refusing those was never a decision — it was a list
+/// written when the only thing being tested was Word.
 pub const CONVERTIBLE: &[&str] = &[
-    "doc", "docx", "docm", "dot", "dotx", "odt", "ott", "fodt", "rtf", "txt", "html", "htm",
+    // Word processors.
+    "doc", "docx", "docm", "dot", "dotx", "dotm", "odt", "ott", "fodt", "sxw", "stw", "rtf",
+    "wpd", "wps", "abw", "lwp", "uot", "hwp",
+    // Spreadsheets.
+    "xls", "xlsx", "xlsm", "xlt", "xltx", "ods", "ots", "fods", "sxc", "csv", "tsv", "dif",
+    "slk", "dbf", "numbers",
+    // Presentations.
+    "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx", "odp", "otp", "fodp", "sxi", "key",
+    // Drawings.
+    "odg", "otg", "fodg", "sxd", "vsd", "vsdx", "pub", "cdr", "wmf", "emf",
+    // Plain and marked-up text.
+    "txt", "text", "html", "htm", "xhtml", "xml", "md",
 ];
 
 /// Formats that need no conversion at all.
@@ -50,20 +67,50 @@ pub fn find_soffice() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    for name in ["soffice", "libreoffice"] {
+    for name in ["soffice", "libreoffice", "libreoffice7.6", "openoffice"] {
         if let Some(found) = which(name) {
             return Some(found);
         }
     }
     for candidate in [
+        // macOS, including the two names the project has shipped under.
         "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        "/Applications/OpenOffice.app/Contents/MacOS/soffice",
+        // Linux, installed by a package manager.
         "/usr/lib/libreoffice/program/soffice",
+        "/usr/lib64/libreoffice/program/soffice",
+        "/usr/local/lib/libreoffice/program/soffice",
+        "/opt/libreoffice/program/soffice",
+        // Snap and Flatpak put it somewhere of their own, and a great many
+        // desktop Linux installs get it that way now.
+        "/snap/bin/libreoffice",
+        "/var/lib/snapd/snap/bin/libreoffice",
+        "/var/lib/flatpak/exports/bin/org.libreoffice.LibreOffice",
+        "/usr/lib/openoffice/program/soffice",
+        // Windows.
         "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
         "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
+        "C:\\Program Files\\LibreOffice 7\\program\\soffice.exe",
+        "C:\\Program Files\\OpenOffice\\program\\soffice.exe",
+        "C:\\Program Files (x86)\\OpenOffice 4\\program\\soffice.exe",
     ] {
         let path = PathBuf::from(candidate);
         if path.exists() {
             return Some(path);
+        }
+    }
+
+    // A per-user Flatpak, which lives under the home directory and so cannot
+    // be written down as a fixed path.
+    if let Ok(home) = std::env::var("HOME") {
+        for tail in [
+            ".local/share/flatpak/exports/bin/org.libreoffice.LibreOffice",
+            "Applications/LibreOffice.app/Contents/MacOS/soffice",
+        ] {
+            let path = PathBuf::from(&home).join(tail);
+            if path.exists() {
+                return Some(path);
+            }
         }
     }
     None

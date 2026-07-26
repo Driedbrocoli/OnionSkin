@@ -7,6 +7,7 @@ pub mod font;
 pub mod geometry;
 pub mod install;
 pub mod letters;
+pub mod office;
 pub mod package;
 pub mod pdf;
 pub mod pipeline;

@@ -174,6 +174,63 @@ type Measurer<'a> = Box<dyn Fn(&str) -> Result<f64, DocumentError> + 'a>;
 
 const MM_PER_PT: f64 = 25.4 / 72.0;
 
+/// A drawing on the page: a line, a box, an ellipse, or a run of points.
+///
+/// Kept apart from [`Item`] rather than folded into it because the two share
+/// almost nothing — a shape has no font, no size in points, no text to wrap —
+/// and an enum of the two would be a struct of mostly-empty fields wherever it
+/// was touched. What they do share is the discipline: a stable id, a page, and
+/// a place on that page in millimetres.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Shape {
+    pub id: u32,
+    pub page: usize,
+    pub kind: ShapeKind,
+    /// The outline's colour as `#rrggbb`, or none for no outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<String>,
+    /// The inside's colour as `#rrggbb`, or none to leave it hollow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    /// Outline thickness in millimetres.
+    pub width_mm: f64,
+    /// Dash length and gap in millimetres.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash_mm: Option<(f64, f64)>,
+}
+
+/// What the shape is, and where. All measurements are millimetres from the
+/// top-left corner of the paper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "lowercase")]
+pub enum ShapeKind {
+    Line {
+        x1_mm: f64,
+        y1_mm: f64,
+        x2_mm: f64,
+        y2_mm: f64,
+    },
+    Rect {
+        x_mm: f64,
+        y_mm: f64,
+        width_mm: f64,
+        height_mm: f64,
+        #[serde(default)]
+        radius_mm: f64,
+    },
+    Ellipse {
+        x_mm: f64,
+        y_mm: f64,
+        radius_x_mm: f64,
+        radius_y_mm: f64,
+    },
+    Path {
+        points: Vec<(f64, f64)>,
+        #[serde(default)]
+        closed: bool,
+    },
+}
+
 /// A page of paper, and everything written on it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
@@ -182,10 +239,18 @@ pub struct Document {
     /// How many sheets. Kept explicit so a blank page can exist on purpose.
     pub pages: usize,
     pub items: Vec<Item>,
+    /// The drawings. Empty in every document written before there were any,
+    /// which is why it defaults rather than being required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shapes: Vec<Shape>,
     /// What was on the sheets the last time this was printed, if it has been.
     /// This is the whole basis of the delta: not a guess, a record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed: Option<Vec<Item>>,
+    /// And which drawings were on them. Held separately from `printed` so an
+    /// older document, which has one and not the other, still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_shapes: Option<Vec<Shape>>,
     /// The next id to hand out. Ids are never reused, so a printed record
     /// always refers to the same piece of text.
     #[serde(default)]
@@ -221,7 +286,9 @@ impl Document {
             page,
             pages: pages.max(1),
             items: Vec::new(),
+            shapes: Vec::new(),
             printed: None,
+            printed_shapes: None,
             next_id: 1,
         }
     }
@@ -303,6 +370,47 @@ impl Document {
                 )));
             }
         }
+        for shape in &self.shapes {
+            if shape.page == 0 || shape.page > self.pages {
+                return Err(DocumentError::Invalid(format!(
+                    "drawing {} is on page {}, and the document has {} pages",
+                    shape.id, shape.page, self.pages
+                )));
+            }
+            if !shape.width_mm.is_finite() || shape.width_mm < 0.0 {
+                return Err(DocumentError::Invalid(format!(
+                    "drawing {} has a line width of {}, which is not a width",
+                    shape.id, shape.width_mm
+                )));
+            }
+            if shape.stroke.is_none() && shape.fill.is_none() {
+                return Err(DocumentError::Invalid(format!(
+                    "drawing {} has neither an outline nor a fill, so nothing \
+                     would appear on the paper",
+                    shape.id
+                )));
+            }
+            for colour in [shape.stroke.as_deref(), shape.fill.as_deref()].into_iter().flatten() {
+                parse_colour(colour)?;
+            }
+            let (x0, y0, x1, y1) = shape.bounds();
+            if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
+                return Err(DocumentError::Invalid(format!(
+                    "drawing {} is placed at a position that is not a number",
+                    shape.id
+                )));
+            }
+            if let ShapeKind::Path { points, .. } = &shape.kind {
+                if points.len() < 2 {
+                    return Err(DocumentError::Invalid(format!(
+                        "drawing {} is a path of {} point(s); it takes two to \
+                         draw a line",
+                        shape.id,
+                        points.len()
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -378,6 +486,7 @@ impl Document {
     /// Note that the document as it stands is now on paper.
     pub fn mark_printed(&mut self) {
         self.printed = Some(self.items.clone());
+        self.printed_shapes = Some(self.shapes.clone());
     }
 
     pub fn has_been_printed(&self) -> bool {
@@ -395,6 +504,197 @@ impl Document {
             .collect()
     }
 
+    /// Which drawings have been added since the sheet was printed.
+    ///
+    /// A document written before Onionskin could draw has `printed` recorded
+    /// and `printed_shapes` missing. That is not "no drawings were printed" —
+    /// it is "nothing was asked". Since such a document has no shapes either,
+    /// the two readings agree, and treating a missing record as an empty one is
+    /// safe. It stops being safe the moment a shape is added, and by then the
+    /// record has been written.
+    pub fn shapes_added_since_printing(&self) -> Vec<&Shape> {
+        let Some(printed) = &self.printed_shapes else {
+            if self.printed.is_some() {
+                // Printed before there were drawings: anything present now is
+                // new, which is exactly what an empty record would say.
+                return self.shapes.iter().collect();
+            }
+            return self.shapes.iter().collect();
+        };
+        self.shapes
+            .iter()
+            .filter(|shape| !printed.iter().any(|was| was == *shape))
+            .collect()
+    }
+
+    /// Put a drawing on the page, and give it its number.
+    pub fn draw(&mut self, mut shape: Shape) -> Result<u32, DocumentError> {
+        shape.id = self.next_id;
+        self.next_id += 1;
+        if shape.page == 0 {
+            shape.page = 1;
+        }
+        self.pages = self.pages.max(shape.page);
+        let id = shape.id;
+        self.shapes.push(shape);
+        self.check()?;
+        Ok(id)
+    }
+
+    /// Take a drawing off the page.
+    pub fn erase_shape(&mut self, id: u32) -> Result<Shape, DocumentError> {
+        let at = self
+            .shapes
+            .iter()
+            .position(|shape| shape.id == id)
+            .ok_or(DocumentError::NoSuchItem(id))?;
+        Ok(self.shapes.remove(at))
+    }
+
+    /// The drawings on each page, ready for the PDF writer.
+    pub fn shape_layout(&self, shapes: &[&Shape]) -> Vec<Vec<crate::pdf::PlacedShape>> {
+        let mut per_page: Vec<Vec<crate::pdf::PlacedShape>> = vec![Vec::new(); self.pages];
+        for shape in shapes {
+            let index = shape.page.saturating_sub(1);
+            if index < per_page.len() {
+                per_page[index].push(shape.placed());
+            }
+        }
+        per_page
+    }
+}
+
+impl Shape {
+    /// Turn it into what the PDF writer draws.
+    pub fn placed(&self) -> crate::pdf::PlacedShape {
+        use crate::pdf::Drawing;
+        let drawing = match &self.kind {
+            ShapeKind::Line {
+                x1_mm,
+                y1_mm,
+                x2_mm,
+                y2_mm,
+            } => Drawing::Line {
+                from: (*x1_mm, *y1_mm),
+                to: (*x2_mm, *y2_mm),
+            },
+            ShapeKind::Rect {
+                x_mm,
+                y_mm,
+                width_mm,
+                height_mm,
+                radius_mm,
+            } => Drawing::Rect {
+                x_mm: *x_mm,
+                y_mm: *y_mm,
+                width_mm: *width_mm,
+                height_mm: *height_mm,
+                radius_mm: *radius_mm,
+            },
+            ShapeKind::Ellipse {
+                x_mm,
+                y_mm,
+                radius_x_mm,
+                radius_y_mm,
+            } => Drawing::Ellipse {
+                centre: (*x_mm, *y_mm),
+                radius_x_mm: *radius_x_mm,
+                radius_y_mm: *radius_y_mm,
+            },
+            ShapeKind::Path { points, closed } => Drawing::Path {
+                points: points.clone(),
+                closed: *closed,
+            },
+        };
+        crate::pdf::PlacedShape {
+            drawing,
+            // A colour that will not parse is left off rather than guessed at.
+            // `check` refuses the shape before it is ever stored, so reaching
+            // here with a bad one means somebody built the struct by hand.
+            stroke: self.stroke.as_deref().and_then(|c| parse_colour(c).ok()),
+            fill: self.fill.as_deref().and_then(|c| parse_colour(c).ok()),
+            width_mm: self.width_mm,
+            dash_mm: self.dash_mm,
+        }
+    }
+
+    /// The rectangle the drawing covers, for reporting where it sits.
+    pub fn bounds(&self) -> (f64, f64, f64, f64) {
+        let pad = self.width_mm / 2.0;
+        let (x0, y0, x1, y1) = match &self.kind {
+            ShapeKind::Line {
+                x1_mm,
+                y1_mm,
+                x2_mm,
+                y2_mm,
+            } => (
+                x1_mm.min(*x2_mm),
+                y1_mm.min(*y2_mm),
+                x1_mm.max(*x2_mm),
+                y1_mm.max(*y2_mm),
+            ),
+            ShapeKind::Rect {
+                x_mm,
+                y_mm,
+                width_mm,
+                height_mm,
+                ..
+            } => (
+                x_mm.min(x_mm + width_mm),
+                y_mm.min(y_mm + height_mm),
+                x_mm.max(x_mm + width_mm),
+                y_mm.max(y_mm + height_mm),
+            ),
+            ShapeKind::Ellipse {
+                x_mm,
+                y_mm,
+                radius_x_mm,
+                radius_y_mm,
+            } => (
+                x_mm - radius_x_mm.abs(),
+                y_mm - radius_y_mm.abs(),
+                x_mm + radius_x_mm.abs(),
+                y_mm + radius_y_mm.abs(),
+            ),
+            ShapeKind::Path { points, .. } => {
+                let mut bounds = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                for &(x, y) in points {
+                    bounds.0 = bounds.0.min(x);
+                    bounds.1 = bounds.1.min(y);
+                    bounds.2 = bounds.2.max(x);
+                    bounds.3 = bounds.3.max(y);
+                }
+                if points.is_empty() {
+                    (0.0, 0.0, 0.0, 0.0)
+                } else {
+                    bounds
+                }
+            }
+        };
+        (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+    }
+
+    /// What it is, in a few words.
+    pub fn describe(&self) -> String {
+        match &self.kind {
+            ShapeKind::Line { .. } => "line".into(),
+            ShapeKind::Rect { radius_mm, .. } if *radius_mm > 0.0 => "rounded box".into(),
+            ShapeKind::Rect { .. } => "box".into(),
+            ShapeKind::Ellipse {
+                radius_x_mm,
+                radius_y_mm,
+                ..
+            } if (radius_x_mm - radius_y_mm).abs() < 1e-9 => "circle".into(),
+            ShapeKind::Ellipse { .. } => "ellipse".into(),
+            ShapeKind::Path { points, closed } => {
+                let what = if *closed { "polygon" } else { "path" };
+                format!("{what} of {} points", points.len())
+            }
+        }
+    }
+}
+
+impl Document {
     /// The reasons an overlay cannot be printed onto the existing sheet.
     ///
     /// Ink does not come off paper. If a piece of text that was printed has
@@ -493,14 +793,44 @@ impl Problem {
     }
 }
 
-/// `#rrggbb` to the three numbers a PDF wants.
-fn parse_colour(text: &str) -> Result<(f64, f64, f64), DocumentError> {
-    let hex = text.trim().trim_start_matches('#');
-    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+/// A colour to the three numbers a PDF wants, each from 0 to 1.
+///
+/// Takes `#rrggbb`, the `#rgb` shorthand people know from the web, and a short
+/// list of names. The names are there because somebody drawing a red box round
+/// a paragraph should be able to type `red`, and because a person who has to
+/// look up a hexadecimal triple to draw a line will not draw the line.
+pub fn parse_colour(text: &str) -> Result<(f64, f64, f64), DocumentError> {
+    let text = text.trim();
+    let ink = |v: f64| (v, v, v);
+    match text.to_ascii_lowercase().as_str() {
+        "black" => return Ok(ink(0.0)),
+        "white" => return Ok(ink(1.0)),
+        "grey" | "gray" => return Ok(ink(0.5)),
+        // A light grey, for shading a box behind text without hiding the text.
+        "lightgrey" | "lightgray" => return Ok(ink(0.85)),
+        "red" => return Ok((0.8, 0.0, 0.0)),
+        "green" => return Ok((0.0, 0.5, 0.0)),
+        "blue" => return Ok((0.0, 0.0, 0.8)),
+        "yellow" => return Ok((1.0, 0.85, 0.0)),
+        "orange" => return Ok((0.95, 0.5, 0.0)),
+        _ => {}
+    }
+
+    let hex = text.trim_start_matches('#');
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) || !matches!(hex.len(), 3 | 6) {
         return Err(DocumentError::Invalid(format!(
             "{text:?} is not a colour. Write it as #rrggbb, for example #000000 \
-             for black."
+             for black — or use a name: black, white, grey, red, green, blue, \
+             yellow, orange."
         )));
+    }
+    if hex.len() == 3 {
+        // #abc means #aabbcc.
+        let channel = |at: usize| -> f64 {
+            let digit = hex[at..at + 1].chars().next().and_then(|c| c.to_digit(16));
+            (digit.unwrap_or(0) * 17) as f64 / 255.0
+        };
+        return Ok((channel(0), channel(1), channel(2)));
     }
     let channel = |from: usize| -> f64 {
         u8::from_str_radix(&hex[from..from + 2], 16).unwrap_or(0) as f64 / 255.0

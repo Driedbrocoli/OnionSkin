@@ -20,11 +20,15 @@ went with it.
 | `pipeline` | The whole job, end to end |
 | `scan`     | Finding the sheet in a scan and measuring how it sits |
 | `letters`  | Reading the ink off a registered scan |
-| `document` | A document made from nothing and edited |
+| `document` | A document made from nothing and edited: words and drawings |
 | `font`     | Embedding a font so the printer needs nothing installed |
-| `pdf`      | Writing text into a PDF |
+| `pdf`      | Writing text and shapes into a PDF |
+| `office`   | Writing `.docx` and `.odt`, so a scan becomes something editable |
+| `printer`  | Printing over IPP and scanning over eSCL, both spoken directly |
 | `acquire`  | Driving a scanner through SANE |
 | `web`      | A local HTTP server with no dependency and no external asset |
+| `install`  | Putting the program where the operating system can find it |
+| `package`  | Building the archive people download |
 
 ## Making a document, and adding to it after it is printed
 
@@ -203,6 +207,88 @@ Arabic, and handwriting — join their letters, so a joined run is one mark and
 comes back as one unread letter; finding *where* the ink is still works, which
 is what placing a delta needs. **Combining marks** are folded into the letter
 they sit on, so Devanagari and Thai read as their base letters.
+
+#### Small ink is not the same thing as dust
+
+A tittle at 11 pt is under half a millimetre and a full stop is smaller still —
+both well below the size at which a mark is worth taking seriously as a letter.
+Judging them by size alone threw away the dot of every `i` and `j`, the accent of
+every é and ü, and the punctuation from every page of body text ever scanned. A
+page of prose came back reading `Lıne` and `ȷumps` with no full stops, and
+nothing anywhere said so.
+
+What separates dust from a full stop is not size but **company**. A speck on the
+glass sits alone; a full stop sits on a line of writing next to letters of a
+proper size. So small marks are carried all the way through — offered to a letter
+as an accent, offered to another small mark as the other half of a colon — and
+only what is still standing alone at the end, on a line with no proper letters on
+it, is thrown away as dust.
+
+#### Measuring the type rather than assuming it
+
+To tell an `l` from a dotless `ı` you have to know how big the type is, and the
+obvious estimate is wrong in a way that hides. A line of prose is mostly
+lowercase, so its tallest quarter are the ascenders of `b d f h k l` — which
+stand taller than a capital in nearly every typeface. Read that height as a cap
+height and every letter on the page measures about a sixth short; then an `l` is
+exactly as tall as a dotless `ı`, and a page of English comes back sprinkled with
+Turkish.
+
+So each line is read twice. The first pass guesses the scale from the height of
+its tall letters. Every letter it reads then answers the question "how many
+millimetres is one cap height on this line?" — the mark's own height divided by
+the glyph's — and the middle of those answers is the line's real scale. The
+second pass reads it again knowing that.
+
+Lines do not affect one another, so they are read in parallel. Even with the
+second pass, a page takes a quarter of the time it used to.
+
+#### What is left
+
+Measured on ordinary prose at 8–18 pt, read against the font it was set in:
+**98–100% of characters**, and 100% at several sizes. Two things account for
+nearly all of the remainder:
+
+* A capital `I` and a lowercase `l` are one rectangle in most sans-serif faces,
+  differing by about three hundredths of an em — a pixel and a half at 11 pt on a
+  300 dpi scan. Nothing in the ink can settle it, so when two candidates come
+  within 2% of each other the commoner letter wins, on the grounds that in
+  running text `l` outnumbers `I` by a hundred to one. That is a better answer,
+  not a right one.
+* Reading a page against a **different** typeface from the one it was printed in
+  is markedly worse. The shape score falls for every letter at once, and some
+  lookalike from another alphabet fits the ink better than the true letter about
+  as often as not.
+
+### Turning a scan into something editable
+
+`--to` writes the page out as a Word document, an OpenDocument text, or an
+Onionskin document:
+
+```bash
+onionskin read scan.png --font-file font.ttf --to invoice.docx
+onionskin read scan.png --font-file font.ttf --to notes.odt --flow
+```
+
+Both formats are a zip of XML, and Onionskin writes them itself — the zip writer
+already exists for the packaging, and requiring a word processor in order to
+*produce* a document would be a strange thing for a program that only needs one
+to read somebody else's.
+
+Each line goes into a frame anchored to the page at the millimetre it was found,
+rather than flowing into paragraphs. Flowing throws away everything Onionskin
+knows about where the ink was, and a scanned form comes out as a column of
+disconnected phrases. `--flow` gives ordinary paragraphs to anyone who wants
+them.
+
+Two things had to be discovered by handing the files to LibreOffice rather than
+by reading the specifications. `w:framePr`, the obvious tool for a placed
+paragraph in a `.docx`, merges a run of framed paragraphs into **one** frame at
+the first one's position — a page of twelve placed lines opened showing one. Text
+boxes cannot be merged, so those are used instead. And LibreOffice's plain-text
+export silently drops everything inside a frame, so a file that opens perfectly
+comes back empty: the tests convert to flat ODF instead, and check the positions
+as well as the words.
 
 ### Why a scan needs registering
 

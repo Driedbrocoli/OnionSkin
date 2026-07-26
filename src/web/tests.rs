@@ -335,3 +335,207 @@ fn two_identical_documents_are_refused_with_the_reason() {
     assert!(response.contains("Not safe to print"), "{response}");
     assert!(response.contains("edited file second"), "{response}");
 }
+
+// ---------------------------------------------------------------------------
+// Turning a scan into something editable
+// ---------------------------------------------------------------------------
+
+/// Post to any path, so the conversion endpoint can be reached as well as the
+/// delta one.
+fn post_to(address: &str, path: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let mut raw = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    raw.extend_from_slice(body);
+
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream.write_all(&raw).unwrap();
+    stream.flush().unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    response
+}
+
+/// Split a response into its headers and its body, which for a Word file is
+/// not text and cannot be handled as a string.
+fn split_response(response: &[u8]) -> (String, Vec<u8>) {
+    let at = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(response.len());
+    (
+        String::from_utf8_lossy(&response[..at]).to_string(),
+        response.get(at + 4..).unwrap_or(&[]).to_vec(),
+    )
+}
+
+/// A scanned sheet with a line of writing on it, drawn from a real font.
+fn a_scan_and_its_font() -> Option<(Vec<u8>, Vec<u8>)> {
+    let font_path = Path::new("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+    let font_bytes = std::fs::read(font_path).ok()?;
+    let font = crate::font::EmbeddedFont::load(font_path).ok()?;
+
+    // A4 at 200 dpi, with one line of type on it.
+    let page = crate::geometry::PageSize {
+        width_mm: 210.0,
+        height_mm: 297.0,
+    };
+    let dpi = 200.0;
+    let width = (page.width_mm / 25.4 * dpi).round() as u32;
+    let height = (page.height_mm / 25.4 * dpi).round() as u32;
+    let mut image = image::GrayImage::from_pixel(width, height, image::Luma([245u8]));
+
+    let size_pt = 14.0;
+    let em_mm = size_pt * 25.4 / 72.0;
+    let upem = font.units_per_em();
+    let per_mm = dpi / 25.4;
+    let mut pen = 25.0f64;
+    let text = "INVOICE 4471";
+    let widths: Vec<f64> = font
+        .shape(text)
+        .ok()?
+        .iter()
+        .map(|g| g.advance_1000 / 1000.0)
+        .collect();
+
+    for (index, ch) in text.chars().enumerate() {
+        if let Some(contours) = font.outline(ch) {
+            // Fill each contour by testing points against it, which is slow and
+            // perfectly adequate for one short line.
+            let placed: Vec<Vec<(f64, f64)>> = contours
+                .iter()
+                .map(|c| {
+                    c.iter()
+                        .map(|&(gx, gy)| (pen + gx / upem * em_mm, 40.0 - gy / upem * em_mm))
+                        .collect()
+                })
+                .collect();
+            let (mut x0, mut y0, mut x1, mut y1) =
+                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for contour in &placed {
+                for &(x, y) in contour {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+            for py in (y0 * per_mm) as u32..=((y1 * per_mm).ceil() as u32).min(height - 1) {
+                let y = (py as f64 + 0.5) / per_mm;
+                let mut crossings: Vec<f64> = Vec::new();
+                for contour in &placed {
+                    for i in 0..contour.len() {
+                        let (ax, ay) = contour[i];
+                        let (bx, by) = contour[(i + 1) % contour.len()];
+                        if (ay > y) == (by > y) {
+                            continue;
+                        }
+                        crossings.push(ax + (y - ay) / (by - ay) * (bx - ax));
+                    }
+                }
+                crossings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                for span in crossings.chunks_exact(2) {
+                    let from = (span[0] * per_mm).round().max(0.0) as u32;
+                    let to = ((span[1] * per_mm).round() as u32).min(width - 1);
+                    for px in from..=to {
+                        image.put_pixel(px, py, image::Luma([25u8]));
+                    }
+                }
+            }
+        }
+        pen += widths.get(index).copied().unwrap_or(0.5) * em_mm;
+    }
+
+    let mut png = Vec::new();
+    image::DynamicImage::ImageLuma8(image)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some((png, font_bytes))
+}
+
+#[test]
+fn the_page_offers_to_read_a_scan() {
+    // The HTML is wrapped for reading, so a sentence can straddle a line. What
+    // matters is that it is said, not where it breaks.
+    let flowed = PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(PAGE.contains("action=\"/convert\""), "no conversion form");
+    // Somebody has to be told the font is needed and why, or they will pick a
+    // scan, see it refused, and conclude the thing does not work.
+    assert!(flowed.contains("The font the page was set in"), "{flowed}");
+    assert!(
+        flowed.contains("where the ink is but not what it says"),
+        "the page does not say why the font is needed"
+    );
+    for offered in ["docx", "odt", "onionskin"] {
+        assert!(PAGE.contains(offered), "{offered} is not offered");
+    }
+}
+
+#[test]
+fn a_scan_comes_back_as_a_word_document() {
+    let Some((scan, font)) = a_scan_and_its_font() else {
+        eprintln!("no DejaVu on this machine; skipping");
+        return;
+    };
+    let address = start();
+    let (content_type, body) = multipart(&[
+        ("scan", Some("page.png"), &scan),
+        ("font", Some("DejaVuSans.ttf"), &font),
+        ("format", None, b"docx"),
+        ("page", None, b"a4"),
+    ]);
+    let (headers, file) = split_response(&post_to(&address, "/convert", &content_type, &body));
+
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    // Labelled as a Word document. A browser handed a .docx labelled as a PDF
+    // offers to open it in a PDF viewer, and the person concludes it is broken.
+    assert!(
+        headers.contains("wordprocessingml.document"),
+        "wrong content type:\n{headers}"
+    );
+    assert!(headers.contains("page.docx"), "{headers}");
+    assert_eq!(&file[0..2], b"PK", "that is not a zip, so not a .docx");
+    assert!(file.len() > 500, "only {} bytes came back", file.len());
+}
+
+#[test]
+fn a_scan_with_no_font_is_refused_with_a_reason() {
+    let Some((scan, _)) = a_scan_and_its_font() else {
+        eprintln!("no DejaVu on this machine; skipping");
+        return;
+    };
+    let address = start();
+    let (content_type, body) = multipart(&[
+        ("scan", Some("page.png"), &scan),
+        ("format", None, b"docx"),
+    ]);
+    let (headers, message) = split_response(&post_to(&address, "/convert", &content_type, &body));
+    let message = String::from_utf8_lossy(&message);
+
+    assert!(headers.starts_with("HTTP/1.1 422"), "{headers}");
+    // The refusal has to say what to do next, not merely that it will not.
+    assert!(message.contains("font"), "{message}");
+    assert!(
+        message.contains(".ttf") && message.contains("Fonts"),
+        "it does not say where to find one:\n{message}"
+    );
+}
+
+#[test]
+fn something_that_is_not_an_image_is_refused_rather_than_crashing() {
+    let address = start();
+    let (content_type, body) = multipart(&[
+        ("scan", Some("notes.txt"), b"this is not a scan"),
+        ("font", Some("font.ttf"), b"nor is this a font"),
+    ]);
+    let (headers, message) = split_response(&post_to(&address, "/convert", &content_type, &body));
+    assert!(headers.starts_with("HTTP/1.1 422"), "{headers}");
+    assert!(
+        String::from_utf8_lossy(&message).contains("image"),
+        "{}",
+        String::from_utf8_lossy(&message)
+    );
+}

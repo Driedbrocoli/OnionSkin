@@ -122,6 +122,15 @@ fn handle(mut stream: TcpStream) {
                 message.as_bytes(),
             ),
         },
+        ("POST", "/convert") => match convert_scan(&request) {
+            Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
+            Err(message) => respond(
+                &mut stream,
+                422,
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            ),
+        },
         _ => respond(
             &mut stream,
             404,
@@ -365,10 +374,22 @@ fn respond(
 }
 
 fn respond_file(stream: &mut TcpStream, body: &[u8], name: &str) -> std::io::Result<()> {
+    // Named from the extension, because a browser handed a .docx labelled as a
+    // PDF will offer to open it in a PDF viewer and the person will conclude
+    // the file is broken.
+    let content_type = match name.rsplit('.').next().unwrap_or("") {
+        "pdf" => "application/pdf",
+        "docx" => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "onionskin" | "onion" | "json" => "application/json",
+        _ => "application/octet-stream",
+    };
     write!(
         stream,
         "HTTP/1.1 200 OK\r\n\
-         Content-Type: application/pdf\r\n\
+         Content-Type: {content_type}\r\n\
          Content-Disposition: attachment; filename=\"{name}\"\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
@@ -377,6 +398,87 @@ fn respond_file(stream: &mut TcpStream, body: &[u8], name: &str) -> std::io::Res
     )?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+/// Read a scan and hand back something with a cursor in it.
+fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
+    use crate::letters::{read_with_font, ReadOptions};
+    use crate::office::{self, Format, Layout};
+    use crate::scan::{register, ScanOptions};
+
+    let parts = parse_multipart(&request.content_type, &request.body)?;
+    let field = |name: &str| parts.iter().find(|p| p.name == name);
+
+    let Some(scan) = field("scan").filter(|p| !p.data.is_empty()) else {
+        return Err("Choose a scan to read: a PNG, JPEG, TIFF or BMP.".into());
+    };
+    let Some(font_part) = field("font").filter(|p| !p.data.is_empty()) else {
+        return Err(
+            "Choose the font the page was set in.\n\nWithout it Onionskin can see \
+             where the ink is but not what it says, and there would be nothing to \
+             write into the document. Any .ttf or .otf file will do — on Windows \
+             they are in C:\\Windows\\Fonts, on macOS in /Library/Fonts, on Linux \
+             in /usr/share/fonts."
+                .into(),
+        );
+    };
+
+    let page = field("page")
+        .map(|p| p.text())
+        .filter(|t| !t.is_empty())
+        .map(|t| crate::geometry::parse_page(&t))
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(crate::geometry::PageSize {
+            width_mm: 210.0,
+            height_mm: 297.0,
+        });
+
+    let image = image::load_from_memory(&scan.data)
+        .map_err(|e| format!("That does not look like an image Onionskin can read: {e}"))?;
+    let registration =
+        register(&image, ScanOptions::new(page)).map_err(|e| e.to_string())?;
+    let gray = image.to_luma8();
+
+    // The font has to be a file on disk, because that is what the loader takes
+    // — it memory-maps the programme rather than copying it about.
+    let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
+    let font_path = workspace.path.join(safe_name(
+        font_part.filename.as_deref().unwrap_or("font.ttf"),
+        "font.ttf",
+    ));
+    std::fs::write(&font_path, &font_part.data).map_err(|e| e.to_string())?;
+    let font = crate::font::EmbeddedFont::load(&font_path).map_err(|e| e.to_string())?;
+
+    let text = read_with_font(&gray, &registration, &ReadOptions::default(), &font, None)
+        .map_err(|e| e.to_string())?;
+    if text.lines.is_empty() {
+        return Err(
+            "No writing was found on that scan.\n\nCheck the paper size is right, \
+             and that the scan is of the whole sheet rather than a crop of part \
+             of it."
+                .into(),
+        );
+    }
+
+    let document = office::document_from_page(&text, page).map_err(|e| e.to_string())?;
+    let layout = match field("layout").map(|p| p.text()).as_deref() {
+        Some("flow") => Layout::Flow,
+        _ => Layout::Placed,
+    };
+
+    let wanted = field("format").map(|p| p.text()).unwrap_or_default();
+    match Format::parse(&wanted) {
+        Some(format) => {
+            let bytes = office::write(&document, format, layout).map_err(|e| e.to_string())?;
+            Ok((bytes, format!("page.{}", format.extension())))
+        }
+        None => {
+            // An Onionskin document, which every other command here takes.
+            let json = serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?;
+            Ok((json, "page.onionskin".to_string()))
+        }
+    }
 }
 
 /// The one page. No script, no external asset, nothing to fetch.
@@ -454,6 +556,51 @@ const PAGE: &str = r#"<!doctype html>
   </fieldset>
 
   <button type="submit">Make the delta</button>
+</form>
+
+<h2>Turn a scan into something you can edit</h2>
+<p>
+  Read the letters off a scan and get back a Word document, an OpenDocument
+  text, or an Onionskin document — each line where it was found on the paper.
+</p>
+
+<form method="post" action="/convert" enctype="multipart/form-data">
+  <fieldset>
+    <legend>The scan</legend>
+
+    <label for="scan">The scanned page
+      <span class="hint">— .png, .jpg, .tiff, .bmp</span></label>
+    <input type="file" id="scan" name="scan" accept="image/*" required>
+
+    <label for="font">The font the page was set in
+      <span class="hint">— .ttf or .otf. Without it, Onionskin can see where
+      the ink is but not what it says.</span></label>
+    <input type="file" id="font" name="font" accept=".ttf,.otf,.ttc" required>
+
+    <div class="row">
+      <div>
+        <label for="format">Write it as</label>
+        <select id="format" name="format">
+          <option value="docx">Word — .docx</option>
+          <option value="odt">LibreOffice — .odt</option>
+          <option value="onionskin">Onionskin document</option>
+        </select>
+      </div>
+      <div>
+        <label for="layout">Lay it out</label>
+        <select id="layout" name="layout">
+          <option value="placed">Where it was on the paper</option>
+          <option value="flow">As ordinary paragraphs</option>
+        </select>
+      </div>
+      <div>
+        <label for="page">Paper</label>
+        <input type="text" id="page" name="page" value="a4" placeholder="a4">
+      </div>
+    </div>
+  </fieldset>
+
+  <button type="submit">Read it</button>
 </form>
 
 <div class="warn">

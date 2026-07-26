@@ -52,6 +52,8 @@ enum Command {
     New(NewArgs),
     /// Put words on a document.
     Write(WriteArgs),
+    /// Draw lines, boxes, circles and paths on a document.
+    Draw(DrawArgs),
     /// List what is on a document, with the number of each piece of text.
     Show(ShowArgs),
     /// Change a piece of text: its words, where it sits, how it is set.
@@ -351,6 +353,49 @@ struct WriteArgs {
 }
 
 #[derive(clap::Args)]
+struct DrawArgs {
+    /// The document to draw on.
+    document: PathBuf,
+    /// A straight line, in millimetres from the top-left: 'X1,Y1:X2,Y2'.
+    #[arg(long = "line", value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    line: Vec<String>,
+    /// A box: 'X,Y:WIDTHxHEIGHT', with X,Y its top-left corner.
+    #[arg(long = "box", value_name = "X,Y:WxH", allow_hyphen_values = true)]
+    boxes: Vec<String>,
+    /// An ellipse: 'X,Y:RADIUSxRADIUS', with X,Y its centre. One radius makes
+    /// a circle.
+    #[arg(long = "circle", value_name = "X,Y:RxR", allow_hyphen_values = true)]
+    circles: Vec<String>,
+    /// A run of points joined in order: 'X1,Y1 X2,Y2 X3,Y3'.
+    #[arg(long = "path", value_name = "X,Y X,Y ...", allow_hyphen_values = true)]
+    paths: Vec<String>,
+    /// Join the last point of each --path back to the first.
+    #[arg(long)]
+    close: bool,
+    /// Which page, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    /// The outline's colour: #rrggbb, or a name like red or black.
+    #[arg(long, default_value = "black")]
+    colour: String,
+    /// Fill the inside with this colour. Boxes, circles and closed paths only.
+    #[arg(long)]
+    fill: Option<String>,
+    /// Draw the outline this thick, in millimetres.
+    #[arg(long, default_value_t = 0.35)]
+    width: f64,
+    /// Leave the outline off and fill only.
+    #[arg(long)]
+    no_outline: bool,
+    /// Dash the outline: 'DASH,GAP' in millimetres, for example '2,1'.
+    #[arg(long, value_name = "DASH,GAP")]
+    dash: Option<String>,
+    /// Round a box's corners by this many millimetres.
+    #[arg(long, default_value_t = 0.0)]
+    radius: f64,
+}
+
+#[derive(clap::Args)]
 struct ShowArgs {
     /// The document to look at.
     document: PathBuf,
@@ -456,6 +501,14 @@ struct ReadArgs {
     /// Report as JSON instead of for reading.
     #[arg(long)]
     json: bool,
+    /// Also write the page out as something editable: a .docx, an .odt, or an
+    /// .onion document. Needs --font-file, or there are no words to write.
+    #[arg(long = "to", value_name = "FILE")]
+    to: Option<PathBuf>,
+    /// Write the words as ordinary paragraphs instead of pinning each line
+    /// where it was found on the paper.
+    #[arg(long)]
+    flow: bool,
 }
 
 #[derive(clap::Args)]
@@ -624,6 +677,7 @@ Printing the delta
   3. Do one sheet first and hold it against the original before committing more.";
 
 fn main() -> ExitCode {
+    allow_a_closed_pipe();
     match run() {
         Ok(code) => code,
         Err(message) => {
@@ -631,6 +685,29 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Let `onionskin show ... | head` end quietly.
+///
+/// Rust turns off SIGPIPE at startup, so writing to a pipe whose reader has
+/// gone gives an error instead of killing the process — and `println!` panics
+/// on an error it cannot report. Piping any of this into `head` or quitting
+/// `less` early therefore prints a panic and a backtrace, which looks exactly
+/// like a crash and is nothing of the sort.
+fn allow_a_closed_pipe() {
+    #[cfg(unix)]
+    // SAFETY: `signal` with SIG_DFL is async-signal-safe and this runs before
+    // any thread is started. Restoring the default is what every other command
+    // line program does, and is precisely the behaviour a shell expects.
+    unsafe {
+        libc_signal(13 /* SIGPIPE */, 0 /* SIG_DFL */);
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "signal"]
+    fn libc_signal(signum: i32, handler: usize) -> usize;
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -656,6 +733,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Scanners => cmd_scanners(),
         Command::New(args) => cmd_new(args),
         Command::Write(args) => cmd_write(args),
+        Command::Draw(args) => cmd_draw(args),
         Command::Show(args) => cmd_show(args),
         Command::Edit(args) => cmd_edit(args),
         Command::Erase(args) => cmd_erase(args),
@@ -905,6 +983,12 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
 
     let font = load_font(args.font_file.as_deref(), args.font_index)?;
 
+    let drawings = if args.delta {
+        document.shape_layout(&document.shapes_added_since_printing())
+    } else {
+        document.shape_layout(&document.shapes.iter().collect::<Vec<_>>())
+    };
+
     let pages = if args.delta {
         let problems = document.overlay_problems();
         if !problems.is_empty() && !args.force {
@@ -931,28 +1015,35 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
     .map_err(|e| e.to_string())?;
 
     let written: usize = pages.iter().map(|p| p.len()).sum();
-    if written == 0 {
+    let drawn: usize = drawings.iter().map(|p| p.len()).sum();
+    if written == 0 && drawn == 0 {
         eprintln!(
             "note: nothing to print — the {} is empty.",
             if args.delta { "delta" } else { "document" }
         );
     }
 
-    write_delta(
+    onionskin::pdf::write_page_content(
         &args.output,
         &document.page_sizes(),
         &pages,
+        &drawings,
         "Onionskin document",
         font.as_ref(),
     )
     .map_err(|e| e.to_string())?;
 
     println!(
-        "{}: {} page{}, {written} line{}.",
+        "{}: {} page{}, {written} line{}{}.",
         args.output.display(),
         document.pages,
         if document.pages == 1 { "" } else { "s" },
-        if written == 1 { "" } else { "s" }
+        if written == 1 { "" } else { "s" },
+        match drawn {
+            0 => String::new(),
+            1 => ", 1 drawing".to_string(),
+            n => format!(", {n} drawings"),
+        }
     );
 
     if args.printed {
@@ -1127,7 +1218,72 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
             if text.discarded == 1 { "" } else { "s" }
         );
     }
+
+    if let Some(destination) = &args.to {
+        export_page(&text, page, destination, args.flow, font.is_some())?;
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Turn what was read off the scan into something with a cursor in it.
+fn export_page(
+    text: &letters::PageText,
+    page: PageSize,
+    destination: &Path,
+    flow: bool,
+    read_the_letters: bool,
+) -> Result<(), String> {
+    use onionskin::office::{self, Format, Layout};
+
+    if !read_the_letters {
+        return Err(format!(
+            "I can see where the ink is but not what it says, so there is \
+             nothing to write into {}.\n    Pass --font-file with the font the \
+             page was set in, and run it again.",
+            destination.display()
+        ));
+    }
+    check_writable(destination, "document")?;
+
+    // Every line becomes one piece of text, at the millimetre it was found.
+    let document = office::document_from_page(text, page).map_err(|e| e.to_string())?;
+    let layout = if flow { Layout::Flow } else { Layout::Placed };
+    match Format::of_path(destination) {
+        Some(format) => {
+            let bytes = office::write(&document, format, layout).map_err(|e| e.to_string())?;
+            std::fs::write(destination, bytes)
+                .map_err(|e| format!("could not write {}: {e}", destination.display()))?;
+            println!(
+                "\n{}: {} — {} line{}, {}.",
+                destination.display(),
+                format.describe(),
+                document.items.len(),
+                if document.items.len() == 1 { "" } else { "s" },
+                if flow {
+                    "as paragraphs"
+                } else {
+                    "each where it was on the paper"
+                }
+            );
+            println!("Open it in Word or LibreOffice and edit it like anything else.");
+        }
+        None => {
+            // An Onionskin document, which is what everything else here takes.
+            document.save(destination).map_err(|e| e.to_string())?;
+            println!(
+                "\n{}: an Onionskin document — {} line{}.",
+                destination.display(),
+                document.items.len(),
+                if document.items.len() == 1 { "" } else { "s" }
+            );
+            println!(
+                "  onionskin show {}\n  onionskin write {} --at '20,150:and this'",
+                destination.display(),
+                destination.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn cmd_scanners() -> Result<ExitCode, String> {
@@ -1264,6 +1420,180 @@ fn parse_placement(spec: &str) -> Result<((f64, f64), String), String> {
         return Err(format!("the position in '{spec}' is not a real number"));
     }
     Ok(((x, y), text.to_string()))
+}
+
+/// A pair of sizes: `WIDTHxHEIGHT`, or one number meaning both.
+///
+/// One number for a circle is the common case — `--circle '105,150:20'` reads
+/// better than making somebody write the radius twice.
+fn parse_size(spec: &str) -> Result<(f64, f64), String> {
+    let spec = spec.trim();
+    let (w, h) = match spec.split_once(['x', 'X', '*']) {
+        Some(pair) => pair,
+        None => (spec, spec),
+    };
+    let number = |text: &str| -> Result<f64, String> {
+        text.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("'{}' is not a size in millimetres", text.trim()))
+    };
+    Ok((number(w)?, number(h)?))
+}
+
+/// Where something goes and how big it is, both in millimetres.
+type PlacedSize = ((f64, f64), (f64, f64));
+
+/// `X,Y:WxH` — where it goes, and how big it is.
+fn parse_placed_size(spec: &str, what: &str, example: &str) -> Result<PlacedSize, String> {
+    let (position, size) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("bad {what} '{spec}'. Expected '{example}'"))?;
+    Ok((parse_point(position)?, parse_size(size)?))
+}
+
+fn cmd_draw(args: DrawArgs) -> Result<ExitCode, String> {
+    use onionskin::document::{Shape, ShapeKind};
+
+    if args.line.is_empty() && args.boxes.is_empty() && args.circles.is_empty() && args.paths.is_empty()
+    {
+        return Err("nothing to draw. Say what to draw, for example:\n    \
+             --line '20,100:190,100'        a rule across the page\n    \
+             --box '20,40:80x30'            a box 80 by 30 mm\n    \
+             --circle '105,150:20'          a circle of radius 20 mm\n    \
+             --path '20,20 60,50 100,20'    a run of points"
+            .into());
+    }
+    if args.no_outline && args.fill.is_none() {
+        return Err("--no-outline with no --fill would draw nothing at all.".into());
+    }
+
+    // Checked here so a bad colour is reported once, against the word that was
+    // typed, rather than four times against each shape it was applied to.
+    let stroke = if args.no_outline {
+        None
+    } else {
+        onionskin::document::parse_colour(&args.colour).map_err(|e| e.to_string())?;
+        Some(args.colour.clone())
+    };
+    if let Some(fill) = &args.fill {
+        onionskin::document::parse_colour(fill).map_err(|e| e.to_string())?;
+    }
+    let dash = match &args.dash {
+        Some(spec) => {
+            let (on, off) = parse_point(spec)
+                .map_err(|_| format!("bad dash '{spec}'. Expected 'DASH,GAP', for example '2,1'"))?;
+            if on <= 0.0 || off < 0.0 {
+                return Err(format!("bad dash '{spec}': the dash must be longer than nothing"));
+            }
+            Some((on, off))
+        }
+        None => None,
+    };
+
+    let mut kinds: Vec<ShapeKind> = Vec::new();
+    for spec in &args.line {
+        let (from, to) = spec
+            .split_once(':')
+            .ok_or_else(|| format!("bad line '{spec}'. Expected 'X1,Y1:X2,Y2'"))?;
+        let (x1_mm, y1_mm) = parse_point(from)?;
+        let (x2_mm, y2_mm) = parse_point(to)?;
+        kinds.push(ShapeKind::Line {
+            x1_mm,
+            y1_mm,
+            x2_mm,
+            y2_mm,
+        });
+    }
+    for spec in &args.boxes {
+        let ((x_mm, y_mm), (width_mm, height_mm)) =
+            parse_placed_size(spec, "box", "X,Y:WIDTHxHEIGHT")?;
+        kinds.push(ShapeKind::Rect {
+            x_mm,
+            y_mm,
+            width_mm,
+            height_mm,
+            radius_mm: args.radius,
+        });
+    }
+    for spec in &args.circles {
+        let ((x_mm, y_mm), (radius_x_mm, radius_y_mm)) =
+            parse_placed_size(spec, "circle", "X,Y:RADIUS")?;
+        kinds.push(ShapeKind::Ellipse {
+            x_mm,
+            y_mm,
+            radius_x_mm,
+            radius_y_mm,
+        });
+    }
+    for spec in &args.paths {
+        let mut points = Vec::new();
+        for part in spec.split_whitespace() {
+            points.push(parse_point(part)?);
+        }
+        if points.len() < 2 {
+            return Err(format!(
+                "the path '{spec}' has {} point(s); it takes two to draw a line",
+                points.len()
+            ));
+        }
+        kinds.push(ShapeKind::Path {
+            points,
+            closed: args.close,
+        });
+    }
+
+    let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
+    let mut drawn = Vec::new();
+    for kind in kinds {
+        let shape = Shape {
+            id: 0,
+            page: args.page,
+            kind,
+            stroke: stroke.clone(),
+            fill: args.fill.clone(),
+            width_mm: args.width,
+            dash_mm: dash,
+        };
+        drawn.push(document.draw(shape).map_err(|e| e.to_string())?);
+    }
+    document.save(&args.document).map_err(|e| e.to_string())?;
+
+    for id in &drawn {
+        let shape = document
+            .shapes
+            .iter()
+            .find(|s| s.id == *id)
+            .expect("just drawn");
+        let (x0, y0, x1, y1) = shape.bounds();
+        println!(
+            "{id}: page {}, {} — {:.1},{:.1} to {:.1},{:.1} mm",
+            shape.page,
+            shape.describe(),
+            x0,
+            y0,
+            x1,
+            y1
+        );
+    }
+    warn_drawings_off_the_page(&document);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Say so when a drawing runs off the paper, which prints as a cut-off edge.
+fn warn_drawings_off_the_page(document: &Document) {
+    let page = document.page;
+    for shape in &document.shapes {
+        let (x0, y0, x1, y1) = shape.bounds();
+        if x0 < 0.0 || y0 < 0.0 || x1 > page.width_mm || y1 > page.height_mm {
+            eprintln!(
+                "warning: drawing {} runs off the paper ({:.1},{:.1} to {:.1},{:.1} mm on a \
+                 {:.0}×{:.0} mm sheet). It will print with its edge cut off.",
+                shape.id, x0, y0, x1, y1, page.width_mm, page.height_mm
+            );
+        }
+    }
 }
 
 fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
