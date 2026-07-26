@@ -426,7 +426,10 @@ warning the run produced — the margins, the coverage, the missing calibration,
 and now which engine opened the document. A browser can be told one thing per
 response, so a run with anything to say now answers with a page that says it and
 offers the file underneath; the delta waits in memory for the second request and
-is handed over once. A run with nothing to say still downloads straight away.
+is handed over once. A run with nothing to say still downloads straight away —
+and so does one whose caller said `Accept: application/pdf`, which is how
+something automated distinguishes itself from a person: a browser says it will
+take anything, and only a script asks for a PDF by name.
 
 ### Three traps worth writing down
 

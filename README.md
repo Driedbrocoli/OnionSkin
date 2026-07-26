@@ -282,7 +282,9 @@ There is also a browser interface for the two-document workflow, served from
 your own machine: `onionskin serve`, then open <http://127.0.0.1:8737/>. It
 shows the same checks the command line prints — which engine opened the
 document, how close the new ink lands to the edge, whether the printer has been
-calibrated — before it offers you the delta to download.
+calibrated — before it offers you the delta to download. Anything automated
+that posts to it with `Accept: application/pdf` gets the file straight back
+instead, as it always did.
 
 ## The thing that will bite you: reflow
 

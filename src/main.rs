@@ -170,6 +170,9 @@ struct FetchArgs {
     /// Where to write the scan.
     #[arg(short, long)]
     output: PathBuf,
+    /// Open the scan when it is written.
+    #[arg(long)]
+    open: bool,
     /// The scanner: 'http://printer.local/eSCL'.
     #[arg(long)]
     scanner: String,
@@ -277,6 +280,9 @@ struct TargetArgs {
     /// How far in to place the corner crosshairs, in mm.
     #[arg(long)]
     inset: Option<f64>,
+    /// Open the target when it is written.
+    #[arg(long)]
+    open: bool,
 }
 
 // Readings are routinely negative, and a leading minus would otherwise be
@@ -529,6 +535,9 @@ struct AcquireArgs {
     /// Where to write the scan.
     #[arg(short, long)]
     output: PathBuf,
+    /// Open the scan when it is written.
+    #[arg(long)]
+    open: bool,
     /// Which scanner, when there is more than one (see `onionskin scanners`).
     #[arg(long)]
     device: Option<String>,
@@ -1394,9 +1403,10 @@ fn cmd_acquire(args: AcquireArgs) -> Result<ExitCode, String> {
             println!("  skew       : {:+.2}°", registration.skew_deg);
             println!(
                 "\nNow pick a spot on it and add your words:\n  \
-                 onionskin add {} -o delta.pdf --at 'X,Y:the words'",
+                 onionskin add {} --at 'X,Y:the words'",
                 path.display()
             );
+            open_if_asked(args.open, &path);
             Ok(ExitCode::SUCCESS)
         }
         Err(message) => {
@@ -1405,6 +1415,9 @@ fn cmd_acquire(args: AcquireArgs) -> Result<ExitCode, String> {
                  {message}\n\nThe sheet is still on the glass — it is usually quicker to \
                  fix the placement\nand scan again than to work around it."
             );
+            // Still worth opening: seeing the scan is how somebody works out
+            // what went wrong with it.
+            open_if_asked(args.open, &path);
             Ok(ExitCode::from(1))
         }
     }
@@ -2231,6 +2244,7 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
                  and down are positive.\n4. onionskin calibrate solve --name office \
                  --point 'P1:+0.40,-0.15' ..."
             );
+            open_if_asked(args.open, &args.output);
             Ok(ExitCode::SUCCESS)
         }
 
@@ -2597,6 +2611,7 @@ fn cmd_fetch(args: FetchArgs) -> Result<ExitCode, String> {
         written.display(),
         args.page
     );
+    open_if_asked(args.open, &written);
     Ok(ExitCode::SUCCESS)
 }
 

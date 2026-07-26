@@ -40,6 +40,9 @@ struct Request {
     method: String,
     path: String,
     content_type: String,
+    /// What the caller said it would take back. A browser says it will take
+    /// anything; a script that wants the file says so.
+    accept: String,
     body: Vec<u8>,
 }
 
@@ -114,16 +117,20 @@ fn handle(mut stream: TcpStream) {
         ),
         ("GET", "/health") => respond(&mut stream, 200, "text/plain; charset=utf-8", b"ok"),
         ("POST", "/delta") => match make_delta(&request) {
-            // Nothing to say: hand the file straight over, which is what
-            // somebody who asked for a delta wanted.
-            Ok((pdf, said)) if said.is_empty() => respond_file(&mut stream, &pdf, "delta.pdf"),
-            Ok((pdf, said)) => {
+            // Nothing to say, or a caller that asked for the file rather than
+            // a page to read: hand the PDF straight over. The second is what
+            // keeps a script working — a browser says it will take anything,
+            // and only something automated asks specifically for a PDF.
+            Ok((pdf, said, _)) if said.is_empty() || wants_the_file(&request) => {
+                respond_file(&mut stream, &pdf, "delta.pdf")
+            }
+            Ok((pdf, said, took)) => {
                 let token = set_aside(pdf);
                 respond(
                     &mut stream,
                     200,
                     "text/html; charset=utf-8",
-                    result_page(&said, &token).as_bytes(),
+                    result_page(&said, &token, took).as_bytes(),
                 )
             }
             Err(message) => respond(
@@ -176,6 +183,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
 
     let mut content_length = 0usize;
     let mut content_type = String::new();
+    let mut accept = String::new();
     loop {
         let mut header = String::new();
         let read = reader
@@ -188,6 +196,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
             match name.trim().to_ascii_lowercase().as_str() {
                 "content-length" => content_length = value.trim().parse().unwrap_or(0),
                 "content-type" => content_type = value.trim().to_string(),
+                "accept" => accept = value.trim().to_ascii_lowercase(),
                 _ => {}
             }
         }
@@ -213,6 +222,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
         method,
         path,
         content_type,
+        accept,
         body,
     })
 }
@@ -303,6 +313,17 @@ fn safe_name(name: &str, fallback: &str) -> String {
     }
 }
 
+/// Whether the caller asked for the delta itself rather than a page about it.
+///
+/// Everything worth saying about a run is worth saying to a person, and a
+/// browser is a person. A script is not: it posted two documents to get a
+/// file, and handing it a page of prose instead would break it. The one
+/// distinguishes itself from the other by asking for a PDF by name.
+fn wants_the_file(request: &Request) -> bool {
+    let accept = request.accept.trim();
+    accept.starts_with("application/pdf") || accept == "application/octet-stream"
+}
+
 /// A finished delta, waiting to be collected.
 ///
 /// The page shows what the run had to say before handing the file over, and a
@@ -356,7 +377,8 @@ fn unique_token() -> String {
     )
 }
 
-fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>), String> {
+fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>, std::time::Duration), String> {
+    let started = std::time::Instant::now();
     let parts = parse_multipart(&request.content_type, &request.body)?;
     let field = |name: &str| parts.iter().find(|p| p.name == name);
 
@@ -425,7 +447,7 @@ fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>), String> {
     // what somebody about to put a printed sheet back in a tray needs.
     let said: Vec<String> = outcome.checks.iter().map(|check| check.format()).collect();
     let pdf = std::fs::read(&output).map_err(|e| e.to_string())?;
-    Ok((pdf, said))
+    Ok((pdf, said, started.elapsed()))
 }
 
 fn respond(
@@ -574,7 +596,7 @@ fn page() -> String {
 /// saying says it here and offers the file second. Nothing is lost by that: the
 /// warnings are the reason a person would not print the delta at all, and a
 /// file that arrives before them arrives too late to be worth reading.
-fn result_page(said: &[String], token: &str) -> String {
+fn result_page(said: &[String], token: &str, took: std::time::Duration) -> String {
     let mut lines = String::new();
     for check in said {
         // A check is a first line and an indented detail under it, which is how
@@ -595,9 +617,20 @@ fn result_page(said: &[String], token: &str) -> String {
         ));
     }
 
+    // How long it took. A browser shows nothing at all while it waits, so
+    // afterwards is the only chance to say that the waiting was the work.
+    let seconds = took.as_secs_f64();
+    let spent = if seconds < 1.0 {
+        String::new()
+    } else if seconds < 60.0 {
+        format!(" Took {seconds:.0} seconds.")
+    } else {
+        format!(" Took {:.0} minutes.", seconds / 60.0)
+    };
+
     format!(
         "{HEAD}\n<h1>The delta is ready</h1>\n\
-         <p class=\"lede\">Worth reading before you print it.</p>\n\
+         <p class=\"lede\">Worth reading before you print it.{spent}</p>\n\
          {lines}\n\
          <p><a class=\"get\" href=\"/delta/{token}\" download=\"delta.pdf\">\
          Download delta.pdf</a></p>\n\
@@ -686,6 +719,8 @@ const PAGE_BODY: &str = r#"
 
     <label for="edited">The edited copy</label>
     <input type="file" id="edited" name="edited" required>
+    <p class="hint">A long document takes a while — a page a second or so, and
+    the browser shows nothing until it is done.</p>
   </fieldset>
 
   <fieldset>

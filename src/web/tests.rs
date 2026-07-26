@@ -157,7 +157,11 @@ fn the_page_says_how_to_print_it() {
 fn the_results_page_fetches_nothing_from_anywhere_either() {
     // The same promise, and the same way of breaking it. This page is built
     // rather than written out whole, so it needs its own check.
-    let page = result_page(&["note: something worth knowing".into()], "abc123");
+    let page = result_page(
+        &["note: something worth knowing".into()],
+        "abc123",
+        std::time::Duration::from_secs(3),
+    );
     let lower = page.to_lowercase();
     for forbidden in [
         "http://", "https://", "//cdn", "<script", "src=\"//", "@import", "url(http",
@@ -179,6 +183,7 @@ fn the_results_page_says_what_happened_and_offers_the_delta() {
             "WARNING [page 1]: ink lands within 3 mm of the edge".into(),
         ],
         "tok123",
+        std::time::Duration::from_secs(90),
     );
     assert!(page.contains("read the document itself"), "{page}");
     assert!(page.contains("may not break where Word"), "{page}");
@@ -191,8 +196,35 @@ fn the_results_page_says_what_happened_and_offers_the_delta() {
 }
 
 #[test]
+fn a_run_worth_waiting_for_says_how_long_it_took() {
+    // A browser shows nothing at all while it waits, so afterwards is the only
+    // chance to say that the waiting was the work rather than a fault.
+    let quick = result_page(&["note: x".into()], "t", std::time::Duration::from_secs(8));
+    assert!(quick.contains("Took 8 seconds"), "{quick}");
+
+    let slow = result_page(
+        &["note: x".into()],
+        "t",
+        std::time::Duration::from_secs(180),
+    );
+    assert!(slow.contains("Took 3 minutes"), "{slow}");
+
+    // And says nothing at all when there was nothing to wait for.
+    let instant = result_page(
+        &["note: x".into()],
+        "t",
+        std::time::Duration::from_millis(80),
+    );
+    assert!(!instant.contains("Took"), "{instant}");
+}
+
+#[test]
 fn a_document_named_with_a_bracket_cannot_close_a_tag() {
-    let page = result_page(&["note: <b>Smith & Sons</b> was opened".into()], "t");
+    let page = result_page(
+        &["note: <b>Smith & Sons</b> was opened".into()],
+        "t",
+        std::time::Duration::from_millis(200),
+    );
     assert!(page.contains("&lt;b&gt;Smith &amp; Sons"), "{page}");
     assert!(!page.contains("<b>Smith"), "{page}");
 }
@@ -269,6 +301,19 @@ fn get(address: &str, path: &str) -> String {
         address,
         format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
     )
+}
+
+/// Post, saying what the caller will take back.
+fn post_accepting(address: &str, accept: &str, content_type: &str, body: &[u8]) -> String {
+    let mut raw = format!(
+        "POST /delta HTTP/1.1\r\nHost: localhost\r\nAccept: {accept}\r\n\
+         Content-Type: {content_type}\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    raw.extend_from_slice(body);
+    request(address, &raw)
 }
 
 fn post(address: &str, content_type: &str, body: &[u8]) -> String {
@@ -398,6 +443,34 @@ fn two_documents_come_back_as_a_delta() {
     // And only once: the file is handed over, not stored.
     let again = get(&address, &format!("/delta/{link}"));
     assert!(again.starts_with("HTTP/1.1 404"), "{again:.200}");
+}
+
+#[test]
+fn a_caller_that_asks_for_the_file_gets_the_file() {
+    // Everything worth saying about a run is worth saying to a person, and a
+    // browser is a person. A script posted two documents to get a delta, and
+    // handing it a page of prose instead would break it.
+    let Ok(_) = crate::render::engine() else {
+        return;
+    };
+    let address = start();
+    let dir = tempfile::tempdir().unwrap();
+    let (original, edited) = a_pair(dir.path(), Some(("Approved", 150.0)));
+
+    let (content_type, body) = multipart(&[
+        ("original", Some("before.pdf"), &original),
+        ("edited", Some("after.pdf"), &edited),
+        ("dpi", None, b"150"),
+    ]);
+    let response = post_accepting(&address, "application/pdf", &content_type, &body);
+
+    assert!(response.contains("application/pdf"), "{response:.300}");
+    assert!(response.contains("filename=\"delta.pdf\""));
+    assert!(response.contains("%PDF"), "the body is not a PDF");
+    assert!(
+        !response.contains("The delta is ready"),
+        "it should be the file, not the page about it"
+    );
 }
 
 #[test]
