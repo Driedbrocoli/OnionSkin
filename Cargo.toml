@@ -42,9 +42,6 @@ eframe = { version = "0.35", default-features = false, features = [
 ] }
 egui = "0.35"
 egui_extras = { version = "0.35", default-features = false }
-# Native open/save dialogs. On Linux it asks the desktop's own portal over
-# D-Bus rather than linking GTK, so nothing has to be installed for it to work.
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [dev-dependencies]
 approx = "0.5"

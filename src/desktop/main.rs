@@ -19,7 +19,10 @@
 mod app;
 #[allow(dead_code)]
 mod job;
-// Some of this is used only by screens still being built.
+// `Sheet::page` and `page_count` are for a screen that will want the paper size
+// and the page count; nothing needs them yet.
+#[allow(dead_code)]
+mod picker;
 #[allow(dead_code)]
 mod preview;
 mod screens;

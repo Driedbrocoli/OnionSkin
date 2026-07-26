@@ -3,6 +3,7 @@
 use eframe::egui;
 
 use super::job::Outcome;
+use super::picker::Picker;
 use super::theme;
 
 /// A screen's title and the sentence under it.
@@ -89,23 +90,27 @@ pub fn outcome(ui: &mut egui::Ui, outcome: &Outcome) -> bool {
 ///
 /// Returns true when the choice changed, so a screen can throw away whatever
 /// it worked out about the file it was looking at before.
+///
+/// The browser is drawn by the window itself, so the answer comes back a frame
+/// or two later rather than from the call that asked for it.
 pub fn file_row(
     ui: &mut egui::Ui,
+    picker: &mut Picker,
     label: &str,
     slot: &mut Option<std::path::PathBuf>,
     kinds: &[&str],
 ) -> bool {
     let mut changed = false;
+    let who = ui.make_persistent_id(("file-row", label));
+    if let Some(chosen) = picker.taken(who) {
+        *slot = Some(chosen);
+        changed = true;
+    }
+
     ui.label(egui::RichText::new(label).strong());
     ui.horizontal(|ui| {
         if ui.button("Choose…").clicked() {
-            if let Some(picked) = rfd::FileDialog::new()
-                .add_filter("Files Onionskin reads", kinds)
-                .pick_file()
-            {
-                *slot = Some(picked);
-                changed = true;
-            }
+            picker.open(who, label, kinds, slot.as_deref());
         }
         match slot {
             Some(path) => {
@@ -118,7 +123,7 @@ pub fn file_row(
                     .monospace(),
                 )
                 .on_hover_text(path.display().to_string());
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("×").clicked() {
                     *slot = None;
                     changed = true;
                 }
@@ -131,34 +136,39 @@ pub fn file_row(
 }
 
 /// Where a result should be written, with a Save-as button.
+///
+/// `when_empty` is what the row says before a place has been chosen, and it
+/// has to be the truth. A row that reads "beside the original, as
+/// document.onionskin" beside a button that will not work until a place *is*
+/// chosen tells somebody there is a default when there is none, and leaves
+/// them staring at a greyed-out button with no idea what it wants.
 pub fn save_row(
     ui: &mut egui::Ui,
+    picker: &mut Picker,
     label: &str,
     slot: &mut Option<std::path::PathBuf>,
     suggested: &str,
     kinds: &[&str],
+    when_empty: &str,
 ) {
+    let who = ui.make_persistent_id(("save-row", label));
+    if let Some(chosen) = picker.taken(who) {
+        *slot = Some(chosen);
+    }
+
     ui.label(egui::RichText::new(label).strong());
     ui.horizontal(|ui| {
         if ui.button("Save as…").clicked() {
-            if let Some(picked) = rfd::FileDialog::new()
-                .add_filter("Files Onionskin writes", kinds)
-                .set_file_name(suggested)
-                .save_file()
-            {
-                *slot = Some(picked);
-            }
+            picker.save(who, label, kinds, slot.as_deref(), suggested);
         }
         match slot {
             Some(path) => {
                 ui.label(egui::RichText::new(path.display().to_string()).monospace());
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("×").clicked() {
                     *slot = None;
                 }
             }
-            // Saying where it will go by default is what stops somebody
-            // hunting for a file they were never told the name of.
-            None => hint(ui, &format!("beside the original, as {suggested}")),
+            None => hint(ui, when_empty),
         }
     });
     ui.add_space(6.0);

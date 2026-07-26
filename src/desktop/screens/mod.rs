@@ -4,7 +4,9 @@
 //! do not know about one another, and none of them does slow work on the thread
 //! that draws — everything heavy goes through [`Jobs`].
 
+pub mod calibrate;
 pub mod compare;
+pub mod devices;
 pub mod document;
 pub mod doctor;
 pub mod draw;
@@ -21,6 +23,7 @@ use super::preview::Previews;
 /// Passed as one struct rather than five arguments so that adding something a
 /// screen needs later does not mean editing every screen that does not.
 pub struct Room<'a> {
+    pub picker: &'a mut crate::picker::Picker,
     pub ui: &'a mut egui::Ui,
     pub jobs: &'a mut Jobs,
     pub previews: &'a mut Previews,
@@ -34,6 +37,8 @@ pub enum Screen {
     Document,
     Draw,
     Read,
+    Devices,
+    Calibrate,
     Doctor,
 }
 
@@ -46,6 +51,8 @@ impl Screen {
         Screen::Document,
         Screen::Draw,
         Screen::Read,
+        Screen::Devices,
+        Screen::Calibrate,
         Screen::Doctor,
     ];
 
@@ -56,6 +63,8 @@ impl Screen {
             Screen::Document => "Make a document",
             Screen::Draw => "Draw on a page",
             Screen::Read => "Read a scan",
+            Screen::Devices => "Printers and scanners",
+            Screen::Calibrate => "Calibration",
             Screen::Doctor => "This machine",
         }
     }
@@ -69,6 +78,8 @@ impl Screen {
             Screen::Document => "Start from blank paper and keep adding",
             Screen::Draw => "Lines, boxes and circles, in any colour",
             Screen::Read => "Turn a scan into a Word document",
+            Screen::Devices => "Print and scan over the network",
+            Screen::Calibrate => "Measure a printer, once, for exactness",
             Screen::Doctor => "What works here, and what is missing",
         }
     }

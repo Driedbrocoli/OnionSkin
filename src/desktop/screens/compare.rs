@@ -48,12 +48,14 @@ pub fn show(state: &mut State, room: &mut Room) {
 
     widgets::file_row(
         room.ui,
+        room.picker,
         "The document as it was printed",
         &mut state.original,
         &["pdf", "docx", "odt", "rtf", "txt"],
     );
     widgets::file_row(
         room.ui,
+        room.picker,
         "The edited copy",
         &mut state.edited,
         &["pdf", "docx", "odt", "rtf", "txt"],

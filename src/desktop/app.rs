@@ -4,6 +4,7 @@
 use eframe::egui;
 
 use super::job::Jobs;
+use super::picker;
 use super::preview::Previews;
 use super::screens::{self, Room, Screen};
 use super::theme;
@@ -12,12 +13,15 @@ pub struct Onionskin {
     screen: Screen,
     jobs: Jobs,
     previews: Previews,
+    picker: picker::Picker,
 
     compare: screens::compare::State,
     scan: screens::scan::State,
     document: screens::document::State,
     draw: screens::draw::State,
     read: screens::read::State,
+    devices: screens::devices::State,
+    calibrate: screens::calibrate::State,
     doctor: screens::doctor::State,
 }
 
@@ -28,11 +32,14 @@ impl Onionskin {
             screen: Screen::Compare,
             jobs: Jobs::new(&cc.egui_ctx),
             previews: Previews::default(),
+            picker: picker::Picker::default(),
             compare: Default::default(),
             scan: Default::default(),
             document: Default::default(),
             draw: Default::default(),
             read: Default::default(),
+            devices: Default::default(),
+            calibrate: Default::default(),
             doctor: Default::default(),
         }
     }
@@ -60,6 +67,7 @@ impl eframe::App for Onionskin {
                     // comfortable width however wide the window is opened.
                     ui.set_max_width(740.0);
                     let mut room = Room {
+                        picker: &mut self.picker,
                         jobs: &mut self.jobs,
                         previews: &mut self.previews,
                         ui,
@@ -72,10 +80,20 @@ impl eframe::App for Onionskin {
                         }
                         Screen::Draw => screens::draw::show(&mut self.draw, &mut room),
                         Screen::Read => screens::read::show(&mut self.read, &mut room),
+                        Screen::Devices => {
+                            screens::devices::show(&mut self.devices, &mut room)
+                        }
+                        Screen::Calibrate => {
+                            screens::calibrate::show(&mut self.calibrate, &mut room)
+                        }
                         Screen::Doctor => screens::doctor::show(&mut self.doctor, &mut room),
                     }
                 });
         });
+
+        // Drawn last and over everything, because it is a question that has to
+        // be answered before anything else can be got on with.
+        self.picker.show(ui.ctx());
     }
 }
 
