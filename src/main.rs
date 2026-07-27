@@ -61,6 +61,8 @@ enum Command {
     Edit(EditArgs),
     /// Take a piece of text off the page.
     Erase(EraseArgs),
+    /// Put a document back as it was before the last change.
+    Undo(UndoArgs),
     /// Write a document out as a PDF, whole or as a delta onto the printed sheet.
     Print(PrintArgs),
     /// Read the letters off a scanned page.
@@ -96,6 +98,26 @@ enum Command {
     AptRepo(AptRepoArgs),
     /// Print a completion script for your shell, so Tab knows every command.
     Completions(CompletionsArgs),
+    /// Choose your own defaults, so you stop typing the same flags.
+    Config(ConfigArgs),
+}
+
+#[derive(clap::Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: Option<ConfigCommand>,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// List every setting, and what it is.
+    Show,
+    /// Change one: `onionskin config set dpi 300`.
+    Set { name: String, value: String },
+    /// Go back to Onionskin's own choice for one setting.
+    Unset { name: String },
+    /// Go back to Onionskin's own choices for all of them.
+    Reset,
 }
 
 #[derive(clap::Args)]
@@ -249,7 +271,7 @@ struct FetchArgs {
     #[arg(long)]
     feeder: bool,
     /// The paper size to scan, so the whole sheet is captured.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// Report what the scanner can do, and take no scan.
     #[arg(long)]
@@ -281,18 +303,19 @@ struct DeltaArgs {
 
     /// How to build it: 'raster' prints exactly the new pixels and can never
     /// re-print existing ink; 'vector' keeps the text as text but clips to
-    /// rectangles.
-    #[arg(long, default_value = "raster")]
-    mode: String,
-    /// Rendering resolution. Higher is more exact and slower.
-    #[arg(long, default_value_t = onionskin::pipeline::DEFAULT_DPI)]
-    dpi: f64,
+    /// rectangles. Without it, your setting, then 'raster'.
+    #[arg(long)]
+    mode: Option<String>,
+    /// Rendering resolution. Higher is more exact and slower. Without it, your
+    /// setting, then 400.
+    #[arg(long)]
+    dpi: Option<f64>,
     /// A calibration profile (see `onionskin calibrate list`).
     #[arg(long)]
     profile: Option<String>,
     /// Warn about additions closer than this to an edge, in mm.
-    #[arg(long, default_value_t = onionskin::safety::DEFAULT_MARGIN_MM)]
-    margin: f64,
+    #[arg(long)]
+    margin: Option<f64>,
     /// Write proof images here, showing where the new ink lands.
     #[arg(long)]
     preview: Option<PathBuf>,
@@ -300,10 +323,13 @@ struct DeltaArgs {
     /// box is printed onto the paper along with the change.
     #[arg(long)]
     outline: bool,
+    /// And this turns it off again, for when your settings have it on.
+    #[arg(long, conflicts_with = "outline")]
+    no_outline: bool,
     /// The colour of those boxes: red, green, blue, black, or 'R,G,B' with
     /// each from 0 to 1.
-    #[arg(long, default_value = "red", requires = "outline")]
-    outline_colour: String,
+    #[arg(long)]
+    outline_colour: Option<String>,
     /// Write the delta even when a check blocks it.
     #[arg(long)]
     force: bool,
@@ -344,10 +370,12 @@ struct CompareArgs {
     original: PathBuf,
     /// The edited copy.
     edited: PathBuf,
-    #[arg(long, default_value_t = onionskin::pipeline::DEFAULT_DPI)]
-    dpi: f64,
-    #[arg(long, default_value_t = onionskin::safety::DEFAULT_MARGIN_MM)]
-    margin: f64,
+    /// Rendering resolution. Without it, your setting, then 400.
+    #[arg(long)]
+    dpi: Option<f64>,
+    /// Warn about ink closer than this to an edge, in mm.
+    #[arg(long)]
+    margin: Option<f64>,
     #[arg(long)]
     json: bool,
 }
@@ -376,7 +404,7 @@ struct MeasureArgs {
     #[arg(long)]
     name: String,
     /// The paper the target was printed on.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// The inset the target was drawn with, if it was not the default.
     #[arg(long)]
@@ -401,7 +429,7 @@ struct TargetArgs {
     #[arg(short, long)]
     output: PathBuf,
     /// The paper it will be printed on.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// How far in to place the corner crosshairs, in mm.
     #[arg(long)]
@@ -424,7 +452,7 @@ struct SolveArgs {
     #[arg(long = "point", value_name = "P1:DX,DY", allow_hyphen_values = true)]
     points: Vec<String>,
     /// The paper the target was printed on.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// The inset the target was drawn with, if it was not the default.
     #[arg(long)]
@@ -445,7 +473,7 @@ struct NewArgs {
     /// Where to keep the document.
     document: PathBuf,
     /// Size of the paper: a4, letter, legal… or a size in mm like 100x150.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// How many sheets.
     #[arg(long, default_value_t = 1)]
@@ -563,6 +591,12 @@ struct DrawArgs {
 }
 
 #[derive(clap::Args)]
+struct UndoArgs {
+    /// The document to put back.
+    document: PathBuf,
+}
+
+#[derive(clap::Args)]
 struct ShowArgs {
     /// The document to look at.
     document: PathBuf,
@@ -649,7 +683,7 @@ struct ReadArgs {
     /// The scan: PNG, JPEG, TIFF or BMP.
     scan: PathBuf,
     /// Size of the paper that was scanned.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// A font file to read the letters against. Without one, Onionskin reports
     /// where every letter is but not which letter it is.
@@ -702,7 +736,7 @@ struct AcquireArgs {
     #[arg(long)]
     colour: bool,
     /// The paper size, so the scan can be checked once it is taken.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
 }
 
@@ -712,7 +746,7 @@ struct InspectArgs {
     /// The scan: PNG, JPEG, TIFF or BMP.
     scan: PathBuf,
     /// Size of the paper that was scanned.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// The image is exactly the sheet: skip detection and straightening.
     #[arg(long)]
@@ -758,7 +792,7 @@ struct AddArgs {
     below: Vec<String>,
 
     /// Size of the paper that was scanned.
-    #[arg(long, default_value = "a4")]
+    #[arg(long, default_value_t = default_page())]
     page: String,
     /// Type size in points. Without it, measured off the words already on the
     /// page.
@@ -919,6 +953,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Show(args) => cmd_show(args),
         Command::Edit(args) => cmd_edit(args),
         Command::Erase(args) => cmd_erase(args),
+        Command::Undo(args) => cmd_undo(args),
         Command::Print(args) => cmd_print(args),
         Command::Read(args) => cmd_read(args),
         Command::Delta(args) => cmd_delta(args),
@@ -937,6 +972,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Package(args) => cmd_package(args),
         Command::AptRepo(args) => cmd_apt_repo(args),
         Command::Completions(args) => cmd_completions(args),
+        Command::Config(args) => cmd_config(args),
     }
 }
 
@@ -2288,6 +2324,18 @@ fn expert_options(mut options: pipeline::Options, args: &DeltaArgs) -> Result<pi
     Ok(options)
 }
 
+/// The paper to assume when none was named.
+///
+/// Somebody working in a country that uses Letter should say so once rather
+/// than on every command they ever type. Onionskin's own answer is A4, which
+/// is right for most of the world and wrong for a great many people every day.
+fn default_page() -> String {
+    onionskin::settings::load()
+        .defaults
+        .page
+        .unwrap_or_else(|| "a4".to_string())
+}
+
 /// A colour by name, or as three numbers.
 ///
 /// Names first because that is what somebody types, and the three-number form
@@ -2412,20 +2460,37 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         .clone()
         .unwrap_or_else(|| beside(&args.edited, "-delta", "pdf"));
     check_writable(&output, "delta")?;
-    let outline = args
-        .outline
+    // The flag, then what this person chose for themselves, then Onionskin's
+    // own answer. Never the other way about: stating a preference must not
+    // cost the ability to depart from it for one run.
+    let mine = onionskin::settings::load().defaults;
+    let wants_outline = args.outline || (!args.no_outline && mine.outline.unwrap_or(false));
+    let outline = wants_outline
         .then(|| {
-            parse_colour(&args.outline_colour).map(|colour| onionskin::delta::Outline {
+            let named = args
+                .outline_colour
+                .clone()
+                .or_else(|| mine.outline_colour.clone())
+                .unwrap_or_else(|| "red".to_string());
+            parse_colour(&named).map(|colour| onionskin::delta::Outline {
                 colour,
                 ..Default::default()
             })
         })
         .transpose()?;
     let options = delta_options(
-        &args.mode,
-        args.dpi,
-        args.margin,
-        args.profile.clone(),
+        &args
+            .mode
+            .clone()
+            .or_else(|| mine.mode.clone())
+            .unwrap_or_else(|| "raster".to_string()),
+        args.dpi
+            .or(mine.dpi)
+            .unwrap_or(onionskin::pipeline::DEFAULT_DPI),
+        args.margin
+            .or(mine.margin_mm)
+            .unwrap_or(onionskin::safety::DEFAULT_MARGIN_MM),
+        args.profile.clone().or_else(|| mine.profile.clone()),
         args.preview.clone(),
         outline,
     )?;
@@ -2497,7 +2562,19 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
 fn cmd_compare(args: CompareArgs) -> Result<ExitCode, String> {
     // Nothing is written at all, and nothing is built to be thrown away
     // either — see `pipeline::examine`.
-    let options = delta_options("raster", args.dpi, args.margin, None, None, None)?;
+    let mine = onionskin::settings::load().defaults;
+    let options = delta_options(
+        "raster",
+        args.dpi
+            .or(mine.dpi)
+            .unwrap_or(onionskin::pipeline::DEFAULT_DPI),
+        args.margin
+            .or(mine.margin_mm)
+            .unwrap_or(onionskin::safety::DEFAULT_MARGIN_MM),
+        mine.profile.clone(),
+        None,
+        None,
+    )?;
     let outcome =
         pipeline::examine(&args.original, &args.edited, &options).map_err(|e| e.to_string())?;
 
@@ -2825,6 +2902,99 @@ fn wants_colour(is_terminal: bool) -> bool {
         return false;
     }
     is_terminal
+}
+
+/// Put a document back as it was before the last change.
+///
+/// `erase` takes a piece of text off a page and there was no way back from it —
+/// nor from an `edit` that replaced the wrong item, nor a `write` at the wrong
+/// millimetre. Every command that changes a document now sets the previous
+/// version aside first, and this puts it back.
+///
+/// It swaps the two rather than merely restoring, so an undo can itself be
+/// undone: somebody who goes back one step too many should not have to redo the
+/// work by hand.
+fn cmd_undo(args: UndoArgs) -> Result<ExitCode, String> {
+    if !args.document.is_file() {
+        return Err(format!("no such document: {}", args.document.display()));
+    }
+    onionskin::document::undo(&args.document).map_err(|e| e.to_string())?;
+
+    let document = Document::load(&args.document).map_err(|e| e.to_string())?;
+    println!("{} is back as it was.", args.document.display());
+    println!(
+        "  {} page{}, {} piece{} of text, {} drawing{}",
+        document.pages,
+        if document.pages == 1 { "" } else { "s" },
+        document.items.len(),
+        if document.items.len() == 1 { "" } else { "s" },
+        document.shapes.len(),
+        if document.shapes.len() == 1 { "" } else { "s" },
+    );
+    println!("\nRun it again to go forward, if that was one step too many.");
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// Settings somebody chose for themselves
+// ---------------------------------------------------------------------------
+
+/// Show or change the defaults.
+///
+/// Onionskin has to choose *something* when it is not told — four hundred dots
+/// an inch, a five millimetre margin, no box round the changes — and those
+/// choices are right for most people most of the time and wrong for somebody
+/// every day. A person who always wants three hundred dots and the boxes drawn
+/// should say so once rather than in every command they ever type.
+///
+/// A flag still beats a setting, always. Somebody who has stated a preference
+/// has not given up the ability to depart from it for one run, which would be
+/// a strange thing for a preference to cost.
+fn cmd_config(args: ConfigArgs) -> Result<ExitCode, String> {
+    let pen = Pen::for_stdout();
+    match args.command.unwrap_or(ConfigCommand::Show) {
+        ConfigCommand::Show => {
+            let defaults = onionskin::settings::load().defaults;
+            println!("{}", pen.strong("Your settings"));
+            println!();
+            let mut any = false;
+            for (name, value, what) in defaults.each() {
+                match value {
+                    Some(value) => {
+                        any = true;
+                        println!("  {name:<16} {value:<12} {}", pen.dim(what));
+                    }
+                    None => println!(
+                        "  {} {}",
+                        pen.dim(&format!("{name:<16} {:<12}", "—")),
+                        pen.dim(what)
+                    ),
+                }
+            }
+            println!();
+            if any {
+                println!("A flag on the command line still beats any of these.");
+            } else {
+                println!("Nothing set — Onionskin is choosing everything.");
+            }
+            println!("{}", pen.dim("  onionskin config set dpi 300"));
+            println!("{}", pen.dim("  onionskin config set outline yes"));
+            println!("{}", pen.dim("  onionskin config unset dpi"));
+        }
+        ConfigCommand::Set { name, value } => {
+            onionskin::settings::set_default(&name, Some(&value))?;
+            println!("{name} is {value} from now on, unless a flag says otherwise.");
+        }
+        ConfigCommand::Unset { name } => {
+            onionskin::settings::set_default(&name, None)?;
+            println!("{name} is back to Onionskin's own choice.");
+        }
+        ConfigCommand::Reset => {
+            onionskin::settings::clear_defaults();
+            println!("Every setting is back to Onionskin's own choice.");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 // ---------------------------------------------------------------------------

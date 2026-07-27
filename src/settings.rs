@@ -37,6 +37,15 @@ pub struct Settings {
     /// Which of the window's screens was open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_screen: Option<String>,
+    /// The defaults this person prefers, where they differ from Onionskin's.
+    ///
+    /// Held apart from the rest because these change what the program *does*,
+    /// and the rest only changes where it starts looking. A setting that is
+    /// absent means "whatever Onionskin thinks", which is why every one of
+    /// them is optional rather than being written out with its default in it:
+    /// a default that has been copied into a file stops tracking the default.
+    #[serde(default, skip_serializing_if = "Defaults::is_empty")]
+    pub defaults: Defaults,
     /// Extra folders to look in for fonts.
     ///
     /// Onionskin already looks where the system keeps fonts, but a word
@@ -47,6 +56,177 @@ pub struct Settings {
     /// being added to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub font_folders: Vec<PathBuf>,
+}
+
+/// What somebody wants instead of what Onionskin would have chosen.
+///
+/// Every field is optional and absent means "use Onionskin's". Anything given
+/// on the command line still wins over anything here — the order is always the
+/// flag, then this, then the built-in default, and it is never the other way
+/// about. Somebody who sets a preference has not given up the ability to
+/// override it for one run, which would be a strange kind of preference.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Defaults {
+    /// Rendering resolution, in dots per inch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpi: Option<f64>,
+    /// How close to the edge of the paper is worth a warning, in millimetres.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_mm: Option<f64>,
+    /// "raster" or "vector".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Draw a box round every change without being asked each time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline: Option<bool>,
+    /// What colour those boxes are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline_colour: Option<String>,
+    /// The calibration profile to use when none is named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The paper to assume for a scan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+}
+
+/// A number as somebody would write it: 300 rather than 300.
+fn tidy(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value}")
+    }
+}
+
+impl Defaults {
+    /// Nothing set at all, in which case it is left out of the file entirely.
+    pub fn is_empty(&self) -> bool {
+        *self == Defaults::default()
+    }
+
+    /// Every setting there is, as name and current value.
+    ///
+    /// Listed from one place so that `config show`, `config set` and the help
+    /// cannot come to disagree about what exists.
+    pub fn each(&self) -> Vec<(&'static str, Option<String>, &'static str)> {
+        vec![
+            (
+                "dpi",
+                self.dpi.map(tidy),
+                "rendering resolution, 50 to 1200",
+            ),
+            (
+                "margin",
+                self.margin_mm.map(tidy),
+                "warn about ink closer than this to an edge, in mm",
+            ),
+            ("mode", self.mode.clone(), "raster or vector"),
+            (
+                "outline",
+                self.outline.map(|v| v.to_string()),
+                "draw a box round every change: yes or no",
+            ),
+            (
+                "outline-colour",
+                self.outline_colour.clone(),
+                "red, blue, green, orange, magenta, black, or R,G,B",
+            ),
+            (
+                "profile",
+                self.profile.clone(),
+                "the calibration profile to use when none is named",
+            ),
+            ("page", self.page.clone(), "the paper to assume for a scan"),
+        ]
+    }
+}
+
+/// Change one setting, or take it away with `None`.
+///
+/// Returns what is wrong with the value, if anything. Checked here rather than
+/// where it is used, so that a bad number is refused at the moment somebody
+/// types it — not silently stored and then met as an error on some later run
+/// they have forgotten this by.
+pub fn set_default(name: &str, value: Option<&str>) -> Result<(), String> {
+    let name = name.trim().to_ascii_lowercase();
+    let number = |what: &str, low: f64, high: f64| -> Result<Option<f64>, String> {
+        let Some(text) = value else { return Ok(None) };
+        let parsed: f64 = text
+            .trim()
+            .parse()
+            .map_err(|_| format!("'{text}' is not a number"))?;
+        if !parsed.is_finite() || parsed < low || parsed > high {
+            return Err(format!(
+                "{what} must be between {} and {}",
+                tidy(low),
+                tidy(high)
+            ));
+        }
+        Ok(Some(parsed))
+    };
+
+    match name.as_str() {
+        "dpi" => {
+            let dpi = number("dpi", 50.0, 1200.0)?;
+            remember(|s| s.defaults.dpi = dpi);
+        }
+        "margin" => {
+            let margin = number("the margin", 0.0, 40.0)?;
+            remember(|s| s.defaults.margin_mm = margin);
+        }
+        "mode" => {
+            let mode = match value {
+                None => None,
+                Some(text) => match text.trim().to_ascii_lowercase().as_str() {
+                    mode @ ("raster" | "vector") => Some(mode.to_string()),
+                    other => return Err(format!("mode is 'raster' or 'vector', not '{other}'")),
+                },
+            };
+            remember(|s| s.defaults.mode = mode);
+        }
+        "outline" => {
+            let outline = match value {
+                None => None,
+                Some(text) => match text.trim().to_ascii_lowercase().as_str() {
+                    "yes" | "true" | "on" | "1" => Some(true),
+                    "no" | "false" | "off" | "0" => Some(false),
+                    other => return Err(format!("outline is 'yes' or 'no', not '{other}'")),
+                },
+            };
+            remember(|s| s.defaults.outline = outline);
+        }
+        "outline-colour" | "outline-color" => {
+            let colour = value.map(|text| text.trim().to_string());
+            remember(|s| s.defaults.outline_colour = colour);
+        }
+        "profile" => {
+            let profile = value.map(|text| text.trim().to_string());
+            remember(|s| s.defaults.profile = profile);
+        }
+        "page" => {
+            let page = value.map(|text| text.trim().to_string());
+            remember(|s| s.defaults.page = page);
+        }
+        other => {
+            let known: Vec<&str> = Defaults::default()
+                .each()
+                .into_iter()
+                .map(|(name, _, _)| name)
+                .collect();
+            return Err(format!(
+                "there is no setting called '{other}'. There is: {}",
+                known.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Forget every preference, going back to what Onionskin would have chosen.
+pub fn clear_defaults() {
+    remember(|s| s.defaults = Defaults::default());
 }
 
 /// Where the file lives.

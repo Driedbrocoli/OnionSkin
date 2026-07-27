@@ -19,7 +19,7 @@
 //! delete something already printed, and toner does not come off paper. The
 //! document notices that and says so.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -320,6 +320,16 @@ impl Document {
     /// disk or a power cut between the two would leave an empty document where
     /// someone's work used to be.
     pub fn save(&self, path: &Path) -> Result<(), DocumentError> {
+        keep_the_last_one(path);
+        self.save_without_keeping(path)
+    }
+
+    /// The same, without setting anything aside to go back to.
+    ///
+    /// For [`undo`] itself, which would otherwise make the state it is undoing
+    /// into the next thing to undo, and leave somebody toggling between two
+    /// versions of their document forever.
+    pub fn save_without_keeping(&self, path: &Path) -> Result<(), DocumentError> {
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| DocumentError::Invalid(e.to_string()))?;
         let temporary = path.with_extension("onionskin-tmp");
@@ -562,6 +572,63 @@ impl Document {
         }
         per_page
     }
+}
+
+/// Where the version before the last change is kept.
+fn previous(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".before");
+    path.with_file_name(name)
+}
+
+/// Set the current version aside before overwriting it.
+///
+/// `erase` takes a piece of text off a page and there was no way back from it.
+/// Nor from an `edit` that replaced the wrong item, nor a `write` at the wrong
+/// millimetre. One copy is enough: somebody who has just done the wrong thing
+/// wants the last thing undone, and a program that quietly filled a folder with
+/// a hundred versions of their document would be solving a different problem
+/// badly.
+///
+/// Failures are ignored on purpose. A read-only folder, a full disk, a file
+/// that is not there yet — none is a reason to refuse to save the work somebody
+/// just did. Losing the ability to undo is a smaller harm than losing the
+/// change.
+fn keep_the_last_one(path: &Path) {
+    if !path.is_file() {
+        return;
+    }
+    let _ = std::fs::copy(path, previous(path));
+}
+
+/// Is there a version to go back to?
+pub fn can_undo(path: &Path) -> bool {
+    previous(path).is_file()
+}
+
+/// Put the document back as it was before the last change.
+///
+/// Swaps the two, so that an undo can itself be undone — somebody who goes back
+/// one step too many should not have to redo the work by hand. Running it twice
+/// therefore returns to where it started, which is what one undo button does in
+/// every program that has one.
+pub fn undo(path: &Path) -> Result<(), DocumentError> {
+    let before = previous(path);
+    if !before.is_file() {
+        return Err(DocumentError::Invalid(format!(
+            "there is nothing to undo for {} — Onionskin keeps the version from \
+             before the last change, and this one has not been changed since it \
+             was opened.",
+            path.display()
+        )));
+    }
+    // Both are read before either is written, so a failure part-way through
+    // leaves the document as one of the two versions rather than as neither.
+    let going_back = Document::load(&before)?;
+    let current = Document::load(path)?;
+    going_back.save_without_keeping(path)?;
+    current.save_without_keeping(&before)?;
+    Ok(())
 }
 
 impl Shape {

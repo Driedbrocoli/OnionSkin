@@ -748,6 +748,49 @@ accounts on a shared machine cannot read documents you have processed.
 Onionskin also refuses to write a delta over one of the documents it was made
 from, since that would destroy the sheet you were about to print onto.
 
+## Your defaults, not Onionskin's
+
+Onionskin has to choose something when it is not told — four hundred dots an
+inch, a five millimetre margin, A4, no box round the changes. Those are right
+for most people most of the time and wrong for somebody every day. Say it once
+instead of in every command you ever type:
+
+```bash
+onionskin config                       # what is set, and what could be
+onionskin config set dpi 300
+onionskin config set outline yes
+onionskin config set page letter
+onionskin config unset dpi             # back to Onionskin's own answer
+onionskin config reset                 # all of them
+```
+
+**A flag always beats a setting.** Stating a preference does not cost you the
+ability to depart from it for one run — `--dpi 600` still wins, and
+`--no-outline` turns the boxes off for one delta without changing anything.
+
+A value that is out of range is refused the moment you type it, naming what is
+wrong, rather than being stored and met as an error on some later run you have
+forgotten this by.
+
+## Undo
+
+`erase` takes a piece of text off a page, and there used to be no way back from
+it — nor from an `edit` that replaced the wrong item, nor a `write` at the wrong
+millimetre.
+
+```bash
+onionskin undo letter.onionskin
+```
+
+Every command that changes a document sets the previous version aside first, in
+a file named after it in the same folder. Undo swaps the two, so running it
+again goes forward — going back one step too many should not mean redoing the
+work by hand.
+
+One version, not a hundred. Somebody who has just done the wrong thing wants
+the last thing undone; a program that quietly filled their folder with versions
+would be solving a different problem badly.
+
 ## Tab completion
 
 ```bash

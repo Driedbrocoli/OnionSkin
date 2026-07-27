@@ -1235,3 +1235,96 @@ fn a_shape_describes_itself_by_what_it_looks_like_not_just_its_stored_kind() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Undo
+// ---------------------------------------------------------------------------
+
+fn a_document(dir: &std::path::Path, words: &str) -> PathBuf {
+    let path = dir.join("d.onionskin");
+    let mut doc = Document::blank(A4, 1);
+    doc.add(item(words, 25.0, 40.0)).unwrap();
+    doc.save(&path).unwrap();
+    path
+}
+
+#[test]
+fn the_version_before_the_last_change_is_kept() {
+    // `erase` takes a piece of text off a page, and there was no way back.
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "First");
+    assert!(!can_undo(&path), "nothing has changed yet");
+
+    let mut doc = Document::load(&path).unwrap();
+    doc.remove(1).unwrap();
+    doc.save(&path).unwrap();
+    assert!(can_undo(&path), "the change left nothing to go back to");
+    assert_eq!(Document::load(&path).unwrap().items.len(), 0);
+
+    undo(&path).unwrap();
+    let back = Document::load(&path).unwrap();
+    assert_eq!(back.items.len(), 1);
+    assert_eq!(back.items[0].text, "First");
+}
+
+#[test]
+fn an_undo_can_itself_be_undone() {
+    // Somebody who goes back one step too many should not have to redo the
+    // work by hand — which is what one undo button does everywhere else.
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "First");
+    let mut doc = Document::load(&path).unwrap();
+    doc.remove(1).unwrap();
+    doc.save(&path).unwrap();
+
+    undo(&path).unwrap();
+    assert_eq!(Document::load(&path).unwrap().items.len(), 1);
+    undo(&path).unwrap();
+    assert_eq!(Document::load(&path).unwrap().items.len(), 0);
+    undo(&path).unwrap();
+    assert_eq!(Document::load(&path).unwrap().items.len(), 1);
+}
+
+#[test]
+fn only_the_last_change_is_kept_not_a_folder_full_of_them() {
+    // Somebody who has just done the wrong thing wants the last thing undone.
+    // Keeping a hundred versions would be solving a different problem badly.
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "One");
+    for words in ["Two", "Three", "Four"] {
+        let mut doc = Document::load(&path).unwrap();
+        doc.add(item(words, 25.0, 60.0)).unwrap();
+        doc.save(&path).unwrap();
+    }
+    let kept: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(kept.iter().any(|n| n.ends_with(".before")), "{kept:?}");
+}
+
+#[test]
+fn undoing_a_document_that_never_changed_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "First");
+    let said = undo(&path).unwrap_err().to_string();
+    assert!(said.contains("nothing to undo"), "{said}");
+    // And the document is untouched.
+    assert_eq!(Document::load(&path).unwrap().items.len(), 1);
+}
+
+#[test]
+fn the_kept_copy_sits_beside_the_document_it_belongs_to() {
+    // In the same folder and named after it, so it is obvious what it is and
+    // obvious that deleting it is safe.
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "First");
+    let mut doc = Document::load(&path).unwrap();
+    doc.remove(1).unwrap();
+    doc.save(&path).unwrap();
+
+    let beside = dir.path().join("d.onionskin.before");
+    assert!(beside.is_file(), "{:?}", std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>());
+}

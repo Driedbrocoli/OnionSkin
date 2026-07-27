@@ -34,6 +34,7 @@ fn what_is_written_comes_back() {
         last_output_folder: None,
         last_screen: Some("Compare".into()),
         font_folders: Vec::new(),
+        defaults: Defaults::default(),
     });
 
     let read = load();
@@ -207,4 +208,116 @@ fn settings_written_by_a_version_that_knew_nothing_of_fonts_still_load() {
     let read = load();
     assert_eq!(read.last_screen.as_deref(), Some("Compare"));
     assert!(read.font_folders.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Defaults somebody chose for themselves
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nothing_chosen_means_onionskins_own_answer() {
+    let _home = elsewhere();
+    let mine = load().defaults;
+    assert!(mine.is_empty());
+    // Absent, not written out with the default in it: a default copied into a
+    // file stops tracking the default.
+    assert!(mine.dpi.is_none());
+    assert!(mine.outline.is_none());
+}
+
+#[test]
+fn a_setting_is_kept_and_can_be_taken_away_again() {
+    let _home = elsewhere();
+    set_default("dpi", Some("300")).unwrap();
+    assert_eq!(load().defaults.dpi, Some(300.0));
+
+    set_default("dpi", None).unwrap();
+    assert!(load().defaults.dpi.is_none());
+    assert!(load().defaults.is_empty(), "the file should be back to bare");
+}
+
+#[test]
+fn a_bad_value_is_refused_when_it_is_typed() {
+    // Not silently stored and met as an error on some later run they have
+    // forgotten this by.
+    let _home = elsewhere();
+    for (name, value) in [
+        ("dpi", "9999"),
+        ("dpi", "ten"),
+        ("margin", "-1"),
+        ("mode", "sideways"),
+        ("outline", "maybe"),
+    ] {
+        let said = set_default(name, Some(value)).unwrap_err();
+        assert!(!said.is_empty(), "{name}={value} was accepted");
+    }
+    assert!(load().defaults.is_empty(), "a refused value was stored");
+}
+
+#[test]
+fn a_setting_that_does_not_exist_says_which_ones_do() {
+    let _home = elsewhere();
+    let said = set_default("colour-scheme", Some("dark")).unwrap_err();
+    assert!(said.contains("colour-scheme"), "{said}");
+    assert!(said.contains("outline"), "{said}");
+    assert!(said.contains("dpi"), "{said}");
+}
+
+#[test]
+fn yes_and_no_are_accepted_the_ways_people_write_them() {
+    let _home = elsewhere();
+    for yes in ["yes", "true", "on", "1", "YES"] {
+        set_default("outline", Some(yes)).unwrap();
+        assert_eq!(load().defaults.outline, Some(true), "{yes}");
+    }
+    for no in ["no", "false", "off", "0", "No"] {
+        set_default("outline", Some(no)).unwrap();
+        assert_eq!(load().defaults.outline, Some(false), "{no}");
+    }
+}
+
+#[test]
+fn every_setting_is_listed_with_something_to_read() {
+    // `config show`, `config set` and the error message all read this, so a
+    // setting missing from it is a setting nobody can discover.
+    let _home = elsewhere();
+    let listed = Defaults::default().each();
+    assert_eq!(listed.len(), 7, "{listed:?}");
+    for (name, value, what) in &listed {
+        assert!(!name.is_empty());
+        assert!(value.is_none(), "{name} has a value before anything was set");
+        assert!(!what.is_empty(), "{name} has no description");
+        // And every listed name has to be one `set` will actually accept.
+        assert!(
+            set_default(name, None).is_ok(),
+            "{name} is listed but not settable"
+        );
+    }
+}
+
+#[test]
+fn clearing_takes_everything_away_and_nothing_else() {
+    let _home = elsewhere();
+    set_default("dpi", Some("300")).unwrap();
+    set_default("outline", Some("yes")).unwrap();
+    remember_folder(&std::env::temp_dir());
+
+    clear_defaults();
+    assert!(load().defaults.is_empty());
+    // The places somebody was working are not preferences and are not touched.
+    assert!(load().last_folder.is_some(), "clearing took the folder too");
+}
+
+#[test]
+fn settings_written_before_defaults_existed_still_load() {
+    let _home = elsewhere();
+    std::fs::create_dir_all(crate::calibrate::home_dir()).unwrap();
+    std::fs::write(
+        crate::calibrate::home_dir().join("settings.json"),
+        r#"{"last_screen":"Compare","font_folders":[]}"#,
+    )
+    .unwrap();
+    let read = load();
+    assert_eq!(read.last_screen.as_deref(), Some("Compare"));
+    assert!(read.defaults.is_empty());
 }
