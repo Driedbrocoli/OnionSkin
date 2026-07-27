@@ -231,10 +231,50 @@ fn library_is_here(name: &str) -> bool {
 /// Is this program on the path?
 #[cfg(target_os = "linux")]
 fn which_binary(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+    every_binary(name).into_iter().next()
+}
+
+/// Every copy of a program on the path, in the order the shell would find
+/// them — so the first is the one that actually runs.
+///
+/// There are two ways to install Onionskin and they land in different places:
+/// `onionskin install` puts a copy in the user's own account, and the `.deb`
+/// puts one in `/usr/bin`. Do both and there are two, and the shell silently
+/// prefers whichever directory comes first on PATH. Somebody who downloads a
+/// new version, installs it, and finds nothing has changed has almost always
+/// hit this — and there is nothing on the screen to tell them, because the old
+/// program is working perfectly. It just is not the one they installed.
+pub fn every_binary(name: &str) -> Vec<PathBuf> {
+    match std::env::var_os("PATH") {
+        Some(path) => every_binary_on(&path, name),
+        None => Vec::new(),
+    }
+}
+
+/// The same, against a given path rather than the process's own.
+///
+/// Split out so the searching can be tested without setting PATH, which is a
+/// process-wide thing and therefore not something a test running beside other
+/// tests should be touching.
+fn every_binary_on(path: &std::ffi::OsStr, name: &str) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for dir in std::env::split_paths(path) {
+        let candidate = dir.join(name);
+        if !candidate.is_file() {
+            continue;
+        }
+        // The same directory can be on PATH twice, and ~/.local/bin and
+        // /home/someone/.local/bin are the same place under two names.
+        let settled = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+        if found
+            .iter()
+            .any(|seen| seen.canonicalize().unwrap_or_else(|_| seen.clone()) == settled)
+        {
+            continue;
+        }
+        found.push(candidate);
+    }
+    found
 }
 
 /// The rendering library's name here, in the order worth trying.

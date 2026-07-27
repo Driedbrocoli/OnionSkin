@@ -427,3 +427,52 @@ fn uninstalling_what_was_never_installed_is_not_an_error() {
     let report = uninstall(&options).unwrap();
     assert_eq!(report.binary, None);
 }
+
+/// Two copies on the path are both found, in the order the shell would find
+/// them.
+///
+/// The mistake this exists to make visible has no symptom of its own: install
+/// a new version while an old one sits earlier on PATH and the old one keeps
+/// running, working perfectly, being the wrong program.
+#[test]
+fn every_copy_on_the_path_is_found_in_the_order_the_shell_would() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(first.join("onionskin"), b"one").unwrap();
+    std::fs::write(second.join("onionskin"), b"two").unwrap();
+
+    let joined = std::env::join_paths([&first, &second]).unwrap();
+    let found = every_binary_on(&joined, "onionskin");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0], first.join("onionskin"));
+    assert_eq!(found[1], second.join("onionskin"));
+}
+
+/// The same directory listed twice on PATH is one copy, not two.
+///
+/// PATH picks up duplicates easily — a shell profile sourced twice is enough —
+/// and reporting "2 copies are installed" for one file would send somebody
+/// hunting for a second program that does not exist.
+#[test]
+fn a_directory_on_the_path_twice_is_still_one_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("onionskin"), b"one").unwrap();
+
+    let joined = std::env::join_paths([&bin, &bin]).unwrap();
+    let found = every_binary_on(&joined, "onionskin");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn nothing_on_the_path_is_no_copies_rather_than_a_guess() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let joined = std::env::join_paths([&empty]).unwrap();
+    assert!(every_binary_on(&joined, "onionskin").is_empty());
+}

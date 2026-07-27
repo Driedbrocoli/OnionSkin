@@ -4828,9 +4828,69 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
 // ---------------------------------------------------------------------------
 
 /// Say what works here and what does not, before anyone wastes a sheet.
+/// Which copy of Onionskin the shell actually runs, and whether there is more
+/// than one.
+///
+/// The failure this catches has no symptom. There are two ways to install —
+/// `onionskin install` puts a copy in your own account, the `.deb` puts one in
+/// `/usr/bin` — and doing both leaves two, with the shell silently preferring
+/// whichever directory comes first on PATH. Somebody downloads a new version,
+/// installs it, runs it, and nothing has changed. Nothing is broken and nothing
+/// says anything, because the old program is working perfectly; it simply is
+/// not the one they just installed. Without this the only way to find out is to
+/// already suspect it.
+fn report_which_copy_is_running() {
+    let copies = onionskin::install::every_binary(if cfg!(windows) {
+        "onionskin.exe"
+    } else {
+        "onionskin"
+    });
+    let running = std::env::current_exe().ok();
+
+    match copies.split_first() {
+        // None on the path at all means this is a program being run from
+        // wherever it was unpacked or built, which is a perfectly ordinary
+        // thing to do and worth naming rather than complaining about.
+        None | Some((_, [])) => {
+            if let Some(shown) = copies.first().or(running.as_ref()) {
+                println!("  This copy       {}", shown.display());
+            }
+        }
+        Some((first, rest)) => {
+            println!("  ATTENTION       {} copies are installed.", copies.len());
+            println!("      Your shell runs this one: {}", first.display());
+            for other in rest {
+                println!("      and there is also:        {}", other.display());
+            }
+            println!(
+                "      If you installed a new version and nothing changed, this is \
+                 why: the\n      copy that runs is not the copy you installed. Keep \
+                 one of them.\n        - the one in your own account came from \
+                 'onionskin install', and\n          'onionskin uninstall' takes it \
+                 away again\n        - the one under /usr came from the .deb, and \
+                 'sudo apt remove onionskin'\n          takes that away"
+            );
+        }
+    }
+
+    // Worth saying only when the copy that would run is not the copy that just
+    // reported — which is the whole confusion, stated as a fact about two
+    // paths. Compared through the filesystem, because /usr/bin/onionskin and a
+    // symlink to it are the same program under two names and saying so twice
+    // would invent a problem.
+    if let (Some(first), Some(running)) = (copies.first(), &running) {
+        let settle = |p: &PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
+        if settle(first) != settle(running) {
+            println!("      (this report came from {})", running.display());
+        }
+    }
+    println!();
+}
+
 fn cmd_doctor() -> Result<ExitCode, String> {
     let mut everything_works = true;
     println!("Onionskin {}\n", env!("CARGO_PKG_VERSION"));
+    report_which_copy_is_running();
 
     // Rendering: needed by everything except the document editor.
     match onionskin::render::engine() {
@@ -5166,10 +5226,47 @@ fn cmd_install(args: InstallArgs) -> Result<ExitCode, String> {
     for note in &report.notes {
         println!("\n{note}");
     }
+    warn_about_the_other_copy(report.binary.as_deref());
 
     println!("\nTry it:\n  onionskin doctor");
     println!("\nTo remove it later:  onionskin uninstall");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Say so when what was just installed is not what will run.
+///
+/// The moment a second copy comes into existence is the moment to mention it,
+/// because afterwards there is nothing to notice: the older copy keeps running
+/// and keeps working, and the only symptom is that a version somebody just
+/// installed does not appear to have installed. Said here, it costs two lines
+/// and is read by the one person who can act on it, while they are still
+/// looking at the terminal they typed the command into.
+fn warn_about_the_other_copy(installed: Option<&Path>) {
+    let Some(installed) = installed else { return };
+    let copies = onionskin::install::every_binary(if cfg!(windows) {
+        "onionskin.exe"
+    } else {
+        "onionskin"
+    });
+    let settle = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let Some(first) = copies.first() else { return };
+    if settle(first) == settle(installed) {
+        return;
+    }
+
+    println!(
+        "\nATTENTION: this is not the copy your shell will run.\n  \
+         it runs   {}\n  \
+         you just installed   {}\n\
+         Both work; the first one wins because its folder comes first on your \
+         PATH. Until\none of them goes, `onionskin` will keep being the older \
+         one — which looks exactly\nlike the new version not having installed. \
+         Remove whichever you do not want:\n  \
+         sudo apt remove onionskin      (the one under /usr, from the .deb)\n  \
+         onionskin uninstall            (the one in your own account)",
+        first.display(),
+        installed.display(),
+    );
 }
 
 fn cmd_uninstall(args: InstallArgs) -> Result<ExitCode, String> {
