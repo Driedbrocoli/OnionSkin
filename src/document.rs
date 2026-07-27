@@ -266,10 +266,23 @@ pub enum DocumentError {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
-    #[error("{path} is not an Onionskin document: {source}")]
+    #[error("{path} is damaged — it is an Onionskin document, but it will not \
+             read: {source}")]
     Malformed {
         path: std::path::PathBuf,
         source: serde_json::Error,
+    },
+    /// A file that was never one of ours, handed to a command that edits ours.
+    ///
+    /// Kept apart from `Malformed` because the two need opposite answers. A
+    /// damaged document wants the parser's complaint; somebody who has handed
+    /// over their own PDF wants to be told which command they meant, and
+    /// "expected value at line 1 column 1" tells them nothing at all.
+    #[error("{path} is {kind}, not an Onionskin document.\n{advice}")]
+    NotOurs {
+        path: std::path::PathBuf,
+        kind: String,
+        advice: String,
     },
     #[error("{0}")]
     Invalid(String),
@@ -325,6 +338,14 @@ impl Document {
     pub fn load(path: &Path) -> Result<Document, DocumentError> {
         if !path.is_file() {
             return Err(DocumentError::Missing(path.to_path_buf()));
+        }
+        if !Document::is_one(path) {
+            let (kind, advice) = what_it_looks_like(path);
+            return Err(DocumentError::NotOurs {
+                path: path.to_path_buf(),
+                kind: kind.to_string(),
+                advice: advice.to_string(),
+            });
         }
         let text = std::fs::read_to_string(path).map_err(|source| DocumentError::Io {
             path: path.to_path_buf(),
@@ -604,6 +625,44 @@ impl Document {
 }
 
 /// Where the version before the last change is kept.
+/// What a file that is not one of ours appears to be, and what to do with it.
+///
+/// Read from the first few bytes rather than the name, for the same reason
+/// [`Document::is_one`] is: the name is a label somebody chose and the magic
+/// number is what the file actually is.
+fn what_it_looks_like(path: &Path) -> (&'static str, &'static str) {
+    let mut start = [0u8; 8];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| {
+            use std::io::Read;
+            file.read(&mut start)
+        })
+        .unwrap_or(0);
+    let head = &start[..read];
+
+    const ADVICE_FOR_A_PAGE: &str = concat!(
+        "    Put words on the printed sheet:  onionskin write <file> ",
+        "--at '25,40:words'\n",
+        "    Or compare two versions of it:   onionskin delta <before> <after>",
+    );
+
+    if head.starts_with(b"%PDF") {
+        ("a PDF", ADVICE_FOR_A_PAGE)
+    } else if head.starts_with(b"PK\x03\x04") {
+        ("a Word or OpenDocument file", ADVICE_FOR_A_PAGE)
+    } else if head.starts_with(b"\x89PNG") || head.starts_with(&[0xff, 0xd8, 0xff]) {
+        (
+            "an image",
+            "    Write on the scanned sheet:  onionskin add <image> --at-mm '45,63:words'",
+        )
+    } else {
+        (
+            "not a document Onionskin can open",
+            "    Make one:  onionskin new <name>.onionskin",
+        )
+    }
+}
+
 fn previous(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".before");
