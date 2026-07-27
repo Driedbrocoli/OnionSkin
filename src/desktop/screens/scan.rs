@@ -174,8 +174,8 @@ pub fn show(state: &mut State, room: &mut Room) {
             "Font file, for another alphabet",
             &mut state.font_file,
             &["ttf", "otf", "ttc"],
-        room.dropped,
-    );
+            room.dropped,
+        );
         widgets::hint(
             ui,
             "Optional. Overrides the font above, and is carried inside the \
@@ -196,7 +196,10 @@ pub fn show(state: &mut State, room: &mut Room) {
                     .speed(1.0)
                     .suffix("°"),
             );
-            widgets::hint(ui, "clockwise — for a sideways box, or a note down the margin");
+            widgets::hint(
+                ui,
+                "clockwise — for a sideways box, or a note down the margin",
+            );
             if state.rotation_deg != 0.0 && ui.button("Straight again").clicked() {
                 state.rotation_deg = 0.0;
             }
@@ -215,7 +218,9 @@ pub fn show(state: &mut State, room: &mut Room) {
         (Some(scan_path), Ok(size)) => show_preview(state, room, &scan_path, size),
         (Some(_), Err(e)) => widgets::hint(
             room.ui,
-            &format!("The paper size above is not understood, so the scan cannot be shown to scale: {e}"),
+            &format!(
+                "The paper size above is not understood, so the scan cannot be shown to scale: {e}"
+            ),
         ),
         (None, _) => widgets::hint(room.ui, "Choose the scan above to see it here."),
     }
@@ -309,7 +314,12 @@ fn show_preview(state: &mut State, room: &mut Room, scan: &Path, page: geometry:
     let painter = room.ui.painter();
     for placement in &state.placements {
         let point = mm_to_point(rect, page, (placement.x_mm, placement.y_mm));
-        painter.circle(point, 5.0, theme::ADDED, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        painter.circle(
+            point,
+            5.0,
+            theme::ADDED,
+            egui::Stroke::new(1.5, egui::Color32::WHITE),
+        );
     }
 }
 
@@ -328,9 +338,17 @@ fn show_placements(state: &mut State, room: &mut Room) {
                     .desired_width(240.0),
             );
             ui.label("at");
-            ui.add(egui::DragValue::new(&mut placement.x_mm).suffix(" mm").speed(0.5));
+            ui.add(
+                egui::DragValue::new(&mut placement.x_mm)
+                    .suffix(" mm")
+                    .speed(0.5),
+            );
             ui.label(",");
-            ui.add(egui::DragValue::new(&mut placement.y_mm).suffix(" mm").speed(0.5));
+            ui.add(
+                egui::DragValue::new(&mut placement.y_mm)
+                    .suffix(" mm")
+                    .speed(0.5),
+            );
             if ui.small_button("×").clicked() {
                 remove = Some(index);
             }
@@ -356,7 +374,8 @@ fn show_placements(state: &mut State, room: &mut Room) {
     // holding a form knows the gap after "Received:" starts 44.9 mm across.
     // They know it is the gap after "Received:".
     room.ui.add_space(10.0);
-    room.ui.label("Or put them next to something already on the page");
+    room.ui
+        .label("Or put them next to something already on the page");
     let ready = state.scan.is_some() && !state.anchor.trim().is_empty();
     room.ui.horizontal(|ui| {
         ui.label(if state.anchor_below { "Below" } else { "After" });

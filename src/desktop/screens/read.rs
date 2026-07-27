@@ -238,10 +238,7 @@ fn start(state: &mut State, room: &mut Room) {
         let image = match image::open(&scan_path) {
             Ok(image) => image,
             Err(e) => {
-                return Outcome::refused(format!(
-                    "could not read {}: {e}",
-                    scan_path.display()
-                ));
+                return Outcome::refused(format!("could not read {}: {e}", scan_path.display()));
             }
         };
         let registration = match scan::register(&image, scan::ScanOptions::new(page)) {

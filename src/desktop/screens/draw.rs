@@ -127,7 +127,12 @@ fn show_picker(state: &mut State, room: &mut Room) {
          first, if there is not one yet.",
     );
     room.ui.add_space(6.0);
-    if widgets::file_row(room.ui, room.picker, "Document", &mut state.open_pick, &["onionskin"],
+    if widgets::file_row(
+        room.ui,
+        room.picker,
+        "Document",
+        &mut state.open_pick,
+        &["onionskin"],
         room.dropped,
     ) {
         match state.open_pick.clone() {
@@ -182,7 +187,10 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
 
     room.ui.horizontal(|ui| {
         ui.label("Page");
-        if ui.add_enabled(state.page > 1, egui::Button::new("◀")).clicked() {
+        if ui
+            .add_enabled(state.page > 1, egui::Button::new("◀"))
+            .clicked()
+        {
             state.page -= 1;
             state.drafting = None;
         }
@@ -201,9 +209,7 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
             let forward = onionskin::document::steps_forward(path);
             if ui
                 .add_enabled(back > 0, egui::Button::new("Undo"))
-                .on_hover_text(format!(
-                    "Go back a step. {back} to go back through."
-                ))
+                .on_hover_text(format!("Go back a step. {back} to go back through."))
                 .on_disabled_hover_text("Nothing has changed since this was opened")
                 .clicked()
             {
@@ -241,7 +247,10 @@ fn show_tool_options(state: &mut State, room: &mut Room) {
     room.ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Tool").strong());
         for tool in Tool::ALL {
-            if ui.selectable_label(state.tool == tool, tool.name()).clicked() {
+            if ui
+                .selectable_label(state.tool == tool, tool.name())
+                .clicked()
+            {
                 state.tool = tool;
                 state.drafting = None;
             }
@@ -314,7 +323,10 @@ fn drawing_problem(state: &State) -> Option<String> {
         );
     }
     if state.outline && document::colour32(&state.stroke).is_none() {
-        return Some(format!("{:?} is not a colour Onionskin understands.", state.stroke));
+        return Some(format!(
+            "{:?} is not a colour Onionskin understands.",
+            state.stroke
+        ));
     }
     if let Some(fill) = &state.fill {
         if document::colour32(fill).is_none() {
@@ -325,7 +337,9 @@ fn drawing_problem(state: &State) -> Option<String> {
         return Some("The line width must be a number greater than nothing.".to_string());
     }
     if state.dash
-        && !(state.dash_on_mm.is_finite() && state.dash_on_mm > 0.0 && state.dash_gap_mm.is_finite())
+        && !(state.dash_on_mm.is_finite()
+            && state.dash_on_mm > 0.0
+            && state.dash_gap_mm.is_finite())
     {
         return Some("The dash length must be a number greater than nothing.".to_string());
     }
@@ -437,7 +451,11 @@ fn build_shape(state: &State, kind: ShapeKind) -> Shape {
         id: 0,
         page: state.page,
         kind,
-        stroke: if state.outline { Some(state.stroke.clone()) } else { None },
+        stroke: if state.outline {
+            Some(state.stroke.clone())
+        } else {
+            None
+        },
         fill: state.fill.clone(),
         width_mm: state.width_mm,
         dash_mm: if state.dash {
@@ -460,7 +478,11 @@ fn big_enough(kind: &ShapeKind) -> bool {
             x2_mm,
             y2_mm,
         } => ((x2_mm - x1_mm).powi(2) + (y2_mm - y1_mm).powi(2)).sqrt() >= MIN_EXTENT_MM,
-        ShapeKind::Rect { width_mm, height_mm, .. } => width_mm.max(*height_mm) >= MIN_EXTENT_MM,
+        ShapeKind::Rect {
+            width_mm,
+            height_mm,
+            ..
+        } => width_mm.max(*height_mm) >= MIN_EXTENT_MM,
         ShapeKind::Ellipse {
             radius_x_mm,
             radius_y_mm,
@@ -487,7 +509,8 @@ fn commit(state: &mut State, doc: &mut Document, draft: &Draft) {
 }
 
 fn show_shape_list(state: &mut State, doc: &mut Document, room: &mut Room) {
-    room.ui.label(egui::RichText::new("Drawings on this page").strong());
+    room.ui
+        .label(egui::RichText::new("Drawings on this page").strong());
     let ids: Vec<u32> = doc
         .shapes
         .iter()
@@ -504,7 +527,9 @@ fn show_shape_list(state: &mut State, doc: &mut Document, room: &mut Room) {
         .max_height(200.0)
         .show(room.ui, |ui| {
             for id in ids {
-                let Some(shape) = doc.shapes.iter().find(|s| s.id == id) else { continue };
+                let Some(shape) = doc.shapes.iter().find(|s| s.id == id) else {
+                    continue;
+                };
                 let (x0, y0, x1, y1) = shape.bounds();
                 let label = format!(
                     "{:>3}   {}   {:.1},{:.1} to {:.1},{:.1} mm",
@@ -525,7 +550,8 @@ fn show_shape_list(state: &mut State, doc: &mut Document, room: &mut Room) {
                 ui.horizontal(|ui| {
                     ui.label(label);
                     for colour in &swatches {
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                         ui.painter().rect_filled(rect, 2, *colour);
                     }
                     if ui.small_button("×").clicked() {
@@ -726,7 +752,10 @@ mod tests {
             state.tool = tool;
             render(&mut state);
         }
-        assert!(state.doc.is_some(), "a document that renders cleanly stays open");
+        assert!(
+            state.doc.is_some(),
+            "a document that renders cleanly stays open"
+        );
         let _ = std::fs::remove_file(state.path.take().unwrap());
     }
 
@@ -874,7 +903,10 @@ mod tests {
             now: (10.05, 10.02),
         };
         commit(&mut state, &mut doc, &tiny);
-        assert!(doc.shapes.is_empty(), "a drag that never really moved draws nothing");
+        assert!(
+            doc.shapes.is_empty(),
+            "a drag that never really moved draws nothing"
+        );
     }
 
     #[test]

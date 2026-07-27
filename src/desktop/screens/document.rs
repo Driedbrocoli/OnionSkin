@@ -202,8 +202,14 @@ pub fn show(state: &mut State, room: &mut Room) {
 }
 
 fn show_picker(state: &mut State, room: &mut Room) {
-    room.ui.label(egui::RichText::new("Open a document already started").strong());
-    if widgets::file_row(room.ui, room.picker, "Document", &mut state.open_pick, &["onionskin"],
+    room.ui
+        .label(egui::RichText::new("Open a document already started").strong());
+    if widgets::file_row(
+        room.ui,
+        room.picker,
+        "Document",
+        &mut state.open_pick,
+        &["onionskin"],
         room.dropped,
     ) {
         match state.open_pick.clone() {
@@ -229,7 +235,8 @@ fn show_picker(state: &mut State, room: &mut Room) {
     room.ui.separator();
     room.ui.add_space(10.0);
 
-    room.ui.label(egui::RichText::new("Or start a new one").strong());
+    room.ui
+        .label(egui::RichText::new("Or start a new one").strong());
     room.ui.horizontal(|ui| {
         ui.label("Paper");
         egui::ComboBox::from_id_salt("new-doc-page")
@@ -333,7 +340,13 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
              amount of adding to it will fix that — toner does not come off \
              paper.\n\n",
         );
-        message.push_str(&problems.iter().map(|p| p.format()).collect::<Vec<_>>().join("\n\n"));
+        message.push_str(
+            &problems
+                .iter()
+                .map(|p| p.format())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
         message.push_str("\n\nPrint the page fresh, then carry on adding to it.");
         widgets::refused(room.ui, &message);
         room.ui.add_space(10.0);
@@ -365,9 +378,7 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
             let forward = onionskin::document::steps_forward(path);
             if ui
                 .add_enabled(back > 0, egui::Button::new("Undo"))
-                .on_hover_text(format!(
-                    "Go back a step. {back} to go back through."
-                ))
+                .on_hover_text(format!("Go back a step. {back} to go back through."))
                 .on_disabled_hover_text("Nothing has changed since this was opened")
                 .clicked()
             {
@@ -459,7 +470,13 @@ fn show_canvas(state: &mut State, doc: &mut Document, room: &mut Room) {
         }
     }
 
-    let hit_at = |pos: egui::Pos2| hitboxes.iter().rev().find(|(_, r)| r.contains(pos)).map(|(id, _)| *id);
+    let hit_at = |pos: egui::Pos2| {
+        hitboxes
+            .iter()
+            .rev()
+            .find(|(_, r)| r.contains(pos))
+            .map(|(id, _)| *id)
+    };
 
     // The caret, and the keys that go into it. Drawn before the click handling
     // below so that what is on screen this frame is what the last frame's
@@ -501,7 +518,9 @@ fn show_canvas(state: &mut State, doc: &mut Document, room: &mut Room) {
             if phase < 0.6 {
                 painter.rect_filled(caret, 0, room.ui.visuals().selection.stroke.color);
             }
-            room.ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+            room.ui
+                .ctx()
+                .request_repaint_after(std::time::Duration::from_millis(80));
         }
     }
     if take_typing(state, doc, room) {
@@ -810,10 +829,21 @@ fn show_item_form(state: &mut State, doc: &mut Document, room: &mut Room) {
 
     room.ui.horizontal(|ui| {
         ui.label("At");
-        ui.add(egui::DragValue::new(&mut state.draft.x_mm).speed(0.5).suffix(" mm"));
+        ui.add(
+            egui::DragValue::new(&mut state.draft.x_mm)
+                .speed(0.5)
+                .suffix(" mm"),
+        );
         ui.label(",");
-        ui.add(egui::DragValue::new(&mut state.draft.y_mm).speed(0.5).suffix(" mm"));
-        widgets::hint(ui, "from the top-left corner; the second number is the baseline");
+        ui.add(
+            egui::DragValue::new(&mut state.draft.y_mm)
+                .speed(0.5)
+                .suffix(" mm"),
+        );
+        widgets::hint(
+            ui,
+            "from the top-left corner; the second number is the baseline",
+        );
     });
 
     room.ui.horizontal(|ui| {
@@ -867,7 +897,10 @@ fn show_item_form(state: &mut State, doc: &mut Document, room: &mut Room) {
         || state.draft.x_mm > doc.page.width_mm
         || state.draft.y_mm > doc.page.height_mm
     {
-        widgets::hint(room.ui, "That is off the edge of the paper — it will not print.");
+        widgets::hint(
+            room.ui,
+            "That is off the edge of the paper — it will not print.",
+        );
     }
     if overflows_page(&state.draft, doc.page) {
         widgets::hint(
@@ -971,11 +1004,20 @@ fn show_print(state: &mut State, doc: &mut Document, room: &mut Room) {
         state.delta = false;
     }
 
-    room.ui
-        .checkbox(&mut state.mark_printed, "Note this as printed once it is written");
-    widgets::hint(room.ui, "so a later print can offer just what is added from here on.");
+    room.ui.checkbox(
+        &mut state.mark_printed,
+        "Note this as printed once it is written",
+    );
+    widgets::hint(
+        room.ui,
+        "so a later print can offer just what is added from here on.",
+    );
 
-    let problems = if state.delta { doc.overlay_problems() } else { Vec::new() };
+    let problems = if state.delta {
+        doc.overlay_problems()
+    } else {
+        Vec::new()
+    };
     let blocked = state.delta && !problems.is_empty();
     if blocked {
         room.ui.add_space(6.0);
@@ -1013,7 +1055,9 @@ fn show_print(state: &mut State, doc: &mut Document, room: &mut Room) {
 }
 
 fn start_print(state: &mut State, doc: &Document, room: &mut Room) {
-    let Some(output) = state.output.clone() else { return };
+    let Some(output) = state.output.clone() else {
+        return;
+    };
     let snapshot = doc.clone();
     let delta = state.delta;
 
@@ -1142,13 +1186,19 @@ fn validate_draft(draft: &ItemDraft) -> Option<String> {
         return Some("The type size must be a number greater than nothing.".to_string());
     }
     if onionskin::document::parse_colour(&draft.colour).is_err() {
-        return Some(format!("{:?} is not a colour Onionskin understands.", draft.colour));
+        return Some(format!(
+            "{:?} is not a colour Onionskin understands.",
+            draft.colour
+        ));
     }
     if draft.wrap && !(draft.width_mm.is_finite() && draft.width_mm > 0.0) {
         return Some("The wrap width must be a number greater than nothing.".to_string());
     }
     if pdf::Font::parse(&draft.font).is_none() {
-        return Some(format!("{:?} is not one of the built-in fonts.", draft.font));
+        return Some(format!(
+            "{:?} is not one of the built-in fonts.",
+            draft.font
+        ));
     }
     None
 }
@@ -1280,7 +1330,8 @@ const MAX_CANVAS_HEIGHT: f32 = 520.0;
 /// can put its own ink on top.
 pub fn page_canvas(ui: &mut egui::Ui, page: PageSize) -> Canvas {
     let available = ui.available_width().clamp(120.0, MAX_CANVAS_WIDTH);
-    let px_per_mm = (available / page.width_mm as f32).min(MAX_CANVAS_HEIGHT / page.height_mm as f32);
+    let px_per_mm =
+        (available / page.width_mm as f32).min(MAX_CANVAS_HEIGHT / page.height_mm as f32);
     let paper_size = egui::vec2(
         page.width_mm as f32 * px_per_mm,
         page.height_mm as f32 * px_per_mm,
@@ -1336,9 +1387,18 @@ pub fn draw_item(
     let mut rects = Vec::with_capacity(lines.len());
     for line in &lines {
         let size_mm = onionskin::geometry::pt_to_mm(line.size_pt);
-        let font = egui::FontId::new(transform.px(size_mm).max(4.0), egui::FontFamily::Proportional);
+        let font = egui::FontId::new(
+            transform.px(size_mm).max(4.0),
+            egui::FontFamily::Proportional,
+        );
         let pos = transform.to_screen(line.x_mm, line.y_mm);
-        let mut rect = painter.text(pos, egui::Align2::LEFT_BOTTOM, &line.text, font.clone(), colour);
+        let mut rect = painter.text(
+            pos,
+            egui::Align2::LEFT_BOTTOM,
+            &line.text,
+            font.clone(),
+            colour,
+        );
         // A deliberately blank line paints nothing and returns a rect with no
         // area, which cannot be clicked — pad it so an empty line someone
         // left on purpose can still be selected and moved.
@@ -1396,7 +1456,12 @@ pub fn draw_shape(
             ];
             match shape.dash_mm {
                 Some((on, off)) => {
-                    painter.extend(egui::Shape::dashed_line(&path, stroke, transform.px(on), transform.px(off)));
+                    painter.extend(egui::Shape::dashed_line(
+                        &path,
+                        stroke,
+                        transform.px(on),
+                        transform.px(off),
+                    ));
                 }
                 None => {
                     painter.line_segment(path, stroke);
@@ -1436,7 +1501,12 @@ pub fn draw_shape(
                         ));
                     }
                     if has_stroke {
-                        painter.extend(egui::Shape::dashed_line(&points, stroke, transform.px(on), transform.px(off)));
+                        painter.extend(egui::Shape::dashed_line(
+                            &points,
+                            stroke,
+                            transform.px(on),
+                            transform.px(off),
+                        ));
                     }
                 }
                 None => {
@@ -1472,7 +1542,12 @@ pub fn draw_shape(
                     }
                     if has_stroke {
                         points.push(points[0]);
-                        painter.extend(egui::Shape::dashed_line(&points, stroke, transform.px(on), transform.px(off)));
+                        painter.extend(egui::Shape::dashed_line(
+                            &points,
+                            stroke,
+                            transform.px(on),
+                            transform.px(off),
+                        ));
                     }
                 }
                 None => {
@@ -1480,14 +1555,21 @@ pub fn draw_shape(
                         center: centre,
                         radius,
                         fill: fill_colour.unwrap_or(egui::Color32::TRANSPARENT),
-                        stroke: if has_stroke { stroke } else { egui::Stroke::NONE },
+                        stroke: if has_stroke {
+                            stroke
+                        } else {
+                            egui::Stroke::NONE
+                        },
                         angle: 0.0,
                     });
                 }
             }
         }
         ShapeKind::Path { points, closed } => {
-            let screen: Vec<egui::Pos2> = points.iter().map(|(x, y)| transform.to_screen(*x, *y)).collect();
+            let screen: Vec<egui::Pos2> = points
+                .iter()
+                .map(|(x, y)| transform.to_screen(*x, *y))
+                .collect();
             match shape.dash_mm {
                 Some((on, off)) => {
                     if *closed {
@@ -1504,14 +1586,26 @@ pub fn draw_shape(
                         if *closed {
                             path.push(screen[0]);
                         }
-                        painter.extend(egui::Shape::dashed_line(&path, stroke, transform.px(on), transform.px(off)));
+                        painter.extend(egui::Shape::dashed_line(
+                            &path,
+                            stroke,
+                            transform.px(on),
+                            transform.px(off),
+                        ));
                     }
                 }
                 None if *closed => {
                     let fill = fill_colour.unwrap_or(egui::Color32::TRANSPARENT);
-                    let path_stroke: egui::epaint::PathStroke =
-                        if has_stroke { stroke.into() } else { egui::epaint::PathStroke::NONE };
-                    painter.add(egui::epaint::PathShape::convex_polygon(screen, fill, path_stroke));
+                    let path_stroke: egui::epaint::PathStroke = if has_stroke {
+                        stroke.into()
+                    } else {
+                        egui::epaint::PathStroke::NONE
+                    };
+                    painter.add(egui::epaint::PathShape::convex_polygon(
+                        screen,
+                        fill,
+                        path_stroke,
+                    ));
                 }
                 None => {
                     if has_stroke {
@@ -1536,7 +1630,15 @@ fn ellipse_points(centre: egui::Pos2, radius: egui::Vec2) -> Vec<egui::Pos2> {
 /// The names `parse_colour` accepts as words, so nobody has to remember or
 /// type a hex triple for an ordinary colour.
 const COLOUR_NAMES: &[&str] = &[
-    "black", "white", "grey", "lightgrey", "red", "green", "blue", "yellow", "orange",
+    "black",
+    "white",
+    "grey",
+    "lightgrey",
+    "red",
+    "green",
+    "blue",
+    "yellow",
+    "orange",
 ];
 
 /// The three numbers `parse_colour` returns, as something egui can paint
@@ -1575,7 +1677,10 @@ pub fn colour_field(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool 
                     }
                 }
             });
-        if ui.add(egui::TextEdit::singleline(value).desired_width(70.0)).changed() {
+        if ui
+            .add(egui::TextEdit::singleline(value).desired_width(70.0))
+            .changed()
+        {
             changed = true;
         }
         swatch(ui, value);
@@ -1595,7 +1700,11 @@ pub fn colour_field_optional(
     let mut changed = false;
     let mut enabled = value.is_some();
     if ui.checkbox(&mut enabled, toggle_label).changed() {
-        *value = if enabled { Some(default.to_string()) } else { None };
+        *value = if enabled {
+            Some(default.to_string())
+        } else {
+            None
+        };
         changed = true;
     }
     if let Some(inner) = value {
@@ -1619,7 +1728,12 @@ fn swatch(ui: &mut egui::Ui, value: &str) {
             );
         }
         None => {
-            ui.painter().rect_stroke(rect, 3, egui::Stroke::new(1.0, theme::REFUSED), egui::StrokeKind::Outside);
+            ui.painter().rect_stroke(
+                rect,
+                3,
+                egui::Stroke::new(1.0, theme::REFUSED),
+                egui::StrokeKind::Outside,
+            );
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -1748,7 +1862,11 @@ mod tests {
     #[test]
     fn what_is_typed_goes_onto_the_page_where_the_caret_is() {
         let (_, mut doc, mut caret) = caret_on_blank_paper();
-        let leave = apply_keys(&[typed("Dear"), typed(" "), typed("Sir")], &mut caret, &mut doc);
+        let leave = apply_keys(
+            &[typed("Dear"), typed(" "), typed("Sir")],
+            &mut caret,
+            &mut doc,
+        );
         assert!(!leave);
         assert!(caret.changed);
         assert_eq!(doc.get(caret.id).unwrap().text, "Dear Sir");
@@ -1761,7 +1879,11 @@ mod tests {
     fn backspace_takes_the_last_letter_back() {
         let (_, mut doc, mut caret) = caret_on_blank_paper();
         apply_keys(&[typed("Sirr")], &mut caret, &mut doc);
-        apply_keys(&[pressed(egui::Key::Backspace, false)], &mut caret, &mut doc);
+        apply_keys(
+            &[pressed(egui::Key::Backspace, false)],
+            &mut caret,
+            &mut doc,
+        );
         assert_eq!(doc.get(caret.id).unwrap().text, "Sir");
     }
 
@@ -1769,7 +1891,11 @@ mod tests {
     #[test]
     fn backspace_with_nothing_to_take_back_changes_nothing() {
         let (_, mut doc, mut caret) = caret_on_blank_paper();
-        apply_keys(&[pressed(egui::Key::Backspace, false)], &mut caret, &mut doc);
+        apply_keys(
+            &[pressed(egui::Key::Backspace, false)],
+            &mut caret,
+            &mut doc,
+        );
         assert!(!caret.changed);
         assert_eq!(doc.get(caret.id).unwrap().text, "");
     }
@@ -1785,8 +1911,16 @@ mod tests {
         assert!(!leave, "shift-enter should not finish");
         assert_eq!(doc.get(caret.id).unwrap().text, "one\ntwo");
 
-        assert!(apply_keys(&[pressed(egui::Key::Enter, false)], &mut caret, &mut doc));
-        assert!(apply_keys(&[pressed(egui::Key::Escape, false)], &mut caret, &mut doc));
+        assert!(apply_keys(
+            &[pressed(egui::Key::Enter, false)],
+            &mut caret,
+            &mut doc
+        ));
+        assert!(apply_keys(
+            &[pressed(egui::Key::Escape, false)],
+            &mut caret,
+            &mut doc
+        ));
     }
 
     /// A click on blank paper that somebody thought better of leaves the
@@ -1854,7 +1988,10 @@ mod tests {
             ..State::default()
         };
         render(&mut state);
-        assert!(state.doc.is_some(), "a document that renders cleanly stays open");
+        assert!(
+            state.doc.is_some(),
+            "a document that renders cleanly stays open"
+        );
         let _ = std::fs::remove_file(state.path.take().unwrap());
     }
 
@@ -1944,7 +2081,10 @@ mod tests {
     #[test]
     fn colour32_understands_names_and_hex_and_refuses_nonsense() {
         assert_eq!(colour32("black"), Some(egui::Color32::from_rgb(0, 0, 0)));
-        assert_eq!(colour32("white"), Some(egui::Color32::from_rgb(255, 255, 255)));
+        assert_eq!(
+            colour32("white"),
+            Some(egui::Color32::from_rgb(255, 255, 255))
+        );
         let red = colour32("#ff0000").unwrap();
         assert_eq!((red.r(), red.g(), red.b()), (255, 0, 0));
         assert_eq!(colour32("not a colour"), None);
@@ -1960,23 +2100,38 @@ mod tests {
 
         draft.text = "hello".to_string();
         draft.size_pt = 0.0;
-        assert!(validate_draft(&draft).is_some(), "a zero type size is refused");
+        assert!(
+            validate_draft(&draft).is_some(),
+            "a zero type size is refused"
+        );
 
         draft.size_pt = 11.0;
         draft.colour = "not-a-colour".to_string();
-        assert!(validate_draft(&draft).is_some(), "an unknown colour is refused");
+        assert!(
+            validate_draft(&draft).is_some(),
+            "an unknown colour is refused"
+        );
 
         draft.colour = "black".to_string();
         draft.wrap = true;
         draft.width_mm = 0.0;
-        assert!(validate_draft(&draft).is_some(), "a zero wrap width is refused");
+        assert!(
+            validate_draft(&draft).is_some(),
+            "a zero wrap width is refused"
+        );
 
         draft.wrap = false;
         draft.font = "Not A Font".to_string();
-        assert!(validate_draft(&draft).is_some(), "an unknown font is refused");
+        assert!(
+            validate_draft(&draft).is_some(),
+            "an unknown font is refused"
+        );
 
         draft.font = pdf::Font::Helvetica.base_name().to_string();
-        assert!(validate_draft(&draft).is_none(), "a filled-in, valid draft is accepted");
+        assert!(
+            validate_draft(&draft).is_none(),
+            "a filled-in, valid draft is accepted"
+        );
     }
 
     #[test]
@@ -1994,7 +2149,10 @@ mod tests {
         draft.wrap = true;
         draft.x_mm = 190.0;
         draft.width_mm = 100.0;
-        assert!(overflows_page(&draft, A4), "the wrap box itself hangs off the edge");
+        assert!(
+            overflows_page(&draft, A4),
+            "the wrap box itself hangs off the edge"
+        );
     }
 
     #[test]
@@ -2098,7 +2256,11 @@ mod undo_tests {
 
         step_as_the_button_does(&mut state);
         let pages = state.doc.as_ref().unwrap().pages;
-        assert!(state.page >= 1 && state.page <= pages, "{} of {pages}", state.page);
+        assert!(
+            state.page >= 1 && state.page <= pages,
+            "{} of {pages}",
+            state.page
+        );
     }
 
     #[test]

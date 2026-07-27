@@ -26,6 +26,10 @@ pub struct Onionskin {
     draw: screens::draw::State,
     read: screens::read::State,
     verify: screens::verify::State,
+    proof: screens::proof::State,
+    merge: screens::merge::State,
+    labels: screens::labels::State,
+    history: screens::history::State,
     devices: screens::devices::State,
     calibrate: screens::calibrate::State,
     doctor: screens::doctor::State,
@@ -54,6 +58,10 @@ impl Onionskin {
             draw: Default::default(),
             read: Default::default(),
             verify: Default::default(),
+            proof: Default::default(),
+            merge: Default::default(),
+            labels: Default::default(),
+            history: Default::default(),
             devices: Default::default(),
             calibrate: Default::default(),
             doctor: Default::default(),
@@ -93,17 +101,15 @@ impl eframe::App for Onionskin {
                     match self.screen {
                         Screen::Compare => screens::compare::show(&mut self.compare, &mut room),
                         Screen::Scan => screens::scan::show(&mut self.scan, &mut room),
-                        Screen::Document => {
-                            screens::document::show(&mut self.document, &mut room)
-                        }
+                        Screen::Document => screens::document::show(&mut self.document, &mut room),
                         Screen::Draw => screens::draw::show(&mut self.draw, &mut room),
                         Screen::Read => screens::read::show(&mut self.read, &mut room),
-                        Screen::Verify => {
-                            screens::verify::show(&mut self.verify, &mut room)
-                        }
-                        Screen::Devices => {
-                            screens::devices::show(&mut self.devices, &mut room)
-                        }
+                        Screen::Verify => screens::verify::show(&mut self.verify, &mut room),
+                        Screen::Proof => screens::proof::show(&mut self.proof, &mut room),
+                        Screen::Merge => screens::merge::show(&mut self.merge, &mut room),
+                        Screen::Labels => screens::labels::show(&mut self.labels, &mut room),
+                        Screen::History => screens::history::show(&mut self.history, &mut room),
+                        Screen::Devices => screens::devices::show(&mut self.devices, &mut room),
                         Screen::Calibrate => {
                             screens::calibrate::show(&mut self.calibrate, &mut room)
                         }
@@ -229,9 +235,7 @@ impl Onionskin {
             // the longer ones run off the edge of the panel and lose their
             // last word — which is usually the one that distinguishes them.
             ui.indent(screen.name(), |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(screen.lede()).small().weak()).wrap(),
-                );
+                ui.add(egui::Label::new(egui::RichText::new(screen.lede()).small().weak()).wrap());
             });
             ui.add_space(4.0);
         }
@@ -242,8 +246,8 @@ impl Onionskin {
                 egui::RichText::new(
                     "Nothing leaves this machine.\nIt speaks to printers, and to nothing else.",
                 )
-                    .small()
-                    .weak(),
+                .small()
+                .weak(),
             );
             ui.add_space(6.0);
             ui.label(

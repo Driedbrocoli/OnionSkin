@@ -142,113 +142,114 @@ pub fn show(state: &mut State, room: &mut Room) {
     }
 
     room.ui.add_space(6.0);
-    room.ui
-        .collapsing("Settings", |ui| {
+    room.ui.collapsing("Settings", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Delta");
+            egui::ComboBox::from_id_salt("delta-mode")
+                .selected_text(match state.mode {
+                    pipeline::Mode::Raster => "Raster — exactly the new pixels",
+                    pipeline::Mode::Vector => "Vector — sharper, clips to boxes",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut state.mode,
+                        pipeline::Mode::Raster,
+                        "Raster — exactly the new pixels",
+                    );
+                    ui.selectable_value(
+                        &mut state.mode,
+                        pipeline::Mode::Vector,
+                        "Vector — sharper, clips to boxes",
+                    );
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Resolution");
+            ui.add(
+                egui::DragValue::new(&mut state.dpi)
+                    .range(50.0..=1200.0)
+                    .suffix(" dpi"),
+            );
+            ui.label("Edge margin");
+            ui.add(
+                egui::DragValue::new(&mut state.margin_mm)
+                    .range(0.0..=40.0)
+                    .speed(0.5)
+                    .suffix(" mm"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Printer profile");
+            ui.text_edit_singleline(&mut state.profile);
+            widgets::hint(ui, "optional — see Calibration");
+        });
+
+        // Folded away inside Settings, which is itself folded away. Two
+        // doors deep is right for numbers that decide what counts as ink:
+        // nobody needs them to get a delta, and somebody who does need
+        // them knows to go looking.
+        ui.add_space(8.0);
+        ui.collapsing("Expert", |ui| {
+            widgets::hint(
+                ui,
+                "How the comparison itself is made. The defaults are right \
+                     for paper — these are here so nothing is hidden from you.",
+            );
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label("Delta");
-                egui::ComboBox::from_id_salt("delta-mode")
-                    .selected_text(match state.mode {
-                        pipeline::Mode::Raster => "Raster — exactly the new pixels",
-                        pipeline::Mode::Vector => "Vector — sharper, clips to boxes",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut state.mode,
-                            pipeline::Mode::Raster,
-                            "Raster — exactly the new pixels",
-                        );
-                        ui.selectable_value(
-                            &mut state.mode,
-                            pipeline::Mode::Vector,
-                            "Vector — sharper, clips to boxes",
-                        );
-                    });
+                ui.label("Counts as ink below");
+                ui.add(egui::DragValue::new(&mut state.expert.ink_threshold).range(1..=254));
+                widgets::hint(ui, "lower catches fainter marks, and more noise");
             });
             ui.horizontal(|ui| {
-                ui.label("Resolution");
-                ui.add(egui::DragValue::new(&mut state.dpi).range(50.0..=1200.0).suffix(" dpi"));
-                ui.label("Edge margin");
+                ui.label("Group changes within");
                 ui.add(
-                    egui::DragValue::new(&mut state.margin_mm)
-                        .range(0.0..=40.0)
-                        .speed(0.5)
+                    egui::DragValue::new(&mut state.expert.group_mm)
+                        .range(0.0..=50.0)
+                        .speed(0.1)
                         .suffix(" mm"),
                 );
             });
             ui.horizontal(|ui| {
-                ui.label("Printer profile");
-                ui.text_edit_singleline(&mut state.profile);
-                widgets::hint(ui, "optional — see Calibration");
-            });
-
-            // Folded away inside Settings, which is itself folded away. Two
-            // doors deep is right for numbers that decide what counts as ink:
-            // nobody needs them to get a delta, and somebody who does need
-            // them knows to go looking.
-            ui.add_space(8.0);
-            ui.collapsing("Expert", |ui| {
-                widgets::hint(
-                    ui,
-                    "How the comparison itself is made. The defaults are right \
-                     for paper — these are here so nothing is hidden from you.",
+                ui.label("Ignore changes under");
+                ui.add(
+                    egui::DragValue::new(&mut state.expert.min_region_mm2)
+                        .range(0.0..=500.0)
+                        .speed(0.1)
+                        .suffix(" mm²"),
                 );
-                ui.add_space(6.0);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Ink may move by");
+                ui.add(
+                    egui::DragValue::new(&mut state.expert.tolerance_mm)
+                        .range(0.0..=10.0)
+                        .speed(0.05)
+                        .suffix(" mm"),
+                );
+                widgets::hint(ui, "and still count as unchanged");
+            });
+            if state.mode == pipeline::Mode::Vector {
                 ui.horizontal(|ui| {
-                    ui.label("Counts as ink below");
+                    ui.label("Clip box reaches");
                     ui.add(
-                        egui::DragValue::new(&mut state.expert.ink_threshold).range(1..=254),
-                    );
-                    widgets::hint(ui, "lower catches fainter marks, and more noise");
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Group changes within");
-                    ui.add(
-                        egui::DragValue::new(&mut state.expert.group_mm)
-                            .range(0.0..=50.0)
-                            .speed(0.1)
-                            .suffix(" mm"),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Ignore changes under");
-                    ui.add(
-                        egui::DragValue::new(&mut state.expert.min_region_mm2)
-                            .range(0.0..=500.0)
-                            .speed(0.1)
-                            .suffix(" mm²"),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Ink may move by");
-                    ui.add(
-                        egui::DragValue::new(&mut state.expert.tolerance_mm)
+                        egui::DragValue::new(&mut state.pad_mm)
                             .range(0.0..=10.0)
                             .speed(0.05)
                             .suffix(" mm"),
                     );
-                    widgets::hint(ui, "and still count as unchanged");
+                    widgets::hint(ui, "outside the changed ink");
                 });
-                if state.mode == pipeline::Mode::Vector {
-                    ui.horizontal(|ui| {
-                        ui.label("Clip box reaches");
-                        ui.add(
-                            egui::DragValue::new(&mut state.pad_mm)
-                                .range(0.0..=10.0)
-                                .speed(0.05)
-                                .suffix(" mm"),
-                        );
-                        widgets::hint(ui, "outside the changed ink");
-                    });
-                }
-                ui.add_space(4.0);
-                // Always offered, so nobody has to remember what four numbers
-                // were before they started experimenting with them.
-                if ui.button("Put these back to their defaults").clicked() {
-                    state.expert = onionskin::diff::DiffOptions::default();
-                    state.pad_mm = pipeline::Options::default().pad_mm;
-                }
-            });
+            }
+            ui.add_space(4.0);
+            // Always offered, so nobody has to remember what four numbers
+            // were before they started experimenting with them.
+            if ui.button("Put these back to their defaults").clicked() {
+                state.expert = onionskin::diff::DiffOptions::default();
+                state.pad_mm = pipeline::Options::default().pad_mm;
+            }
         });
+    });
     let _ = state.show_settings;
 
     room.ui.add_space(12.0);

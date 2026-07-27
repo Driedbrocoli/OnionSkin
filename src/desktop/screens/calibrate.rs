@@ -132,9 +132,8 @@ pub fn show(state: &mut State, room: &mut Room) {
     // is a set of marks in known places, so the sheet that came out of the
     // printer is already a calibration target — and somebody who was never
     // going to sit down and calibrate gets it anyway.
-    room.ui.label(
-        egui::RichText::new("The quick way — learn from a job you printed").strong(),
-    );
+    room.ui
+        .label(egui::RichText::new("The quick way — learn from a job you printed").strong());
     widgets::hint(
         room.ui,
         "Print a delta as usual, scan the sheet afterwards, and give both here. \
@@ -156,9 +155,8 @@ pub fn show(state: &mut State, room: &mut Room) {
         &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
         room.dropped,
     );
-    let can_learn = state.delta.is_some()
-        && state.job_sheet.is_some()
-        && !state.name.trim().is_empty();
+    let can_learn =
+        state.delta.is_some() && state.job_sheet.is_some() && !state.name.trim().is_empty();
     if room
         .ui
         .add_enabled(
@@ -297,7 +295,10 @@ pub fn show(state: &mut State, room: &mut Room) {
         solve(state, room);
     }
     if !ready {
-        widgets::hint(room.ui, "Measure the marks and give the profile a name first.");
+        widgets::hint(
+            room.ui,
+            "Measure the marks and give the profile a name first.",
+        );
     }
 
     if let Some(outcome) = &room.jobs.last {
@@ -425,13 +426,11 @@ fn measure_from_sheet(state: &mut State, room: &mut Room) {
             Err(e) => return Outcome::refused(format!("could not read that scan: {e}")),
         };
         report.saying("Finding the sheet on the glass…");
-        let registration = match onionskin::scan::register(
-            &image,
-            onionskin::scan::ScanOptions::new(page),
-        ) {
-            Ok(registration) => registration,
-            Err(e) => return Outcome::refused(e.to_string()),
-        };
+        let registration =
+            match onionskin::scan::register(&image, onionskin::scan::ScanOptions::new(page)) {
+                Ok(registration) => registration,
+                Err(e) => return Outcome::refused(e.to_string()),
+            };
 
         report.saying("Measuring each mark…");
         let gray = image.to_luma8();

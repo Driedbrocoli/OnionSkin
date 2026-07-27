@@ -220,6 +220,29 @@ drop two documents on the comparing screen and they fill both, in order. The
 window opens on the screen you were last using, and the file browser opens in
 the folder you last chose something from.
 
+Down the side, in the order somebody meets them:
+
+| | |
+|---|---|
+| **Compare two documents** | Print only what changed between two files |
+| **Write on a scan** | Type onto a page you only have as a scan |
+| **Make a document** | Start from blank paper and keep adding |
+| **Draw on a page** | Lines, boxes and circles, in any colour |
+| **Read a scan** | Turn a scan into a Word document |
+| **See it before you print** | The sheet and the delta together, on screen |
+| **Merge deltas** | Several onto one, so the sheet goes through once |
+| **Sheet of labels** | Addresses and files, one per label, from a list |
+| **Check a sheet** | Did it come out of the printer right? |
+| **What was added** | Have I printed this delta already? |
+| **Printers and scanners** | Print and scan over the network |
+| **Calibration** | Measure a printer, once, for exactness |
+| **This machine** | What works here, and what is missing |
+
+The labels screen opens on the commonest address sheet in the world — three
+across, eight down, 63.5 × 33.9 mm — so somebody holding that box can press the
+button without typing a number. And the first thing it asks is how many labels
+have already been peeled off the sheet in the drawer.
+
 `onionskin uninstall` removes exactly what was put there and says what it
 removed. It leaves your calibration profiles alone, and says so.
 

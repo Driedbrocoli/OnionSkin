@@ -7,9 +7,13 @@
 pub mod calibrate;
 pub mod compare;
 pub mod devices;
-pub mod document;
 pub mod doctor;
+pub mod document;
 pub mod draw;
+pub mod history;
+pub mod labels;
+pub mod merge;
+pub mod proof;
 pub mod read;
 pub mod scan;
 pub mod verify;
@@ -44,7 +48,11 @@ pub enum Screen {
     Document,
     Draw,
     Read,
+    Proof,
+    Merge,
+    Labels,
     Verify,
+    History,
     Devices,
     Calibrate,
     Doctor,
@@ -59,7 +67,11 @@ impl Screen {
         Screen::Document,
         Screen::Draw,
         Screen::Read,
+        Screen::Proof,
+        Screen::Merge,
+        Screen::Labels,
         Screen::Verify,
+        Screen::History,
         Screen::Devices,
         Screen::Calibrate,
         Screen::Doctor,
@@ -75,7 +87,11 @@ impl Screen {
             Screen::Document => "document",
             Screen::Draw => "draw",
             Screen::Read => "read",
+            Screen::Proof => "proof",
+            Screen::Merge => "merge",
+            Screen::Labels => "labels",
             Screen::Verify => "verify",
+            Screen::History => "history",
             Screen::Devices => "devices",
             Screen::Calibrate => "calibrate",
             Screen::Doctor => "doctor",
@@ -84,7 +100,10 @@ impl Screen {
 
     /// The screen a key names, or nothing if it names none.
     pub fn from_key(key: &str) -> Option<Screen> {
-        Screen::ALL.iter().copied().find(|screen| screen.key() == key)
+        Screen::ALL
+            .iter()
+            .copied()
+            .find(|screen| screen.key() == key)
     }
 
     pub fn name(&self) -> &'static str {
@@ -94,7 +113,11 @@ impl Screen {
             Screen::Document => "Make a document",
             Screen::Draw => "Draw on a page",
             Screen::Read => "Read a scan",
+            Screen::Proof => "See it before you print",
+            Screen::Merge => "Merge deltas",
+            Screen::Labels => "Sheet of labels",
             Screen::Verify => "Check a sheet",
+            Screen::History => "What was added",
             Screen::Devices => "Printers and scanners",
             Screen::Calibrate => "Calibration",
             Screen::Doctor => "This machine",
@@ -110,7 +133,11 @@ impl Screen {
             Screen::Document => "Start from blank paper and keep adding",
             Screen::Draw => "Lines, boxes and circles, in any colour",
             Screen::Read => "Turn a scan into a Word document",
+            Screen::Proof => "The sheet and the delta together, on screen",
+            Screen::Merge => "Several onto one, so the sheet goes through once",
+            Screen::Labels => "Addresses and files, one per label, from a list",
             Screen::Verify => "Did it come out of the printer right?",
+            Screen::History => "Have I printed this delta already?",
             Screen::Devices => "Print and scan over the network",
             Screen::Calibrate => "Measure a printer, once, for exactness",
             Screen::Doctor => "What works here, and what is missing",

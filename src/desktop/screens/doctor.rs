@@ -151,7 +151,9 @@ fn kept_deltas(folder: &std::path::Path) -> (usize, u64) {
         .flatten()
         .filter_map(|entry| entry.metadata().ok())
         .filter(|meta| meta.is_file())
-        .fold((0, 0), |(count, bytes), meta| (count + 1, bytes + meta.len()))
+        .fold((0, 0), |(count, bytes), meta| {
+            (count + 1, bytes + meta.len())
+        })
 }
 
 /// A size somebody reads, rather than a number of bytes.

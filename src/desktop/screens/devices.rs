@@ -163,7 +163,11 @@ pub fn show(state: &mut State, room: &mut Room) {
         room.ui.add_space(8.0);
         for device in &devices {
             room.ui.horizontal(|ui| {
-                let what = if device.scanner { "Scan with" } else { "Print to" };
+                let what = if device.scanner {
+                    "Scan with"
+                } else {
+                    "Print to"
+                };
                 if ui.button(what).clicked() {
                     if device.scanner {
                         state.scanner_uri = device.uri.clone();
@@ -184,25 +188,30 @@ pub fn show(state: &mut State, room: &mut Room) {
     }
 
     room.ui.add_space(8.0);
-    room.ui
-        .collapsing("Type an address instead", |ui| {
-            ui.label("Print server");
-            ui.text_edit_singleline(&mut state.server);
-            widgets::hint(
-                ui,
-                "The default is the print server on this machine, where a printer \
+    room.ui.collapsing("Type an address instead", |ui| {
+        ui.label("Print server");
+        ui.text_edit_singleline(&mut state.server);
+        widgets::hint(
+            ui,
+            "The default is the print server on this machine, where a printer \
                  plugged in by USB appears. A printer of its own is named \
                  directly, for example ipp://printer.local/ipp/print",
-            );
-        });
+        );
+    });
 
     room.ui.add_space(14.0);
     room.ui.separator();
 
     // --------------------------------------------------------------- print
     room.ui.add_space(10.0);
-    room.ui.label(egui::RichText::new("Send a PDF to print").strong());
-    widgets::file_row(room.ui, room.picker, "The PDF", &mut state.to_print, &["pdf"],
+    room.ui
+        .label(egui::RichText::new("Send a PDF to print").strong());
+    widgets::file_row(
+        room.ui,
+        room.picker,
+        "The PDF",
+        &mut state.to_print,
+        &["pdf"],
         room.dropped,
     );
     room.ui.horizontal(|ui| {
@@ -259,7 +268,11 @@ pub fn show(state: &mut State, room: &mut Room) {
     widgets::hint(room.ui, "for example http://printer.local/eSCL");
     room.ui.horizontal(|ui| {
         ui.label("Resolution");
-        ui.add(egui::DragValue::new(&mut state.dpi).range(75..=1200).suffix(" dpi"));
+        ui.add(
+            egui::DragValue::new(&mut state.dpi)
+                .range(75..=1200)
+                .suffix(" dpi"),
+        );
         ui.checkbox(&mut state.colour, "In colour");
     });
     widgets::hint(
