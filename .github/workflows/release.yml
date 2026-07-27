@@ -11,7 +11,10 @@
 # `cargo`, both of which GitHub's runners already have — an action from the
 # marketplace is somebody else's code running with a token that can write to
 # this repository, which is a lot to accept for a step that is four lines of
-# shell.
+# shell. The few `uses:` lines are all `actions/…`, which is GitHub's own
+# code running on GitHub's own runners; publishing to Pages by hand would mean
+# a branch, a force push and a token to do it with, which is more to get wrong
+# than the two steps it would replace.
 
 name: Release
 
@@ -245,3 +248,182 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.open.outputs.tag }}" dist/* --clobber
+
+  # `sudo apt install onionskin`, which is the only install instruction most
+  # Linux users will ever follow.
+  #
+  # A `.deb` attached to a release is a file somebody downloads once and then
+  # never hears about again — no `apt upgrade`, and no way to find out the
+  # version they are running was replaced a year ago. The same `.deb` with
+  # three small text files beside it is a repository their machine looks after
+  # for them, and building those three files is what `onionskin apt-repo` does.
+  #
+  # Two things come out of this job, because the repository is wanted in two
+  # places. It is published to GitHub Pages, which needs no server and is where
+  # `apt` will fetch it from; and it is attached to the release as a tarball,
+  # which is what somebody copies onto a server of their own. Neither depends
+  # on the other, so a repository that cannot be published is still a
+  # repository that can be downloaded.
+  apt:
+    needs: [open, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    env:
+      # Set this in the repository's secrets to have the archive signed. Left
+      # unset, everything below still works and the instructions say
+      # `[trusted=yes]` instead — which is honest about what it is rather than
+      # pretending to a security it does not have.
+      APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache what cargo downloaded
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: apt-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build the program that builds the repository
+        run: cargo build --release --locked --bin onionskin
+
+      # The versioned name, not the stable one. Both are on the release and
+      # they are the same package; putting both in the pool would give apt two
+      # entries for one version, differing only in where the file is.
+      - name: Fetch the package that was just released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p debs
+          gh release download "${{ needs.open.outputs.tag }}" \
+            --pattern "onionskin_*_amd64.deb" --dir debs
+          ls -l debs
+
+      - name: Build the repository
+        id: build
+        run: |
+          site="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          echo "site=$site" >> "$GITHUB_OUTPUT"
+          ./target/release/onionskin apt-repo \
+            --deb debs/onionskin_${{ needs.open.outputs.version }}_amd64.deb \
+            --out apt \
+            --url "$site" \
+            --origin "Onionskin" \
+            --label "Onionskin" \
+            --description "Onionskin packages" | tee instructions.txt
+
+      # Signing is custody of a private key, so it is a step that does nothing
+      # unless somebody has decided to take that on. `gpg` is already on the
+      # runner and is the thing everyone else's archives are signed with.
+      - name: Sign it, if there is a key to sign it with
+        if: env.APT_SIGNING_KEY != ''
+        run: |
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          echo "Signing with $keyid"
+          # Both files, not one. InRelease is what modern apt asks for;
+          # Release.gpg is what older apt asks for, and an archive that serves
+          # only one of them fails on machines nobody thought to test.
+          gpg --batch --yes --default-key "$keyid" --clearsign \
+            -o apt/dists/stable/InRelease apt/dists/stable/Release
+          gpg --batch --yes --default-key "$keyid" --detach-sign --armor \
+            -o apt/dists/stable/Release.gpg apt/dists/stable/Release
+          # The public half, so a machine can check the signature. Named for
+          # keyrings rather than apt-key, because a key added with apt-key is
+          # trusted for every repository on the machine and not only this one.
+          gpg --batch --yes --export --armor "$keyid" \
+            > apt/onionskin-archive-keyring.asc
+
+      # A page at the address people will paste into a browser when the sources
+      # line does not work, which is the moment they need it most.
+      - name: Write the page that explains it
+        run: |
+          site="${{ steps.build.outputs.site }}"
+          if [ -n "$APT_SIGNING_KEY" ]; then
+            add_key="curl -fsSL $site/onionskin-archive-keyring.asc | sudo tee /etc/apt/trusted.gpg.d/onionskin.asc &gt; /dev/null"
+            sources="deb [signed-by=/etc/apt/trusted.gpg.d/onionskin.asc] $site stable main"
+          else
+            add_key="# unsigned archive — nothing to add"
+            sources="deb [trusted=yes] $site stable main"
+          fi
+          cat > apt/index.html <<HTML
+          <!doctype html>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Install Onionskin with apt</title>
+          <style>
+            body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem;
+                   margin: 3rem auto; padding: 0 1rem; }
+            pre  { background: #f4f4f4; padding: 1rem; overflow-x: auto;
+                   border-radius: 6px; }
+            @media (prefers-color-scheme: dark) {
+              body { background: #111; color: #eee; }
+              pre  { background: #1d1d1d; }
+            }
+          </style>
+          <h1>Install Onionskin with apt</h1>
+          <p>Typed once. After this, <code>apt upgrade</code> keeps Onionskin up
+             to date along with everything else on the machine.</p>
+          <pre>$add_key
+          echo '$sources' | sudo tee /etc/apt/sources.list.d/onionskin.list
+          sudo apt update &amp;&amp; sudo apt install onionskin</pre>
+          <p>Version ${{ needs.open.outputs.version }}. This is a plain static
+             directory — nothing runs on the server. To host it yourself, take
+             <code>onionskin-apt-repo.tar.gz</code> from the
+             <a href="https://github.com/${{ github.repository }}/releases/latest">release</a>,
+             unpack it anywhere a web server can see, and put your own address in
+             the sources line above.</p>
+          HTML
+
+      # Attached whether or not Pages works, because this is the copy somebody
+      # puts on a server of their own.
+      - name: Attach the repository to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tar -czf onionskin-apt-repo.tar.gz -C apt .
+          gh release upload "${{ needs.open.outputs.tag }}" \
+            onionskin-apt-repo.tar.gz --clobber
+
+      # GitHub's own actions, not the marketplace's. Publishing a directory to
+      # Pages by hand means a branch, a force push and a token, which is more
+      # moving parts than the two steps it replaces.
+      - name: Parcel it up for Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt
+
+      # Best effort. Pages has to be turned on for the repository once, by
+      # hand, and until it is this step fails — which must not turn a release
+      # that built and uploaded everything into a red one.
+      - name: Publish it
+        id: pages
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: Say where it went
+        run: |
+          {
+            echo "## apt repository"
+            echo
+            if [ "${{ steps.pages.outcome }}" = "success" ]; then
+              echo "Published to ${{ steps.build.outputs.site }}"
+            else
+              echo "Not published — turn on Pages for this repository"
+              echo "(Settings → Pages → Source: GitHub Actions) and run this again."
+            fi
+            echo
+            echo "Attached to the release as \`onionskin-apt-repo.tar.gz\` either way."
+            echo
+            echo '```'
+            cat instructions.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

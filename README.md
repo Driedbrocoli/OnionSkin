@@ -62,15 +62,28 @@ curl -fL -O https://github.com/Driedbrocoli/OnionSkin/releases/latest/download/o
 sudo apt install ./onionskin-linux-x64.deb
 ```
 
-**`sudo apt install onionskin` does not work from here**, and will not for a
-long while: that means being in Debian's own archive, which takes a sponsor and
-months. The `.deb` above is the same package, installed from a file instead of a
-mirror.
+**`sudo apt install onionskin` needs an archive to install from.** Being in
+Debian's own archive takes a sponsor and months, so Onionskin publishes its
+own: every release builds one and puts it at
+`https://driedbrocoli.github.io/OnionSkin`. Point apt at it once —
 
-If you have a web server, you can host the archive yourself and then it does
-work. `onionskin apt-repo` builds the whole thing — pool, `Packages`, `Release`,
-the hashes — from your `.deb` files, and prints the `gpg` commands to sign it
-and the two lines your users type:
+```bash
+echo 'deb [trusted=yes] https://driedbrocoli.github.io/OnionSkin stable main' \
+  | sudo tee /etc/apt/sources.list.d/onionskin.list
+sudo apt update && sudo apt install onionskin
+```
+
+— and `apt upgrade` keeps it current with everything else on the machine. The
+page at that address prints the current lines, including the `signed-by=` form
+once the archive is signed.
+
+**You can host the same archive yourself**, and for anything beyond one person's
+machines you probably should. Take `onionskin-apt-repo.tar.gz` from the release,
+unpack it where a web server can see it, and use your own address in the line
+above; there is nothing to run there, no database, and no software to install.
+Or build one from scratch: `onionskin apt-repo` writes the whole thing — pool,
+`Packages`, `Release`, the hashes — from your `.deb` files, and prints the `gpg`
+commands to sign it and the two lines your users type:
 
 ```bash
 onionskin apt-repo --deb onionskin_0.1.0_amd64.deb --out apt \
@@ -643,10 +656,13 @@ week and it gets better: the correction already in force is measured *through*,
 so a printer that is now landing on the mark is understood as a printer being
 corrected, not a printer with no error.
 
-It needs at least three additions far enough apart to fit from — a single word
-in one corner says where the paper sat and nothing about rotation or scale. An
-addition that landed on top of existing ink is left out rather than guessed at,
-because the middle of two overlapping marks is the middle of neither.
+It needs at least three additions that can be read. An addition that did not
+print is left out, and so is one that landed on top of something already on the
+sheet — the middle of two overlapping marks is the middle of neither. If the
+additions run down one column, as a form filled in on the left does, you get
+the shift and nothing else: marks in a line say nothing about the direction
+across them, and a rotation invented from them would be wrong everywhere else
+on the page. The profile says so when that happens.
 
 ### Or measure a target sheet, once
 

@@ -691,6 +691,17 @@ means nothing; above it, something else is in the window — a line of the
 document the addition was written across — and the middle of two marks is the
 middle of neither.
 
+The target has five crosshairs at chosen places; a job has whatever the job
+had. `spread_across` takes the extent along the minor principal axis of the
+marks, which for anything strung out in a line is nearly nothing however long
+the line is. Under 25 mm, `fit_shift` fits a translation and leaves rotation
+and scale at identity, and the profile's notes say so. A form filled in down
+the left is an ordinary thing to learn from and its shift is real — the paper
+path pushes every sheet the same way — but a rotation fitted from a column of
+marks is a confident number with no evidence under it, wrong everywhere else on
+the sheet. Refusing outright would be worse than either: the user would get
+nothing from a job that genuinely measured something.
+
 ## Publishing an apt repository
 
 `src/apt.rs`. `sudo apt install onionskin` cannot be made to work by hosting a
