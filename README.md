@@ -835,6 +835,12 @@ and `delta` have. That one means "print it anyway, I have read the warning
 about reflow". This one means "yes, that file of mine can go". Two different
 things to be sure about.
 
+One place this costs you something: scans are written by SANE's `scanimage`,
+not by Onionskin, so it cannot stamp them and cannot recognise them later.
+Scanning twice to the same name asks for `--overwrite` the second time. That
+is the price of never scanning over a photograph, and it seemed the right way
+round.
+
 ## What Onionskin keeps, and getting rid of it
 
 A program that stores things in a hidden folder should be willing to say so
