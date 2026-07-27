@@ -93,6 +93,8 @@ enum Command {
     Verify(VerifyArgs),
     /// See the sheet with the delta on it, before printing either.
     Proof(ProofArgs),
+    /// Put several deltas onto one, so the sheet goes through once.
+    Merge(MergeArgs),
     /// Find the places on a form where something can be written.
     Blanks(BlanksArgs),
     /// What was added to which sheet, and when.
@@ -492,6 +494,34 @@ struct VerifyArgs {
     learn: Option<String>,
 }
 
+/// Several deltas, one pass through the printer.
+///
+/// A day's work on one document arrives as more than one delta: the stamp is a
+/// saved job, the signature is a picture, the reference came out of a
+/// spreadsheet. Printing three of them means feeding the same sheet through the
+/// printer three times, and every pass is a chance to jam it, skew it, or lose
+/// it — on a sheet that already has the letterhead on it and cannot be
+/// reprinted. Merged first, it goes through once.
+#[derive(clap::Args)]
+struct MergeArgs {
+    /// The deltas to merge, in the order they should be drawn.
+    #[arg(required = true, num_args = 2..)]
+    deltas: Vec<PathBuf>,
+    /// Where to write the merged delta. Without it, beside the first.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Send it straight to this printer once it is written: the name of one
+    /// from `onionskin printers`, or a URI.
+    #[arg(long)]
+    print_to: Option<String>,
+    /// The print server to look that name up on.
+    #[arg(long, default_value = "ipp://127.0.0.1:631/")]
+    server: String,
+    /// Open it when it is written.
+    #[arg(long)]
+    open: bool,
+}
+
 /// Looking at the finished sheet before committing paper to it.
 ///
 /// The delta on its own tells you nothing: it is a nearly blank page, and
@@ -521,9 +551,6 @@ struct ProofArgs {
     /// Open it when it is written.
     #[arg(long)]
     open: bool,
-    /// Write over a file Onionskin did not make, instead of stopping.
-    #[arg(long)]
-    overwrite: bool,
 }
 
 /// Working out where on a form there is room to write.
@@ -629,9 +656,6 @@ struct LabelsArgs {
     /// Open it when it is written.
     #[arg(long)]
     open: bool,
-    /// Write over a file Onionskin did not make, instead of stopping.
-    #[arg(long)]
-    overwrite: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -1571,6 +1595,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Compare(args) => cmd_compare(args),
         Command::Verify(args) => cmd_verify(args),
         Command::Proof(args) => cmd_proof(args),
+        Command::Merge(args) => cmd_merge(args),
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
@@ -5202,12 +5227,20 @@ fn cmd_history(args: HistoryArgs) -> Result<ExitCode, String> {
 /// the same delta onto a hundred *different* sheets is what a hundred
 /// certificates are — but the question is worth being asked.
 fn note_the_delta(source: &Path, delta: &Path, additions: usize, pages: usize) {
+    note_the_delta_from(&source.display().to_string(), delta, additions, pages)
+}
+
+/// The same, where what the delta came from is not one file.
+///
+/// A merge came from several, and "stamp.pdf" alone in the record would read
+/// months later as though that had been the sheet.
+fn note_the_delta_from(source: &str, delta: &Path, additions: usize, pages: usize) {
     let Some(fingerprint) = onionskin::history::fingerprint(delta) else {
         return;
     };
     let entry = onionskin::history::Entry {
         at: onionskin::history::now(),
-        source: source.display().to_string(),
+        source: source.to_string(),
         delta: delta.display().to_string(),
         pages,
         additions,
@@ -5383,6 +5416,91 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
     println!(
         "Look at it before you print the delta. Nothing here goes near the printer."
     );
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Put several deltas onto one, so the sheet goes through the printer once.
+fn cmd_merge(args: MergeArgs) -> Result<ExitCode, String> {
+    for delta in &args.deltas {
+        if !delta.is_file() {
+            return Err(format!("no such file: {}", delta.display()));
+        }
+    }
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.deltas[0], "-merged", "pdf"));
+
+    let inputs: Vec<(&Path, &str)> = args
+        .deltas
+        .iter()
+        .map(|delta| (delta.as_path(), "delta"))
+        .collect();
+    refuse_to_clobber(&output, "merged delta", &inputs)?;
+    check_writable(&output, "merged delta")?;
+
+    let merged = onionskin::merge::merge(&args.deltas, &output, "Onionskin merged delta")
+        .map_err(|e| e.to_string())?;
+
+    println!("{}", output.display());
+    println!("{}", merged.describe());
+
+    // The same delta twice puts every letter down twice in the same place. Not
+    // refused — the merge is still a valid file — but it is never what anybody
+    // meant, so it is said before the paper goes in rather than after.
+    for repeat in merged.repeats() {
+        if let Some(same) = &repeat.same_as {
+            println!(
+                "\nNOTE: {} is the same file as {}. Everything in it will be \
+                 printed twice,\n  in the same place, which comes out heavier \
+                 and blurred. Drop one of them.",
+                repeat.path.display(),
+                same.display()
+            );
+        }
+    }
+
+    println!(
+        "\nOne file, one pass. Print this instead of the deltas it was made \
+         from — printing\n  both it and them puts the ink down twice."
+    );
+
+    // Remembered like any other delta, so writing the same merge twice is
+    // noticed by the same machinery that notices any other repeat.
+    let made_of: Vec<String> = args
+        .deltas
+        .iter()
+        .map(|delta| {
+            delta
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| delta.display().to_string())
+        })
+        .collect();
+    note_the_delta_from(
+        &made_of.join(" + "),
+        &output,
+        merged.from.len(),
+        merged.pages,
+    );
+
+    if let Some(printer) = &args.print_to {
+        let uri = resolve_printer(printer, &args.server)?;
+        let options = printer::PrintOptions {
+            job_name: "Onionskin merged delta".to_string(),
+            ..Default::default()
+        };
+        let job = printer::print_file(&uri, &output, &options).map_err(|e| e.to_string())?;
+        println!(
+            "\nSent to {uri}{}.",
+            if job > 0 {
+                format!(" as job {job}")
+            } else {
+                String::new()
+            }
+        );
+    }
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
 }

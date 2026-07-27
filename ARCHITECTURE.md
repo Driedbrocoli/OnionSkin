@@ -15,6 +15,7 @@ went with it.
 | `render`   | Which engine opens a document, pdfium for pixels, page frames |
 | `diff`     | What ink is new, what ink is gone |
 | `delta`    | Writing the delta PDF, raster or vector |
+| `merge`    | Several deltas onto one, so the sheet goes through the printer once |
 | `safety`   | The checks that run before paper is committed |
 | `calibrate`| The two-pass target, the fit, learning from a printed job, and the stored profiles |
 | `pipeline` | The whole job, end to end |
@@ -735,6 +736,59 @@ roundings of the same millimetres, so the delta is placed onto the sheet by
 proportion rather than index for index; lining them up index for index drifts
 across the page and puts the additions furthest out exactly where they are
 hardest to notice.
+
+## Several deltas, one pass through the printer
+
+`src/merge.rs`. A day's work on one document arrives as more than one delta —
+a saved job for the stamp, a picture for the signature, a spreadsheet column for
+the reference — and printing three of them means three passes of the same sheet.
+Every pass is a chance to skew it, jam it, or double-feed it, and each one lands
+a little differently, which is the whole reason there is a calibration step. The
+paper already has the letterhead on it and cannot be reprinted, so the passes are
+worth more than the file size.
+
+The section above says a proof is a picture rather than a merge of two PDFs,
+deliberately, because merging means colliding resource names and getting it
+slightly wrong gives a file that is right in one reader and wrong in another.
+That is still true, and it is why this does not glue content streams together.
+
+Each source page goes in as a **form XObject**: a self-contained parcel with its
+own resource dictionary, drawn by one operator. The merged page's content is one
+line per delta —
+
+```
+q /Fm0 Do Q
+q /Fm1 Do Q
+```
+
+— and nothing is renamed or reinterpreted, because a form's `/F0` is looked up in
+the form's own resources and never in the page's. That is the whole reason the
+collision the proof section warns about cannot happen here, and it is why a delta
+written by some other program merges as readily as one of ours. `q`/`Q` around
+each one, so a delta that leaves the graphics state untidy cannot disturb the one
+after it.
+
+Object numbers are a document's own private business, so every reference in a
+copied resource tree is renumbered on the way across. The map that does the
+renumbering is kept per source file rather than per page, which keeps a font
+shared by twenty pages a single font — and because a new number is recorded
+*before* what it points at is followed, a file that refers back to itself stops
+rather than recursing forever. Streams travel byte for byte with their filter
+intact, so an embedded font is not decoded and re-encoded on the way through.
+
+What is checked first is that the pages are the same size: merging an A4 delta
+with a Letter one prints one of them off the edge, which costs a sheet rather
+than an error, so it is refused with both sizes named. Every file is read before
+anything is written, so a mismatch found in the last one does not leave half a
+merged document behind. Two things that look like mismatches are not: a page box
+that starts somewhere other than the origin is corrected with the form's
+`/Matrix` — the same paper measured from a different corner — and a file that
+runs out early simply stops contributing, which is what makes a one-page stamp
+merge onto the front of a five-page invoice.
+
+The merge is deterministic, so writing the same one twice produces the same bytes
+and the record recognises it as the same delta by the fingerprint it already
+keeps.
 
 ## Whether the printer's error matters for this job
 

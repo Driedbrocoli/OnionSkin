@@ -709,6 +709,54 @@ Add `--learn office` and the same scan also teaches the printer's profile —
 having gone to the trouble of scanning it, you may as well have the
 measurement.
 
+### Several deltas, one pass through the printer
+
+A day's work on one document arrives as more than one delta. The paid stamp is a
+saved job, the signature is a picture, the reference number came out of a
+spreadsheet. Each of those is a delta, each of them prints, and printing three of
+them means feeding the same sheet through the printer three times.
+
+Every pass is a chance to lose the sheet. It can go in crooked, it can jam, it
+can pick up the one underneath it, and it lands a little differently each time —
+which is the entire reason this program has a calibration step. Three passes are
+three of those chances on a piece of paper that already has the letterhead on it
+and cannot be reprinted.
+
+```bash
+onionskin merge stamp.pdf signature.pdf reference.pdf -o all.pdf
+```
+
+One file, one pass. Print `all.pdf` **instead of** the deltas it was made from —
+printing both it and them puts the ink down twice.
+
+```bash
+onionskin merge stamp.pdf signature.pdf -o all.pdf --print-to "Office Laser"
+```
+
+The deltas are drawn in the order they are given, so a later one lands on top of
+an earlier one where they overlap.
+
+Each delta keeps its own typeface, its own pictures and its own colours: they go
+in as self-contained parcels rather than being glued together, so two deltas that
+both happen to call their first font `F0` cannot end up sharing one. Deltas
+written by some other program merge just as well as Onionskin's own.
+
+Before anything is written it checks the pages are the same size. Merging a
+letter's delta with an invoice's would print one of them off the edge of the
+paper, so it is refused with both sizes named:
+
+```
+error: these are not deltas for the same sheet of paper. Page 1 of stamp.pdf is
+A4 (210.0×297.0 mm), and page 1 of usdelta.pdf is Letter (215.9×279.4 mm).
+Merging them would print one of them off the edge.
+```
+
+A file that runs out early simply stops contributing, so a one-page stamp merges
+onto the front of a five-page invoice and the other four pages are left alone.
+And the same delta given twice is pointed out rather than refused — the merged
+file is fine, but every letter in it would be printed twice in the same place,
+which comes out heavier and blurred.
+
 ### See what changed
 
 A delta prints only what is new, which is the point — and can make the change

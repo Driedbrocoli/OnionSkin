@@ -14,6 +14,7 @@ pub mod install;
 pub mod jobs;
 pub mod labels;
 pub mod letters;
+pub mod merge;
 pub mod office;
 pub mod package;
 pub mod pdf;
