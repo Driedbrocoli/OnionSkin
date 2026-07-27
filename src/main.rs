@@ -896,10 +896,18 @@ struct BatchArgs {
     #[arg(long = "at", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
     at: Vec<String>,
     /// Just after something already printed on the sheet: 'Awarded to:{name}'.
-    #[arg(long = "after", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    #[arg(
+        long = "after",
+        value_name = "ANCHOR:WORDS",
+        allow_hyphen_values = true
+    )]
     after: Vec<String>,
     /// One line below it: 'Name:{name}'.
-    #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    #[arg(
+        long = "below",
+        value_name = "ANCHOR:WORDS",
+        allow_hyphen_values = true
+    )]
     below: Vec<String>,
     /// A picture on every sheet, its file name able to name a column so that
     /// each one gets its own: 'signatures/{name}.png:120,240:40'.
@@ -955,11 +963,19 @@ struct WriteArgs {
     /// Words placed just after something already on the document, so no
     /// measuring is needed: 'Received:Approved 27 July' puts the words after
     /// "Received:".
-    #[arg(long = "after", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    #[arg(
+        long = "after",
+        value_name = "ANCHOR:WORDS",
+        allow_hyphen_values = true
+    )]
     after: Vec<String>,
     /// The same, one line below the anchor and starting where it starts:
     /// 'Signature:J. Bezzina'.
-    #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    #[arg(
+        long = "below",
+        value_name = "ANCHOR:WORDS",
+        allow_hyphen_values = true
+    )]
     below: Vec<String>,
     /// A picture to put on the page: a signature, a stamp, a logo.
     ///
@@ -1265,11 +1281,19 @@ struct AddArgs {
     at_page: Vec<String>,
     /// Words placed just after something already on the page, so no measuring
     /// is needed: 'Received:Approved 27 July' puts the words after "Received".
-    #[arg(long = "after", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    #[arg(
+        long = "after",
+        value_name = "ANCHOR:WORDS",
+        allow_hyphen_values = true
+    )]
     after: Vec<String>,
     /// The same, one line below the anchor and starting where it starts:
     /// 'Signature:J. Bezzina'.
-    #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    #[arg(
+        long = "below",
+        value_name = "ANCHOR:WORDS",
+        allow_hyphen_values = true
+    )]
     below: Vec<String>,
 
     /// Size of the paper that was scanned.
@@ -1673,10 +1697,7 @@ fn today_row() -> onionskin::rows::Row {
 }
 
 fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
-    if args.at.is_empty()
-        && args.after.is_empty()
-        && args.below.is_empty()
-        && args.image.is_empty()
+    if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() && args.image.is_empty()
     {
         return Err(
             "nothing to write. Say where the words go — easiest first:\n    \
@@ -1719,8 +1740,7 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
     let today = today_row();
     let mut added = Vec::new();
     for placement in &args.at {
-        let ((x_mm, y_mm), text) =
-            parse_placement(&onionskin::rows::fill(placement, &today))?;
+        let ((x_mm, y_mm), text) = parse_placement(&onionskin::rows::fill(placement, &today))?;
         let item = Item {
             id: 0,
             page: args.page,
@@ -1781,12 +1801,10 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
 /// 46.2 mm across.
 fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
     if args.over.is_empty() && args.word.is_empty() {
-        return Err(
-            "nothing to cover. Say what to hide:\n    \
+        return Err("nothing to cover. Say what to hide:\n    \
              --word 'Salary'            cover whatever that word sits on\n    \
              --over '40,100:70x8'       cover a rectangle, in millimetres"
-                .into(),
-        );
+            .into());
     }
     let output = args
         .output
@@ -1880,7 +1898,10 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
 }
 
 fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
-    if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() && args.images.is_empty()
+    if args.at.is_empty()
+        && args.after.is_empty()
+        && args.below.is_empty()
+        && args.images.is_empty()
     {
         return Err(
             "nothing to put on them. Say where the words go, with {column} \
@@ -1929,7 +1950,11 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         .output
         .clone()
         .unwrap_or_else(|| beside(&args.document, "-batch", "pdf"));
-    refuse_to_clobber(&output, "stack", &[(&args.document, "sheet"), (&args.from, "list")])?;
+    refuse_to_clobber(
+        &output,
+        "stack",
+        &[(&args.document, "sheet"), (&args.from, "list")],
+    )?;
     check_writable(&output, "stack")?;
 
     // Where the anchored words land, worked out once against the sheet.
@@ -2021,7 +2046,11 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         output.display(),
         if wanted == 1 { "" } else { "s" },
         outcome.total_regions(),
-        if outcome.total_regions() == 1 { "" } else { "s" }
+        if outcome.total_regions() == 1 {
+            ""
+        } else {
+            "s"
+        }
     );
     for path in &outcome.previews {
         println!("proof: {}", path.display());
@@ -3011,7 +3040,10 @@ fn parse_placed_size(spec: &str, what: &str, example: &str) -> Result<PlacedSize
 fn cmd_draw(args: DrawArgs) -> Result<ExitCode, String> {
     use onionskin::document::{Shape, ShapeKind};
 
-    if args.line.is_empty() && args.boxes.is_empty() && args.circles.is_empty() && args.paths.is_empty()
+    if args.line.is_empty()
+        && args.boxes.is_empty()
+        && args.circles.is_empty()
+        && args.paths.is_empty()
     {
         return Err("nothing to draw. Say what to draw, for example:\n    \
              --line '20,100:190,100'        a rule across the page\n    \
@@ -3037,10 +3069,13 @@ fn cmd_draw(args: DrawArgs) -> Result<ExitCode, String> {
     }
     let dash = match &args.dash {
         Some(spec) => {
-            let (on, off) = parse_point(spec)
-                .map_err(|_| format!("bad dash '{spec}'. Expected 'DASH,GAP', for example '2,1'"))?;
+            let (on, off) = parse_point(spec).map_err(|_| {
+                format!("bad dash '{spec}'. Expected 'DASH,GAP', for example '2,1'")
+            })?;
             if on <= 0.0 || off < 0.0 {
-                return Err(format!("bad dash '{spec}': the dash must be longer than nothing"));
+                return Err(format!(
+                    "bad dash '{spec}': the dash must be longer than nothing"
+                ));
             }
             Some((on, off))
         }
@@ -3233,9 +3268,8 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     // measurements; reading the page is the expensive part and is done once.
     let asked = args.font.as_deref().map(str::to_string);
     let anchoring = !args.after.is_empty() || !args.below.is_empty();
-    let want_font = !(embedded.is_some()
-        || args.no_match_font
-        || (asked.is_some() && args.size.is_some()));
+    let want_font =
+        !(embedded.is_some() || args.no_match_font || (asked.is_some() && args.size.is_some()));
     let read = if anchoring || want_font {
         onionskin::typeface::read_and_match(&args.scan, &args.page, args.cropped, args.square)
     } else {
@@ -3611,7 +3645,10 @@ fn options_from_settings(
 /// Separate from [`delta_options`] so that the ordinary path reads as the
 /// ordinary path: five arguments somebody might reasonably choose, and then a
 /// line that says the fine adjustments were left alone unless asked for.
-fn expert_options(mut options: pipeline::Options, args: &DeltaArgs) -> Result<pipeline::Options, String> {
+fn expert_options(
+    mut options: pipeline::Options,
+    args: &DeltaArgs,
+) -> Result<pipeline::Options, String> {
     if let Some(threshold) = args.ink_threshold {
         if threshold == 0 || threshold == 255 {
             return Err("--ink-threshold must be between 1 and 254".into());
@@ -3911,7 +3948,12 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
-    note_the_delta(&args.edited, &output, outcome.total_regions(), outcome.pages.len());
+    note_the_delta(
+        &args.edited,
+        &output,
+        outcome.total_regions(),
+        outcome.pages.len(),
+    );
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
@@ -4146,7 +4188,12 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
-    note_the_delta(&args.scan, &output, outcome.total_regions(), outcome.pages.len());
+    note_the_delta(
+        &args.scan,
+        &output,
+        outcome.total_regions(),
+        outcome.pages.len(),
+    );
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
@@ -4208,7 +4255,10 @@ fn cmd_apt_repo(args: AptRepoArgs) -> Result<ExitCode, String> {
 /// one line away and said to be there.
 fn greet() {
     let pen = Pen::for_stdout();
-    println!("{}", pen.strong("Onionskin — add words to a page that is already printed."));
+    println!(
+        "{}",
+        pen.strong("Onionskin — add words to a page that is already printed.")
+    );
     println!();
     println!("You have a printed sheet and want to add something to it without");
     println!("reprinting the whole page. Onionskin writes the additions on their own.");
@@ -4216,7 +4266,10 @@ fn greet() {
     println!("{}", pen.strong("The three things people do"));
     println!();
     println!("  Print only what changed between two versions of a document");
-    println!("      {}", pen.command("onionskin delta before.docx after.docx -o delta.pdf"));
+    println!(
+        "      {}",
+        pen.command("onionskin delta before.docx after.docx -o delta.pdf")
+    );
     println!();
     println!("  Type onto a form you only have as a scan");
     println!(
@@ -4227,8 +4280,14 @@ fn greet() {
     println!("  Use the window instead of the terminal");
     println!("      {}", pen.command("onionskin-desktop"));
     println!();
-    println!("{}", pen.dim("  onionskin doctor      what works on this machine, and what is missing"));
-    println!("{}", pen.dim("  onionskin --help      all of it — there are twenty-five more commands"));
+    println!(
+        "{}",
+        pen.dim("  onionskin doctor      what works on this machine, and what is missing")
+    );
+    println!(
+        "{}",
+        pen.dim("  onionskin --help      all of it — there are twenty-five more commands")
+    );
 }
 
 /// Colour, when there is a terminal to put it on.
@@ -4286,7 +4345,10 @@ fn wants_colour(is_terminal: bool) -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
-    if std::env::var("TERM").map(|term| term == "dumb").unwrap_or(false) {
+    if std::env::var("TERM")
+        .map(|term| term == "dumb")
+        .unwrap_or(false)
+    {
         return false;
     }
     is_terminal
@@ -4603,11 +4665,7 @@ fn zsh_completions(tree: &[Described]) -> String {
     }
     let mut cases = String::new();
     for sub in tree {
-        let flags: Vec<String> = sub
-            .flags
-            .iter()
-            .map(|flag| format!("'{flag}'"))
-            .collect();
+        let flags: Vec<String> = sub.flags.iter().map(|flag| format!("'{flag}'")).collect();
         cases.push_str(&format!(
             "            {})\n                _arguments {} '*:file:_files'\n                ;;\n",
             sub.name,
@@ -4708,8 +4766,8 @@ fn escape_for_fish(text: &str) -> String {
 fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> {
     let engine = onionskin::render::engine().map_err(|e| e.to_string())?;
     let workspace = onionskin::render::Workspace::new(false).map_err(|e| e.to_string())?;
-    let (pdf, _, _) = onionskin::render::to_pdf_noting(path, &workspace.path, 180)
-        .map_err(|e| e.to_string())?;
+    let (pdf, _, _) =
+        onionskin::render::to_pdf_noting(path, &workspace.path, 180).map_err(|e| e.to_string())?;
     let document = engine.open(&pdf).map_err(|e| e.to_string())?;
 
     // Enough resolution to read small print, and not so much that a hundred
@@ -4726,7 +4784,11 @@ fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> 
     };
 
     let reference = suggest_system_font()
-        .or_else(|| onionskin::font::installed_fonts().first().map(|f| f.path.clone()))
+        .or_else(|| {
+            onionskin::font::installed_fonts()
+                .first()
+                .map(|f| f.path.clone())
+        })
         .ok_or(
             "there is no font on this machine to read the document against, so \
              words cannot be placed by what is already in it. Use --at-mm with \
@@ -4776,12 +4838,8 @@ fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     println!("{}", registration.describe());
 
     let gray = image.to_luma8();
-    let landings = calibrate::measure_landings(
-        &gray,
-        &registration,
-        &asked,
-        calibrate::ink_threshold(),
-    );
+    let landings =
+        calibrate::measure_landings(&gray, &registration, &asked, calibrate::ink_threshold());
 
     println!("\n{} addition(s) asked for:", landings.len());
     let report = calibrate::PrintReport::of(landings, args.tolerance);
@@ -5049,7 +5107,10 @@ fn cmd_job(command: JobCommand) -> Result<ExitCode, String> {
         JobCommand::Show(args) => {
             let job = onionskin::jobs::load(&args.name).map_err(|e| e.to_string())?;
             println!("{}", job.describe());
-            println!("\nKept in {}", onionskin::jobs::path_of(&job.name).display());
+            println!(
+                "\nKept in {}",
+                onionskin::jobs::path_of(&job.name).display()
+            );
             Ok(ExitCode::SUCCESS)
         }
 
@@ -5073,12 +5134,12 @@ fn cmd_job_run(args: RunJobArgs) -> Result<ExitCode, String> {
     let mut given = std::collections::BTreeMap::new();
     for pair in &args.set {
         let (name, value) = pair.split_once('=').ok_or_else(|| {
-            format!(
-                "bad --set '{pair}'. Expected NAME=VALUE, as in --set ref=4471."
-            )
+            format!("bad --set '{pair}'. Expected NAME=VALUE, as in --set ref=4471.")
         })?;
         if name.trim().is_empty() {
-            return Err(format!("bad --set '{pair}'. It has no name before the '='."));
+            return Err(format!(
+                "bad --set '{pair}'. It has no name before the '='."
+            ));
         }
         given.insert(name.trim().to_string(), value.to_string());
     }
@@ -5354,51 +5415,22 @@ fn cmd_blanks(args: BlanksArgs) -> Result<ExitCode, String> {
 }
 
 /// A page of grey at a known resolution, from a PDF or from a scan of paper.
+/// A form as grey pixels, whether it arrived as a PDF or a photograph.
+///
+/// The work is in [`onionskin::blanks::open_sheet`], which the window uses too
+/// — "which pixels are this sheet, and how many to the millimetre" is not a
+/// question worth two answers.
 fn page_in_grey(
     path: &Path,
     page: PageSize,
     cropped: bool,
     square: bool,
 ) -> Result<(Vec<u8>, usize, f64, PageSize), String> {
-    let looks_like_a_picture = matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "gif" | "webp")
-    );
-
-    if looks_like_a_picture {
-        let image = image::open(path)
-            .map_err(|e| format!("could not read '{}': {e}", path.display()))?;
-        let registration = register(
-            &image,
-            ScanOptions {
-                page,
-                assume_cropped: cropped,
-                assume_square: square,
-                ..ScanOptions::new(page)
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        println!("{}", registration.describe());
-
-        // Straightened onto the paper's own grid, so a millimetre in the
-        // answer is a millimetre on the sheet however crookedly it was
-        // scanned.
-        // Coarse on purpose: this is looking for empty regions several
-        // millimetres across, which a thumbnail settles.
-        let dpi = 100.0;
-        let flat = registration.flatten(&image.to_luma8(), dpi);
-        let width = flat.width() as usize;
-        return Ok((flat.into_raw(), width, dpi, page));
+    let sheet = onionskin::blanks::open_sheet(path, page, cropped, square)?;
+    if !sheet.note.is_empty() {
+        println!("{}", sheet.note);
     }
-
-    let engine = onionskin::render::engine().map_err(|e| e.to_string())?;
-    let doc = engine.open(path).map_err(|e| e.to_string())?;
-    let dpi = 100.0;
-    let drawn = doc.render_gray(0, dpi).map_err(|e| e.to_string())?;
-    Ok((drawn.gray, drawn.width, dpi, drawn.size))
+    Ok((sheet.gray, sheet.width, sheet.dpi, sheet.page))
 }
 
 /// Draw the sheet with the delta on it, so it can be looked at.
@@ -5437,9 +5469,7 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
         output.display(),
         args.colour
     );
-    println!(
-        "Look at it before you print the delta. Nothing here goes near the printer."
-    );
+    println!("Look at it before you print the delta. Nothing here goes near the printer.");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
 }
@@ -5581,12 +5611,8 @@ fn cmd_calibrate_learn(args: LearnArgs) -> Result<ExitCode, String> {
     println!("{}", registration.describe());
 
     let gray = image.to_luma8();
-    let landings = calibrate::measure_landings(
-        &gray,
-        &registration,
-        &intended,
-        calibrate::ink_threshold(),
-    );
+    let landings =
+        calibrate::measure_landings(&gray, &registration, &intended, calibrate::ink_threshold());
 
     println!("\nWhere the additions landed:");
     for landing in &landings {
@@ -5610,10 +5636,11 @@ fn cmd_calibrate_learn(args: LearnArgs) -> Result<ExitCode, String> {
     }
     let path = calibrate::save_profile(&learnt).map_err(|e| e.to_string())?;
     println!("\nSaved as '{name}' in {}.", path.display());
-    println!("Every delta from now on is corrected by it, and every job you scan back makes it better.");
+    println!(
+        "Every delta from now on is corrected by it, and every job you scan back makes it better."
+    );
     Ok(ExitCode::SUCCESS)
 }
-
 
 fn cmd_calibrate_measure(args: MeasureArgs) -> Result<ExitCode, String> {
     let page = parse_page(&args.page).map_err(|e| e.to_string())?;
@@ -5673,7 +5700,10 @@ fn cmd_calibrate_measure(args: MeasureArgs) -> Result<ExitCode, String> {
 
     let path = calibrate::save_profile(&profile).map_err(|e| e.to_string())?;
     println!("\nSaved as '{}' in {}", profile.name, path.display());
-    println!("Use it with:  onionskin delta a.pdf b.pdf -o delta.pdf --profile {}", profile.name);
+    println!(
+        "Use it with:  onionskin delta a.pdf b.pdf -o delta.pdf --profile {}",
+        profile.name
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5743,14 +5773,23 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         "\n{}: {} addition{}.",
         output.display(),
         outcome.total_regions(),
-        if outcome.total_regions() == 1 { "" } else { "s" }
+        if outcome.total_regions() == 1 {
+            ""
+        } else {
+            "s"
+        }
     );
     report_saving(&outcome);
     report_sheets_to_feed(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
-    note_the_delta(&args.document, &output, outcome.total_regions(), outcome.pages.len());
+    note_the_delta(
+        &args.document,
+        &output,
+        outcome.total_regions(),
+        outcome.pages.len(),
+    );
     save_the_job(args);
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
@@ -5763,7 +5802,10 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
 /// — the shapes on an otherwise blank page of the same size — ready to print
 /// onto the sheet that already carries the document, which is the same bargain
 /// every other part of the program offers.
-fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> Result<ExitCode, String> {
+fn draw_on_document(
+    args: &DrawArgs,
+    shapes: &[onionskin::document::Shape],
+) -> Result<ExitCode, String> {
     let output = args
         .output
         .clone()
@@ -5771,8 +5813,10 @@ fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> R
     refuse_to_clobber(&output, "delta", &[(&args.document, "document")])?;
     check_writable(&output, "delta")?;
 
-    let placed: Vec<(usize, onionskin::pdf::PlacedShape)> =
-        shapes.iter().map(|shape| (shape.page, shape.placed())).collect();
+    let placed: Vec<(usize, onionskin::pdf::PlacedShape)> = shapes
+        .iter()
+        .map(|shape| (shape.page, shape.placed()))
+        .collect();
 
     let options = options_from_settings(args.preview.clone(), &args.tuning)?;
     let outcome =
@@ -5788,14 +5832,23 @@ fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> R
         "\n{}: {} drawing{}.",
         output.display(),
         outcome.total_regions(),
-        if outcome.total_regions() == 1 { "" } else { "s" }
+        if outcome.total_regions() == 1 {
+            ""
+        } else {
+            "s"
+        }
     );
     report_saving(&outcome);
     report_sheets_to_feed(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
-    note_the_delta(&args.document, &output, outcome.total_regions(), outcome.pages.len());
+    note_the_delta(
+        &args.document,
+        &output,
+        outcome.total_regions(),
+        outcome.pages.len(),
+    );
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
@@ -6588,8 +6641,9 @@ fn describe_size(bytes: u64) -> String {
 
 fn cmd_package(args: PackageArgs) -> Result<ExitCode, String> {
     let platform = match &args.platform {
-        Some(text) => package::Platform::parse(text)
-            .ok_or_else(|| format!("I do not know the platform '{text}'. Try linux, macos or windows."))?,
+        Some(text) => package::Platform::parse(text).ok_or_else(|| {
+            format!("I do not know the platform '{text}'. Try linux, macos or windows.")
+        })?,
         None => this_platform(),
     };
 
@@ -6664,7 +6718,11 @@ fn cmd_package(args: PackageArgs) -> Result<ExitCode, String> {
     )
     .map_err(|e| e.to_string())?;
 
-    println!("Packaged Onionskin {} for {}:", args.version, platform.name());
+    println!(
+        "Packaged Onionskin {} for {}:",
+        args.version,
+        platform.name()
+    );
     for path in &written {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         println!("  {}  ({})", path.display(), human_size(size));
@@ -6936,7 +6994,9 @@ mod naming_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("form.onionskin");
         let name = path.to_str().unwrap();
-        Document::blank(onionskin::calibrate::A4, 1).save(&path).unwrap();
+        Document::blank(onionskin::calibrate::A4, 1)
+            .save(&path)
+            .unwrap();
         write_run(&[name, "--at", "20,40:Received:"]).unwrap();
 
         write_run(&[name, "--after", "Received:27 July"]).unwrap();
@@ -6960,7 +7020,9 @@ mod naming_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("form.onionskin");
         let name = path.to_str().unwrap();
-        Document::blank(onionskin::calibrate::A4, 1).save(&path).unwrap();
+        Document::blank(onionskin::calibrate::A4, 1)
+            .save(&path)
+            .unwrap();
         write_run(&[name, "--at", "20,40:Received:"]).unwrap();
 
         let said = write_run(&[
@@ -6990,7 +7052,9 @@ mod naming_tests {
     /// A blank sheet to print onto, and a list of people.
     fn a_sheet_and_a_list(dir: &Path) -> (PathBuf, PathBuf) {
         let doc = dir.join("blank.onionskin");
-        Document::blank(onionskin::calibrate::A4, 1).save(&doc).unwrap();
+        Document::blank(onionskin::calibrate::A4, 1)
+            .save(&doc)
+            .unwrap();
         let sheet = dir.join("sheet.pdf");
         let Some(Command::Print(print)) = Cli::parse_from([
             "onionskin",
@@ -7006,7 +7070,11 @@ mod naming_tests {
         cmd_print(print).unwrap();
 
         let list = dir.join("people.csv");
-        std::fs::write(&list, "name,course\nA. One,Bookbinding\nB. Two,Letterpress\n").unwrap();
+        std::fs::write(
+            &list,
+            "name,course\nA. One,Bookbinding\nB. Two,Letterpress\n",
+        )
+        .unwrap();
         (sheet, list)
     }
 
@@ -7019,7 +7087,10 @@ mod naming_tests {
         // on and eighteen comma-separated numbers is not.
         assert_eq!(describe_sheets(&[4, 5, 6, 7]), "4 to 7");
         assert_eq!(describe_sheets(&[1, 2]), "1 and 2");
-        assert_eq!(describe_sheets(&[1, 2, 3, 9, 11, 12, 13]), "1 to 3, 9 and 11 to 13");
+        assert_eq!(
+            describe_sheets(&[1, 2, 3, 9, 11, 12, 13]),
+            "1 to 3, 9 and 11 to 13"
+        );
         assert_eq!(describe_sheets(&[]), "");
     }
 
@@ -7117,7 +7188,11 @@ mod naming_tests {
         // And giving only a height works the other way round.
         let spec = format!("{}:10,20:x10", path.to_str().unwrap());
         let placed = placed_images(&[spec], 1).unwrap();
-        assert!((placed[0].1.width_mm - 40.0).abs() < 1e-9, "{:?}", placed[0].1);
+        assert!(
+            (placed[0].1.width_mm - 40.0).abs() < 1e-9,
+            "{:?}",
+            placed[0].1
+        );
     }
 
     #[test]
@@ -7262,8 +7337,14 @@ mod naming_tests {
 
         let theirs = dir.path().join("report.pdf");
         std::fs::write(&theirs, b"%PDF-1.7\n...somebody's own work...").unwrap();
-        assert!(!may_write_over(&theirs, false), "their PDF was not protected");
-        assert!(may_write_over(&theirs, true), "--overwrite was not honoured");
+        assert!(
+            !may_write_over(&theirs, false),
+            "their PDF was not protected"
+        );
+        assert!(
+            may_write_over(&theirs, true),
+            "--overwrite was not honoured"
+        );
 
         // Not a PDF at all, and not ours either.
         let notes = dir.path().join("notes.txt");
@@ -7283,7 +7364,9 @@ mod naming_tests {
 
         // A document of ours, likewise — and whatever it is called.
         let doc = dir.path().join("letter.pdf");
-        Document::blank(onionskin::calibrate::A4, 1).save(&doc).unwrap();
+        Document::blank(onionskin::calibrate::A4, 1)
+            .save(&doc)
+            .unwrap();
         assert!(may_write_over(&doc, false));
 
         // A name with nothing behind it is always free.
@@ -7301,7 +7384,10 @@ mod naming_tests {
             b"%PDF-1.7\n(Onionskin is a program for adding words to printed pages)",
         )
         .unwrap();
-        assert!(!may_write_over(&essay, false), "an essay was claimed as ours");
+        assert!(
+            !may_write_over(&essay, false),
+            "an essay was claimed as ours"
+        );
     }
 
     #[test]
@@ -7336,7 +7422,10 @@ mod naming_tests {
 
     #[test]
     fn a_name_that_promises_another_kind_of_file_is_mentioned_once() {
-        assert_eq!(misleading_name(Path::new("a.pdf")).as_deref(), Some("a PDF"));
+        assert_eq!(
+            misleading_name(Path::new("a.pdf")).as_deref(),
+            Some("a PDF")
+        );
         assert_eq!(
             misleading_name(Path::new("a.DOCX")).as_deref(),
             Some("a Word file")

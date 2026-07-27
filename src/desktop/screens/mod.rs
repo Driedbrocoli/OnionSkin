@@ -4,6 +4,7 @@
 //! do not know about one another, and none of them does slow work on the thread
 //! that draws — everything heavy goes through [`Jobs`].
 
+pub mod blanks;
 pub mod calibrate;
 pub mod compare;
 pub mod devices;
@@ -48,6 +49,7 @@ pub enum Screen {
     Document,
     Draw,
     Read,
+    Blanks,
     Proof,
     Merge,
     Labels,
@@ -67,6 +69,7 @@ impl Screen {
         Screen::Document,
         Screen::Draw,
         Screen::Read,
+        Screen::Blanks,
         Screen::Proof,
         Screen::Merge,
         Screen::Labels,
@@ -87,6 +90,7 @@ impl Screen {
             Screen::Document => "document",
             Screen::Draw => "draw",
             Screen::Read => "read",
+            Screen::Blanks => "blanks",
             Screen::Proof => "proof",
             Screen::Merge => "merge",
             Screen::Labels => "labels",
@@ -113,6 +117,7 @@ impl Screen {
             Screen::Document => "Make a document",
             Screen::Draw => "Draw on a page",
             Screen::Read => "Read a scan",
+            Screen::Blanks => "Where there is room",
             Screen::Proof => "See it before you print",
             Screen::Merge => "Merge deltas",
             Screen::Labels => "Sheet of labels",
@@ -133,6 +138,7 @@ impl Screen {
             Screen::Document => "Start from blank paper and keep adding",
             Screen::Draw => "Lines, boxes and circles, in any colour",
             Screen::Read => "Turn a scan into a Word document",
+            Screen::Blanks => "Ask the form where you can write, in millimetres",
             Screen::Proof => "The sheet and the delta together, on screen",
             Screen::Merge => "Several onto one, so the sheet goes through once",
             Screen::Labels => "Addresses and files, one per label, from a list",

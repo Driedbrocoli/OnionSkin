@@ -78,7 +78,10 @@ fn a_gap_between_two_printed_things_is_found_too() {
         .iter()
         .find(|b| b.beside_text && b.x_mm > 44.0 && b.x_mm < 60.0)
         .expect("the gap between them was not found");
-    assert!(middle.width_mm > 90.0 && middle.width_mm < 110.0, "{middle:?}");
+    assert!(
+        middle.width_mm > 90.0 && middle.width_mm < 110.0,
+        "{middle:?}"
+    );
 }
 
 /// Below the last line there is usually most of a page, and it is a perfectly
@@ -96,7 +99,10 @@ fn the_empty_part_of_the_page_is_offered_as_one_place() {
     assert!(open.height_mm > 200.0, "{open:?}");
     // The baseline sits inside the band rather than on its bottom edge, so
     // what is written lands on the paper and not past it.
-    assert!(open.y_mm < 297.0 - BlankOptions::default().margin_mm, "{open:?}");
+    assert!(
+        open.y_mm < 297.0 - BlankOptions::default().margin_mm,
+        "{open:?}"
+    );
 }
 
 /// The gaps between words on a line of prose are not places to write, and
@@ -140,10 +146,15 @@ fn the_places_the_form_asks_about_come_before_the_ones_it_does_not() {
     sheet.ink(20.0, 60.0, 45.0, 65.0);
     let blanks = sheet.find(&BlankOptions::default());
     assert!(blanks.len() >= 2, "{blanks:?}");
-    assert!(blanks[0].beside_text, "an open area was listed first: {blanks:?}");
+    assert!(
+        blanks[0].beside_text,
+        "an open area was listed first: {blanks:?}"
+    );
     // And the open areas really are wider, so this is not width in disguise.
     assert!(
-        blanks.iter().any(|b| !b.beside_text && b.width_mm > blanks[0].width_mm),
+        blanks
+            .iter()
+            .any(|b| !b.beside_text && b.width_mm > blanks[0].width_mm),
         "{blanks:?}"
     );
 }
@@ -177,7 +188,11 @@ fn a_gap_says_what_would_fit_in_it_rather_than_only_how_wide_it_is() {
     };
     assert_eq!(blank.placement(), "50,65");
     // And what is offered is the size of the line it would sit beside.
-    assert!(blank.fits_pt() > 9.0 && blank.fits_pt() < 13.0, "{}", blank.fits_pt());
+    assert!(
+        blank.fits_pt() > 9.0 && blank.fits_pt() < 13.0,
+        "{}",
+        blank.fits_pt()
+    );
     // A hundred millimetres at that size is a good few words.
     assert!(blank.fits_characters() > 30, "{}", blank.fits_characters());
     assert!(blank.describe().contains("50,65"), "{}", blank.describe());

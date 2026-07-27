@@ -229,6 +229,7 @@ Down the side, in the order somebody meets them:
 | **Make a document** | Start from blank paper and keep adding |
 | **Draw on a page** | Lines, boxes and circles, in any colour |
 | **Read a scan** | Turn a scan into a Word document |
+| **Where there is room** | Ask the form where you can write, in millimetres |
 | **See it before you print** | The sheet and the delta together, on screen |
 | **Merge deltas** | Several onto one, so the sheet goes through once |
 | **Sheet of labels** | Addresses and files, one per label, from a list |
@@ -242,6 +243,11 @@ The labels screen opens on the commonest address sheet in the world — three
 across, eight down, 63.5 × 33.9 mm — so somebody holding that box can press the
 button without typing a number. And the first thing it asks is how many labels
 have already been peeled off the sheet in the drawer.
+
+**Where there is room** is the one that matters most if you have never measured
+anything in millimetres. Give it the form — as a PDF, or a photograph of the
+paper — and it lists every empty place with a **Copy** button, which pastes
+straight into the writing screen. No ruler, no image editor, no arithmetic.
 
 `onionskin uninstall` removes exactly what was put there and says what it
 removed. It leaves your calibration profiles alone, and says so.

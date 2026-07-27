@@ -25,7 +25,87 @@
 //! Both are reported with a baseline rather than a top edge, because a baseline
 //! is what `--at` takes and what a line of type actually sits on.
 
+use std::path::Path;
+
 use crate::geometry::PageSize;
+
+/// A sheet turned into grey pixels on the paper's own grid, however it arrived.
+pub struct Sheet {
+    /// One byte a pixel.
+    pub gray: Vec<u8>,
+    pub width: usize,
+    /// Pixels to the inch, so millimetres can be worked back out.
+    pub dpi: f64,
+    pub page: PageSize,
+    /// What registering the scan had to say, where it was a scan. Empty for a
+    /// PDF, which needs no finding.
+    pub note: String,
+}
+
+/// Coarse on purpose. Everything here is looking for empty regions several
+/// millimetres across, which a thumbnail settles — and a form rendered at 400
+/// dpi is sixteen times the pixels for an answer to the nearest millimetre.
+pub const LOOKING_DPI: f64 = 100.0;
+
+/// Open a form, whether it is a PDF or a photograph of one.
+///
+/// Both end up as the same thing: a page of grey at a known number of pixels to
+/// the millimetre, straightened onto the paper's own grid, so that a millimetre
+/// in the answer is a millimetre on the sheet however crookedly it was scanned.
+///
+/// In the library rather than in either binary because the window and the
+/// command line both ask this question, and two spellings of "which pixels are
+/// this sheet" is how they come to disagree about where a box is.
+pub fn open_sheet(
+    path: &Path,
+    page: PageSize,
+    cropped: bool,
+    square: bool,
+) -> Result<Sheet, String> {
+    let looks_like_a_picture = matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "gif" | "webp")
+    );
+
+    if looks_like_a_picture {
+        let image =
+            image::open(path).map_err(|e| format!("could not read '{}': {e}", path.display()))?;
+        let registration = crate::scan::register(
+            &image,
+            crate::scan::ScanOptions {
+                page,
+                assume_cropped: cropped,
+                assume_square: square,
+                ..crate::scan::ScanOptions::new(page)
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let note = registration.describe();
+        let flat = registration.flatten(&image.to_luma8(), LOOKING_DPI);
+        let width = flat.width() as usize;
+        return Ok(Sheet {
+            gray: flat.into_raw(),
+            width,
+            dpi: LOOKING_DPI,
+            page,
+            note,
+        });
+    }
+
+    let engine = crate::render::engine().map_err(|e| e.to_string())?;
+    let doc = engine.open(path).map_err(|e| e.to_string())?;
+    let drawn = doc.render_gray(0, LOOKING_DPI).map_err(|e| e.to_string())?;
+    Ok(Sheet {
+        gray: drawn.gray,
+        width: drawn.width,
+        dpi: LOOKING_DPI,
+        page: drawn.size,
+        note: String::new(),
+    })
+}
 
 /// A place on the page with nothing printed in it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,7 +178,7 @@ impl Blank {
 }
 
 /// How the page is searched.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlankOptions {
     /// How dark a pixel has to be to count as something already printed.
     pub ink_threshold: u8,
