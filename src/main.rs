@@ -917,6 +917,11 @@ fn check_writable(path: &Path, label: &str) -> Result<(), String> {
 
     // Do not write over somebody else's file without being told to.
     //
+    // `refuse_to_clobber` runs before this at every call site, and must: an
+    // output that is also an input has to be refused outright, and this one
+    // would instead offer `--overwrite` — which for `add scan.png -o
+    // scan.png` is an invitation to destroy the only copy of the sheet.
+    //
     // Onionskin stamps everything it writes, so the ordinary loop — run a
     // command, look at the delta, edit, run it again — asks nothing. What is
     // refused is the case that costs something: an output name that happens
@@ -1443,8 +1448,8 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
             "pdf",
         )
     });
-    check_writable(&output, "PDF")?;
     refuse_to_clobber(&output, "PDF", &[(&args.document, "document")])?;
+    check_writable(&output, "PDF")?;
 
     let font = load_font(args.font_file.as_deref(), args.font_index)?;
 
@@ -2241,15 +2246,15 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         .output
         .clone()
         .unwrap_or_else(|| beside(&args.scan, "-delta", "pdf"));
-    check_writable(&output, "delta")?;
     refuse_to_clobber(&output, "delta", &[(&args.scan, "scan")])?;
+    check_writable(&output, "delta")?;
     if let Some(preview) = &args.preview {
-        check_writable(preview, "proof")?;
         refuse_to_clobber(
             preview,
             "proof",
             &[(&args.scan, "scan"), (&output, "delta")],
         )?;
+        check_writable(preview, "proof")?;
     }
 
     let (registration, _) = load_registration(&args.scan, &args.page, args.cropped, args.square)?;
@@ -3639,8 +3644,8 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         .output
         .clone()
         .unwrap_or_else(|| beside(&args.document, "-delta", "pdf"));
-    check_writable(&output, "delta")?;
     refuse_to_clobber(&output, "delta", &[(&args.document, "document")])?;
+    check_writable(&output, "delta")?;
 
     let mut items = Vec::new();
     for placement in &args.at {
@@ -3697,8 +3702,8 @@ fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> R
         .output
         .clone()
         .unwrap_or_else(|| beside(&args.document, "-delta", "pdf"));
-    check_writable(&output, "delta")?;
     refuse_to_clobber(&output, "delta", &[(&args.document, "document")])?;
+    check_writable(&output, "delta")?;
 
     let placed: Vec<(usize, onionskin::pdf::PlacedShape)> =
         shapes.iter().map(|shape| (shape.page, shape.placed())).collect();

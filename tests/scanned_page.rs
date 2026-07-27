@@ -867,6 +867,16 @@ fn the_scan_is_never_written_over() {
             "{}",
             result.stderr
         );
+        // And never offers a way to do it anyway. The general
+        // do-not-overwrite guard does, correctly, for somebody else's
+        // unrelated file — but here the file is the scan being read, and
+        // "add --overwrite" would be an invitation to destroy the only copy
+        // of a sheet that has already been through the printer.
+        assert!(
+            !result.stderr.contains("--overwrite"),
+            "offered to overwrite the scan: {}",
+            result.stderr
+        );
     }
 
     assert_eq!(
