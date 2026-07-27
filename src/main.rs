@@ -100,6 +100,8 @@ enum Command {
     /// Jobs you have saved, to run again on another document.
     #[command(subcommand)]
     Job(JobCommand),
+    /// A sheet of labels from a list: addresses, files, shelves.
+    Labels(LabelsArgs),
     /// Measure a printer's second-pass registration, once per printer.
     #[command(subcommand)]
     Calibrate(CalibrateCommand),
@@ -559,6 +561,77 @@ struct BlanksArgs {
     /// Report them as JSON.
     #[arg(long)]
     json: bool,
+}
+
+/// Printing onto a sheet of pre-cut label stock.
+///
+/// The one thing here that is not an overlay on something already printed:
+/// label stock is blank and there is nothing to compare against, so nothing is
+/// rendered and nothing is diffed. The hard part is the same hard part —
+/// getting ink onto a particular rectangle of a particular sheet, in
+/// millimetres, and being right about it.
+#[derive(clap::Args)]
+struct LabelsArgs {
+    /// The list, as a CSV file. Its first line names the columns.
+    #[arg(long = "from", value_name = "LIST.csv")]
+    from: PathBuf,
+    /// What goes on each label, with {column} for each row's own. Use \n for
+    /// a line break: '{name}\n{address}'.
+    #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+    text: String,
+    /// How the stock is cut: columns across by rows down.
+    #[arg(long, value_name = "COLSxROWS")]
+    grid: String,
+    /// The paper the labels are on.
+    #[arg(long, default_value_t = default_page())]
+    page: String,
+    /// Each label's size in millimetres, as WIDTHxHEIGHT. Without it, the
+    /// labels are made to fill the page inside the margins.
+    #[arg(long, value_name = "WxH")]
+    label: Option<String>,
+    /// From the paper's left edge to the first label.
+    #[arg(long, default_value_t = 7.0)]
+    margin_x: f64,
+    /// From the paper's top edge to the first label.
+    #[arg(long, default_value_t = 15.0)]
+    margin_y: f64,
+    /// Between one label and the next, across.
+    #[arg(long, default_value_t = 2.5)]
+    gap_x: f64,
+    /// Between one label and the next, down.
+    #[arg(long, default_value_t = 0.0)]
+    gap_y: f64,
+    /// Start at this label, counting from 1 — for a sheet with the first few
+    /// already peeled off.
+    #[arg(long, default_value_t = 1)]
+    start: usize,
+    /// White space inside each label, so the words are not against the edge.
+    #[arg(long, default_value_t = 3.0)]
+    pad: f64,
+    /// Type size in points.
+    #[arg(long, default_value_t = 10.0)]
+    size: f64,
+    /// A built-in font's name (see `onionskin fonts`).
+    #[arg(long, default_value = "Helvetica")]
+    font: String,
+    /// Space between lines, as a multiple of the type size.
+    #[arg(long, default_value_t = 1.2)]
+    leading: f64,
+    /// Colour as #rrggbb.
+    #[arg(long, default_value = "#000000")]
+    colour: String,
+    /// Where to write the PDF.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Stop after this many, to try one sheet before committing the box.
+    #[arg(long, value_name = "N")]
+    first: Option<usize>,
+    /// Open it when it is written.
+    #[arg(long)]
+    open: bool,
+    /// Write over a file Onionskin did not make, instead of stopping.
+    #[arg(long)]
+    overwrite: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -1501,6 +1574,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
+        Command::Labels(args) => cmd_labels(args),
         Command::Calibrate(command) => cmd_calibrate(command),
         Command::Doctor => cmd_doctor(),
         Command::Serve(args) => {
@@ -4700,6 +4774,196 @@ fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     })
 }
 
+/// A sheet of labels from a list.
+fn cmd_labels(args: LabelsArgs) -> Result<ExitCode, String> {
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+    let (columns, rows) = parse_grid(&args.grid)?;
+    let label = match &args.label {
+        Some(spec) => {
+            let (width_mm, height_mm) = parse_size(spec)?;
+            if width_mm <= 0.0 || height_mm <= 0.0 {
+                return Err(format!(
+                    "a label cannot be {width_mm} by {height_mm} mm. Give the size \
+                     off the box the labels came in: --label 63.5x33.9"
+                ));
+            }
+            Some((width_mm, height_mm))
+        }
+        None => None,
+    };
+    let grid = onionskin::labels::Grid {
+        page,
+        columns,
+        rows,
+        margin_x_mm: args.margin_x,
+        margin_y_mm: args.margin_y,
+        gap_x_mm: args.gap_x,
+        gap_y_mm: args.gap_y,
+        label,
+    };
+    grid.check()?;
+
+    if args.start == 0 {
+        return Err(
+            "--start counts labels from 1, so --start 1 is a fresh sheet and \
+             --start 6 skips five already peeled off."
+                .into(),
+        );
+    }
+    let skip = args.start - 1;
+    if skip >= grid.per_sheet() {
+        return Err(format!(
+            "--start {} is past the end of a sheet — there are only {} labels \
+             on one.",
+            args.start,
+            grid.per_sheet()
+        ));
+    }
+
+    let list = onionskin::rows::List::read(&args.from).map_err(|e| e.to_string())?;
+    let unknown: Vec<String> =
+        onionskin::rows::unknown_columns(std::slice::from_ref(&args.text), &list)
+            .into_iter()
+            .filter(|name| !onionskin::jobs::known_without_asking(name))
+            .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "{} has no column called {}.\n    It has: {}",
+            args.from.display(),
+            unknown
+                .iter()
+                .map(|name| format!("'{name}'"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            list.describe_columns()
+        ));
+    }
+
+    let wanted = args.first.unwrap_or(list.rows.len()).min(list.rows.len());
+    if wanted == 0 {
+        return Err(format!(
+            "{} has no rows, so there is nothing to put on any label.",
+            args.from.display()
+        ));
+    }
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.from, "-labels", "pdf"));
+    refuse_to_clobber(&output, "labels", &[(&args.from, "list")])?;
+    check_writable(&output, "labels")?;
+
+    // What the words are, before anything about paper. A label that cannot
+    // hold its own lines is worth saying now rather than printing.
+    let known = onionskin::jobs::what_the_day_is(onionskin::history::now());
+    // The colour parser the rest of the text commands use, so #rrggbb works
+    // here exactly as it does on `write` and `draw`. There are two in this
+    // program and picking the narrower one by accident is how `--colour
+    // '#000000'` came to be refused on a flag whose own default was #000000.
+    let colour = onionskin::document::parse_colour(&args.colour)
+        .map_err(|e| format!("--colour {}: {e}", args.colour))?;
+    let face = Font::parse(&args.font).ok_or_else(|| {
+        format!(
+            "no built-in face called '{}'. onionskin fonts lists them.",
+            args.font
+        )
+    })?;
+    let sheets = grid.sheets_needed(wanted, skip);
+    let mut per_page: Vec<Vec<onionskin::pdf::PlacedLine>> = vec![Vec::new(); sheets];
+    let mut overfull = 0usize;
+
+    for (n, row) in list.rows.iter().take(wanted).enumerate() {
+        let row = &{
+            let mut values = known.clone();
+            values.extend(row.values.clone());
+            onionskin::rows::Row {
+                values,
+                number: row.number,
+            }
+        };
+        let (sheet, at) = grid.place(n, skip);
+        let cell = grid.cell(at).expect("place stays inside the sheet");
+        let text = unescape(&onionskin::rows::fill(&args.text, row));
+        let lines: Vec<&str> = text.split('\n').collect();
+        if lines.len() > cell.lines_that_fit(args.size, args.leading, args.pad) {
+            overfull += 1;
+        }
+        for (line, words) in lines.iter().enumerate() {
+            if words.trim().is_empty() {
+                continue;
+            }
+            let (x_mm, y_mm) = cell.line_at(line, args.size, args.leading, args.pad);
+            per_page[sheet].push(onionskin::pdf::PlacedLine {
+                text: (*words).to_string(),
+                x_mm,
+                y_mm,
+                size_pt: args.size,
+                font: onionskin::pdf::LineFont::Builtin(face),
+                rotation_deg: 0.0,
+                colour,
+            });
+        }
+    }
+
+    let sizes: Vec<onionskin::geometry::PageSize> = (0..sheets).map(|_| page).collect();
+    let nothing: Vec<Vec<onionskin::pdf::PlacedShape>> = sizes.iter().map(|_| Vec::new()).collect();
+    onionskin::pdf::write_page_content(
+        &output,
+        &sizes,
+        &per_page,
+        &nothing,
+        "Onionskin labels",
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!(
+        "{}: {wanted} label(s) on {sheets} sheet(s) — {}.",
+        output.display(),
+        grid.describe()
+    );
+    if skip > 0 {
+        println!(
+            "Starting at label {}, so the first {skip} on the first sheet are left \
+             blank for the ones already peeled off.",
+            args.start
+        );
+    }
+    if overfull > 0 {
+        println!(
+            "\nWARNING: {overfull} label(s) have more lines than fit at {} pt. \
+             They will\n  run onto the label below, or onto the backing paper. \
+             Use --size 8, or fewer lines.",
+            args.size
+        );
+    }
+    println!(
+        "\nPrint at 100% / \"Actual size\", with \"Fit to page\" off — it scales by \
+         a few\npercent and nothing will line up with the cuts. Try one sheet on \
+         plain paper\nfirst and hold it against the label stock."
+    );
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `COLUMNSxROWS`, as a sheet of labels is described.
+fn parse_grid(spec: &str) -> Result<(usize, usize), String> {
+    let bad = || {
+        format!(
+            "bad grid '{spec}'. Expected COLUMNSxROWS — how the stock is cut: \
+             --grid 3x8"
+        )
+    };
+    let (columns, rows) = spec.trim().split_once(['x', 'X', '*']).ok_or_else(bad)?;
+    let columns: usize = columns.trim().parse().map_err(|_| bad())?;
+    let rows: usize = rows.trim().parse().map_err(|_| bad())?;
+    if columns == 0 || rows == 0 {
+        return Err("a sheet needs at least one column and one row of labels.".into());
+    }
+    Ok((columns, rows))
+}
+
 /// Jobs saved on this machine.
 fn cmd_job(command: JobCommand) -> Result<ExitCode, String> {
     match command {
@@ -5093,7 +5357,8 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
     )?;
     check_writable(&output, "proof")?;
 
-    let added = parse_colour(&args.colour).map_err(|e| format!("--colour {}: {e}", args.colour))?;
+    let added = onionskin::document::parse_colour(&args.colour)
+        .map_err(|e| format!("--colour {}: {e}", args.colour))?;
     let mut options = onionskin::proof::ProofOptions {
         dpi: args.dpi,
         added: [

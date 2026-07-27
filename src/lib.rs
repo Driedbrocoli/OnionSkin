@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod history;
 pub mod install;
 pub mod jobs;
+pub mod labels;
 pub mod letters;
 pub mod office;
 pub mod package;

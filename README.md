@@ -1049,6 +1049,49 @@ onionskin fetch -o scan.png --scanner http://printer.local/eSCL --capabilities
 onionskin send delta.pdf --printer ipp://printer.local/ipp/print --copies 2
 ```
 
+## Sheets of labels
+
+Address labels, file labels, shelf labels. The stock comes pre-cut in a grid and
+the job is always the same: take a column of names and put one in each label.
+
+```bash
+onionskin labels --from addresses.csv --grid 3x8 --label 63.5x33.9 \
+  --text '{name}\n{address}\n{town} {postcode}'
+```
+
+This is the one thing here that is *not* an overlay on something already
+printed — label stock is blank, so nothing is rendered and nothing is diffed.
+It is in this program because the hard part is the same hard part: getting ink
+onto a particular rectangle of a particular sheet, in millimetres, and being
+right about it.
+
+**The half-used sheet.** Nobody ever uses a whole one. There is always a sheet
+in the drawer with the first five peeled off:
+
+```bash
+onionskin labels --from addresses.csv --grid 3x8 --label 63.5x33.9 \
+  --text '{name}' --start 6
+```
+
+**A grid that runs off the paper is refused before anything is written**, with
+the numbers, because it would not fail — it would print onto the backing paper
+and cost you a sheet:
+
+```
+error: the labels run 44.0 mm off the right-hand edge. 4 columns of 63.5 mm,
+    2.5 mm apart, starting 7.0 mm in, needs 254.0 mm and the paper is 210.0 mm.
+```
+
+A label with more lines than fit is warned about for the same reason. `--first 1`
+makes one sheet, to try on plain paper against the real stock before committing
+the box.
+
+**Why the grid is given rather than looked up.** Label stock is sold by a code —
+Avery 5160, L7160, a hundred others — and those codes mean different sizes in
+different countries and change between years. A built-in table would be wrong
+for somebody, silently, on paper. The measurements are on the box, they are four
+numbers, and being asked once beats a boxful printed half a millimetre out.
+
 ## The same job, again next week
 
 An office does the same thing to the same form every day. The paid stamp goes at
