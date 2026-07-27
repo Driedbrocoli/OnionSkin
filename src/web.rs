@@ -416,6 +416,8 @@ fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>, std::time::Dur
             .filter(|v| v.is_finite())
             .unwrap_or(fallback)
     };
+    // An unticked checkbox sends nothing at all, so its presence is the answer.
+    let ticked = |name: &str| field(name).is_some();
     let options = pipeline::Options {
         dpi: number("dpi", pipeline::DEFAULT_DPI),
         mode: field("mode")
@@ -423,6 +425,13 @@ fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>, std::time::Dur
             .unwrap_or(pipeline::Mode::Raster),
         margin_mm: number("margin", crate::safety::DEFAULT_MARGIN_MM),
         profile: field("profile").map(|p| p.text()).filter(|t| !t.is_empty()),
+        outline: ticked("outline").then(|| {
+            let colour = field("outline_colour").map(|p| p.text()).unwrap_or_default();
+            crate::delta::Outline {
+                colour: outline_colour(&colour),
+                ..Default::default()
+            }
+        }),
         ..Default::default()
     };
 
@@ -652,6 +661,22 @@ fn result_page(said: &[String], token: &str, took: std::time::Duration) -> Strin
 
 /// The five characters HTML cannot take literally. A document called
 /// `Smith &amp; Sons <draft>` would otherwise close a tag nobody opened.
+/// A box colour by the name the form offers.
+///
+/// The same six the window offers, and red when the name is anything else —
+/// a form can be posted by hand with any value in it, and an unknown colour is
+/// not worth refusing a delta over.
+fn outline_colour(name: &str) -> (f64, f64, f64) {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "blue" => (0.10, 0.30, 0.85),
+        "green" => (0.00, 0.55, 0.20),
+        "orange" => (0.95, 0.45, 0.00),
+        "magenta" => (0.85, 0.10, 0.60),
+        "black" => (0.0, 0.0, 0.0),
+        _ => (0.80, 0.10, 0.10),
+    }
+}
+
 fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -745,6 +770,26 @@ const PAGE_BODY: &str = r#"
         <label for="profile">Printer profile
           <span class="hint">— optional</span></label>
         <input type="text" id="profile" name="profile" placeholder="office">
+      </div>
+    </div>
+    <p>
+      <label for="outline">
+        <input type="checkbox" id="outline" name="outline" value="yes">
+        Draw a box round every change, so it is easy to see
+      </label>
+      <span class="hint">— the box is printed onto the paper too</span>
+    </p>
+    <div class="row">
+      <div>
+        <label for="outline_colour">Box colour</label>
+        <select id="outline_colour" name="outline_colour">
+          <option value="red">Red</option>
+          <option value="blue">Blue</option>
+          <option value="green">Green</option>
+          <option value="orange">Orange</option>
+          <option value="magenta">Magenta</option>
+          <option value="black">Black</option>
+        </select>
       </div>
     </div>
   </fieldset>

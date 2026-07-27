@@ -695,3 +695,32 @@ fn something_that_is_not_an_image_is_refused_rather_than_crashing() {
         String::from_utf8_lossy(&message)
     );
 }
+
+#[test]
+fn the_box_colours_the_form_offers_are_all_understood() {
+    // Every value in the select has to map to something, or somebody choosing
+    // blue gets red and no explanation.
+    let page = page();
+    for name in ["red", "blue", "green", "orange", "magenta", "black"] {
+        assert!(
+            page.contains(&format!("value=\"{name}\"")),
+            "the form does not offer {name}"
+        );
+    }
+    assert_ne!(outline_colour("blue"), outline_colour("red"));
+    assert_ne!(outline_colour("green"), outline_colour("black"));
+    // Anything else falls back rather than refusing: a form can be posted by
+    // hand with any value in it, and that is not worth losing a delta over.
+    assert_eq!(outline_colour("chartreuse"), outline_colour("red"));
+    assert_eq!(outline_colour(""), outline_colour("red"));
+    assert_eq!(outline_colour("  BLUE  "), outline_colour("blue"));
+}
+
+#[test]
+fn the_page_offers_the_box_round_every_change() {
+    let page = page();
+    assert!(page.contains("name=\"outline\""), "no outline checkbox");
+    assert!(page.contains("name=\"outline_colour\""), "no colour choice");
+    // And says what it costs, because the box goes onto the paper.
+    assert!(page.contains("printed onto the paper"), "{page}");
+}
