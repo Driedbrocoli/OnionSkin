@@ -3275,18 +3275,32 @@ struct Described {
 /// person who added the flag. Taking it from the same definition `--help`
 /// comes from means it cannot drift.
 fn command_tree() -> Vec<Described> {
-    Cli::command()
-        .get_subcommands()
-        .map(|sub| Described {
-            name: sub.get_name().to_string(),
-            about: sub
-                .get_about()
-                .map(|about| about.to_string())
-                .unwrap_or_default(),
-            flags: sub
+    let cli = Cli::command();
+    // A global argument is declared once on the root and accepted by every
+    // subcommand, but only after clap propagates it at parse time — asking a
+    // subcommand for its arguments here does not show it. Without this,
+    // `--overwrite` worked everywhere and completed nowhere.
+    let global: Vec<String> = cli
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect();
+
+    cli.get_subcommands()
+        .map(|sub| {
+            let mut flags: Vec<String> = sub
                 .get_arguments()
                 .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
-                .collect(),
+                .collect();
+            flags.extend(global.iter().cloned());
+            Described {
+                name: sub.get_name().to_string(),
+                about: sub
+                    .get_about()
+                    .map(|about| about.to_string())
+                    .unwrap_or_default(),
+                flags,
+            }
         })
         .collect()
 }
@@ -4598,6 +4612,34 @@ mod tests {
             );
         }
         assert!(!delta.about.is_empty());
+    }
+
+    #[test]
+    fn a_flag_declared_once_for_every_command_reaches_every_command() {
+        // `--overwrite` is declared on the root and accepted everywhere, but
+        // clap only hands it to a subcommand at parse time — so asking one
+        // for its arguments does not mention it. It worked everywhere and
+        // completed nowhere, which is exactly the invisible wrongness these
+        // generated scripts exist to prevent.
+        let tree = command_tree();
+        for sub in &tree {
+            assert!(
+                sub.flags.iter().any(|flag| flag == "--overwrite"),
+                "{} cannot complete --overwrite: {:?}",
+                sub.name,
+                sub.flags
+            );
+        }
+
+        // And it is in the scripts themselves, not merely in the tree.
+        for script in [
+            bash_completions(&tree),
+            zsh_completions(&tree),
+            fish_completions(&tree),
+            powershell_completions(&tree),
+        ] {
+            assert!(script.contains("overwrite"), "a script lost --overwrite");
+        }
     }
 
     #[test]
