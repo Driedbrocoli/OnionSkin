@@ -2327,6 +2327,14 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
     let gray = image.to_luma8();
 
     let font = load_font(args.font_file.as_deref(), args.font_index)?;
+
+    // Without a font named, work out what the page is set in and read it with
+    // that. Asking somebody to name the font a scan was set in is asking a
+    // question the page can answer: the reader tries each face it has, and the
+    // one that accounts for the most ink is the one the page is in. Naming a
+    // font is still how you read an alphabet the built-in faces do not cover,
+    // which is why the option stays.
+    let mut matched: Option<String> = None;
     let text = match &font {
         Some(font) => letters::read_with_font(
             &gray,
@@ -2334,10 +2342,29 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
             &letters::ReadOptions::default(),
             font,
             args.letters.as_deref(),
-        ),
-        None => letters::read(&gray, &registration, &letters::ReadOptions::default()),
-    }
-    .map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?,
+        None => match onionskin::typeface::read_and_match(
+            &args.scan,
+            &args.page,
+            args.cropped,
+            args.square,
+        ) {
+            Some((text, found)) => {
+                matched = Some(match found {
+                    Some(face) => face.describe(),
+                    None => "read against the faces on this machine; the page did \
+                             not say clearly which one it is set in"
+                        .to_string(),
+                });
+                text
+            }
+            // Nothing on this machine to read against. Where every letter is
+            // is still worth having, and is what this used to give always.
+            None => letters::read(&gray, &registration, &letters::ReadOptions::default())
+                .map_err(|e| e.to_string())?,
+        },
+    };
 
     if args.json {
         println!(
@@ -2357,13 +2384,20 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
         text.lines.len(),
         if text.lines.len() == 1 { "" } else { "s" }
     );
-    if font.is_none() {
-        println!(
-            "No font was given, so this is where the letters are, not which they \
-             are.\nPass --font-file with the font the page was set in to read them."
-        );
+    match (&font, &matched) {
+        (Some(_), _) => {}
+        (None, Some(said)) => println!("Read automatically: {said}"),
+        (None, None) => println!(
+            "Nothing on this machine to read the letters against, so this is where \
+             they are\nrather than which they are. Install a common face — DejaVu, \
+             Liberation — or pass\n--font-file with the font the page was set in."
+        ),
     }
 
+    // The words are there whether the font was named or worked out, and the
+    // second case is the common one now — gating this on a font file having
+    // been passed would have read the page and then declined to show it.
+    let letters_were_read = font.is_some() || matched.is_some();
     for line in &text.lines {
         println!(
             "\n  {:>6.1} mm  ({:.1}–{:.1} mm across)",
@@ -2371,7 +2405,7 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
             line.rect.x_mm,
             line.rect.right_mm()
         );
-        if font.is_some() {
+        if letters_were_read {
             println!("     {}", line.text_lossy());
         }
     }
@@ -2384,7 +2418,7 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
     }
 
     if let Some(destination) = &args.to {
-        export_page(&text, page, destination, args.flow, font.is_some())?;
+        export_page(&text, page, destination, args.flow, letters_were_read)?;
         open_if_asked(args.open, destination);
     }
     Ok(ExitCode::SUCCESS)

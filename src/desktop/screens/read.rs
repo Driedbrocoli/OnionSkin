@@ -103,19 +103,23 @@ pub fn show(state: &mut State, room: &mut Room) {
     );
     room.ui.add_space(6.0);
 
-    widgets::file_row(
-        room.ui,
-        room.picker,
-        "The font the page was set in",
-        &mut state.font_file,
-        &["ttf", "otf", "ttc"],
-        room.dropped,
-    );
-    widgets::hint(
-        room.ui,
-        "Required. Without it, Onionskin can see where the ink is on the page \
-         but not which letters it is — there would be nothing to write down.",
-    );
+    room.ui.collapsing("Read it in a particular font", |ui| {
+        widgets::hint(
+            ui,
+            "Leave this alone and Onionskin works out what the page is set in \
+             by itself. Name a font only to read an alphabet the built-in faces \
+             do not cover — Greek, Cyrillic, Arabic — or to overrule what it \
+             decided.",
+        );
+        widgets::file_row(
+            ui,
+            room.picker,
+            "The font the page was set in",
+            &mut state.font_file,
+            &["ttf", "otf", "ttc"],
+            room.dropped,
+        );
+    });
 
     room.ui.add_space(6.0);
     room.ui.collapsing("Settings", |ui| {
@@ -174,7 +178,7 @@ pub fn show(state: &mut State, room: &mut Room) {
     );
 
     room.ui.add_space(6.0);
-    let ready = state.scan.is_some() && state.font_file.is_some();
+    let ready = state.scan.is_some();
     let busy = room.jobs.busy();
     if room
         .ui
@@ -187,7 +191,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         start(state, room);
     }
     if !ready {
-        widgets::hint(room.ui, "Choose the scan and the font it was set in first.");
+        widgets::hint(room.ui, "Choose a scan to read.");
     }
 
     if let Some(outcome) = &room.jobs.last {
@@ -206,9 +210,10 @@ pub fn show(state: &mut State, room: &mut Room) {
 }
 
 fn start(state: &mut State, room: &mut Room) {
-    let (Some(scan_path), Some(font_file)) = (state.scan.clone(), state.font_file.clone()) else {
+    let Some(scan_path) = state.scan.clone() else {
         return;
     };
+    let font_file = state.font_file.clone();
     let page_spec = state.page.clone();
     let format = state.format;
     let layout = state.layout;
@@ -255,21 +260,46 @@ fn start(state: &mut State, room: &mut Room) {
             Err(e) => return Outcome::refused(e.to_string()),
         };
 
-        report.saying("Reading the letters…");
-        let font = match font::EmbeddedFont::load(&font_file) {
-            Ok(font) => font,
-            Err(e) => return Outcome::refused(e.to_string()),
-        };
+        // A font named is a font used; otherwise the page is asked what it is
+        // set in. Nobody looking at a scan of a letter knows, or should have
+        // to know, which of three faces it was typed in — but somebody reading
+        // a page of Greek does know that the built-in faces will not do, and
+        // for them the choice is still there.
         let gray = image.to_luma8();
-        let text = match letters::read_with_font(
-            &gray,
-            &registration,
-            &letters::ReadOptions::default(),
-            &font,
-            None,
-        ) {
-            Ok(text) => text,
-            Err(e) => return Outcome::refused(e.to_string()),
+        let (text, matched) = match &font_file {
+            Some(path) => {
+                report.saying("Reading the letters…");
+                let face = match font::EmbeddedFont::load(path) {
+                    Ok(face) => face,
+                    Err(e) => return Outcome::refused(e.to_string()),
+                };
+                match letters::read_with_font(
+                    &gray,
+                    &registration,
+                    &letters::ReadOptions::default(),
+                    &face,
+                    None,
+                ) {
+                    Ok(text) => (text, None),
+                    Err(e) => return Outcome::refused(e.to_string()),
+                }
+            }
+            None => {
+                report.saying("Working out what the page is set in…");
+                match onionskin::typeface::read_and_match(&scan_path, &page_spec, false, false) {
+                    Some((text, found)) => (text, Some(found)),
+                    None => {
+                        return Outcome::refused(
+                            "There is no face on this machine to read the letters \
+                             against, so the words cannot be made out — only where \
+                             the ink is.\n\nInstall a common font (DejaVu or \
+                             Liberation), or name the font the page was set in \
+                             under 'Read it in a particular font'."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
         };
 
         report.saying("Writing the document…");
@@ -300,6 +330,19 @@ fn start(state: &mut State, room: &mut Room) {
         let lines = text.lines.len();
         let words = text.word_count();
         let mut notes = Vec::new();
+        // What it decided, first, because it is the thing the person did not
+        // have to answer and the thing most worth checking if the result looks
+        // wrong.
+        match &matched {
+            Some(Some(face)) => notes.push(format!("Read as {}.", face.describe())),
+            Some(None) => notes.push(
+                "The page did not say clearly what it is set in, so the closest \
+                 face on this machine was used. If the words look wrong, name the \
+                 font under 'Read it in a particular font'."
+                    .to_string(),
+            ),
+            None => {}
+        }
         if text.discarded > 0 {
             notes.push(format!(
                 "{} mark{} on the scan were set aside as too small or too large \
