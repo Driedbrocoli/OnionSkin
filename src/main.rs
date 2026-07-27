@@ -2585,9 +2585,9 @@ fn cmd_doctor() -> Result<ExitCode, String> {
     // program is meant not to tell.
     println!(
         "\nOnionskin never phones home: no telemetry, no update check, nothing \
-         about\nyour documents leaving this machine. The only time it opens a \
-         socket is\nwhen you name a printer — and then it talks to that printer, \
-         and to nothing\nelse."
+         about\nyour documents leaving this machine. It opens a socket when you \
+         name a\nprinter or a scanner, and when you ask it to find them — and \
+         then it asks\nthis network only, and talks to nothing beyond it."
     );
     Ok(if everything_works {
         ExitCode::SUCCESS

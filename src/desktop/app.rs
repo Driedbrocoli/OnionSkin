@@ -234,7 +234,9 @@ impl Onionskin {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             ui.add_space(10.0);
             ui.label(
-                egui::RichText::new("Never uses the network.\nEverything stays on this machine.")
+                egui::RichText::new(
+                    "Nothing leaves this machine.\nIt speaks to printers, and to nothing else.",
+                )
                     .small()
                     .weak(),
             );

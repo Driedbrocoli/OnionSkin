@@ -644,7 +644,7 @@ fn result_page(said: &[String], token: &str, took: std::time::Duration) -> Strin
          any more.</li>\n\
          </ol>\n\
          <p><a href=\"/\">Make another</a></p>\n\
-         <footer>Onionskin never uses the network. Everything here happened on \
+         <footer>Onionskin never sends your documents anywhere. Everything here happened on \
          this machine.</footer>\n\
          </body>\n</html>\n"
     )
@@ -817,7 +817,7 @@ const PAGE_BODY: &str = r#"
 
 <footer>
   <p>
-    Onionskin never uses the network. This page is served from your own machine
+    Onionskin never sends your documents anywhere. This page is served from your own machine
     and contains nothing fetched from anywhere else.
   </p>
   <p>

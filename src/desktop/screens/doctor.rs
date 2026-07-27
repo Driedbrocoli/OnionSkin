@@ -74,9 +74,10 @@ pub fn show(state: &mut State, room: &mut Room) {
     room.ui.add_space(6.0);
     widgets::hint(
         room.ui,
-        "Onionskin never uses the network. The only time it opens a socket is \
-         when you name a printer or a scanner — and then it talks to that \
-         machine, and to nothing else.",
+        "Onionskin never phones home: no telemetry, no update check, nothing \
+         about your documents leaving this machine. It opens a socket when you \
+         name a printer or a scanner, and when you ask it to find them — and \
+         then it asks this network only, and talks to nothing beyond it.",
     );
 }
 

@@ -131,7 +131,7 @@ fn a_name_with_nothing_usable_in_it_gets_the_fallback() {
 
 #[test]
 fn the_page_fetches_nothing_from_anywhere() {
-    // The promise is that Onionskin never uses the network. A page that pulls a
+    // The promise is that nothing of yours leaves this machine. A page that pulls a
     // stylesheet from someone else's server breaks that the moment it is
     // opened, silently, and no test of the Rust would notice.
     let lower = page().to_lowercase();
@@ -150,7 +150,7 @@ fn the_page_says_how_to_print_it() {
     // The commonest way to waste a sheet is "Fit to page".
     assert!(page().contains("100%"));
     assert!(page().contains("Fit to page"));
-    assert!(page().contains("never uses the network"));
+    assert!(page().contains("never sends your documents anywhere"));
 }
 
 #[test]
