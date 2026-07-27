@@ -266,6 +266,13 @@ jobs:
   # repository that can be downloaded.
   apt:
     needs: [open, build]
+    # The Linux package is the only thing this needs, and `needs:` on its own
+    # would skip the whole job because one macOS runner never got scheduled.
+    # `apt install` stopping working because a Mac archive is late is not a
+    # relationship these two things should have. It still waits for the builds
+    # to finish; it just does not require every one of them to have worked, and
+    # fails honestly on the next step if the package it wants is not there.
+    if: always() && needs.open.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
