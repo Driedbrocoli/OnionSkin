@@ -520,6 +520,17 @@ pub fn run_watched(
     compare_documents(original, edited, Some(output), options, watch)
 }
 
+/// One page's worth of work for the comparing thread.
+struct Compare {
+    index: usize,
+    old_gray: Vec<u8>,
+    new_gray: Vec<u8>,
+    width: usize,
+    height: usize,
+    size: PageSize,
+    dpi: f64,
+}
+
 /// Compare two documents, and write a delta if one was asked for.
 ///
 /// `output` is `None` for [`examine`], which reports and writes nothing.
@@ -583,6 +594,71 @@ fn compare_documents(
     let mut previews: Vec<PathBuf> = Vec::new();
     let mut sizes: Vec<PageSize> = Vec::new();
 
+    // Drawing and comparing run at the same time, one page apart.
+    //
+    // pdfium cannot be threaded — see `render::engine` — so every page is still
+    // drawn one after another on this thread. But comparing a page is pure
+    // arithmetic over two buffers of bytes, and nothing says it has to wait for
+    // the drawing to stop. So page *n* is compared on a second thread while
+    // page *n+1* is being drawn on this one, and since drawing takes about
+    // three times as long as comparing, the comparing disappears entirely into
+    // the gaps.
+    //
+    // One page of lookahead and one worker, deliberately. A second worker would
+    // have nothing to do, and every page held in flight is another seventy-odd
+    // megabytes of pixels waiting about.
+    let compare_with = options.diff;
+    let (to_worker, jobs) = std::sync::mpsc::sync_channel::<Compare>(1);
+    let (from_worker, done) = std::sync::mpsc::sync_channel::<PageDiff>(1);
+    let worker = std::thread::spawn(move || {
+        for job in jobs {
+            let diff = diff_page(
+                &job.old_gray,
+                (job.width, job.height),
+                &job.new_gray,
+                (job.width, job.height),
+                job.size,
+                job.dpi,
+                job.index,
+                &compare_with,
+            );
+            // A closed channel means the main thread has given up — stop
+            // rather than compare pages nobody is waiting for.
+            if from_worker.send(diff).is_err() {
+                return;
+            }
+        }
+    });
+
+    // What this thread has to keep hold of until the comparison comes back:
+    // the colour, for writing the delta, and the sheet as it was, for the
+    // proof image. Both only when they were asked for.
+    let mut waiting: std::collections::VecDeque<(Vec<u8>, Vec<u8>, usize)> =
+        std::collections::VecDeque::new();
+
+    let collect = |diffs: &mut Vec<PageDiff>,
+                       previews: &mut Vec<PathBuf>,
+                       raster: &mut Option<RasterDeltaWriter>,
+                       waiting: &mut std::collections::VecDeque<(Vec<u8>, Vec<u8>, usize)>|
+     -> Result<(), PipelineError> {
+        let Ok(mut diff) = done.recv() else {
+            return Ok(());
+        };
+        let (rgb, old_gray, width) = waiting.pop_front().expect("a page was compared unasked");
+        if let Some(writer) = raster.as_mut() {
+            writer.add_page(&diff, Some(&rgb))?;
+        }
+        if let Some(dir) = &options.preview_dir {
+            let image = preview_page(&diff, &old_gray, width);
+            let path = dir.join(format!("page-{:03}.png", diff.index + 1));
+            image.save(&path)?;
+            previews.push(path);
+        }
+        diff.release();
+        diffs.push(diff);
+        Ok(())
+    };
+
     for index in 0..new_doc.len() {
         watch(Step {
             doing: "Comparing",
@@ -611,31 +687,46 @@ fn compare_documents(
             blank_gray(new_page.size, options.dpi)
         };
 
-        let mut diff = diff_page(
-            &old_gray,
-            (new_page.width, new_page.height),
-            &new_page.gray,
-            (new_page.width, new_page.height),
-            new_page.size,
-            options.dpi,
+        // The proof image draws the sheet as it was under the new ink, so it
+        // needs a copy — the worker is about to be given the original. Only
+        // when a proof was actually asked for.
+        let for_preview = if options.preview_dir.is_some() {
+            old_gray.clone()
+        } else {
+            Vec::new()
+        };
+        waiting.push_back((new_page.rgb, for_preview, new_page.width));
+
+        let job = Compare {
             index,
-            &options.diff,
-        );
-
-        if let Some(writer) = raster.as_mut() {
-            writer.add_page(&diff, Some(&new_page.rgb))?;
+            old_gray,
+            new_gray: new_page.gray,
+            width: new_page.width,
+            height: new_page.height,
+            size: new_page.size,
+            dpi: options.dpi,
+        };
+        // Blocks once one page is already in flight, which is what keeps the
+        // memory bounded: this thread cannot run ahead of the comparison by
+        // more than a page.
+        if to_worker.send(job).is_err() {
+            break;
         }
-
-        if let Some(dir) = &options.preview_dir {
-            let image = preview_page(&diff, &old_gray, new_page.width);
-            let path = dir.join(format!("page-{:03}.png", index + 1));
-            image.save(&path)?;
-            previews.push(path);
+        if waiting.len() > 1 {
+            collect(&mut diffs, &mut previews, &mut raster, &mut waiting)?;
         }
-
-        diff.release();
-        diffs.push(diff);
     }
+
+    // Nothing more to draw; take what is still in flight.
+    drop(to_worker);
+    while !waiting.is_empty() {
+        collect(&mut diffs, &mut previews, &mut raster, &mut waiting)?;
+    }
+    let _ = worker.join();
+    // The worker answers in the order it was asked, but a comparison that
+    // failed to arrive would leave a gap, and everything downstream reads
+    // these by position.
+    diffs.sort_by_key(|diff| diff.index);
 
     if output.is_some() {
         watch(Step {

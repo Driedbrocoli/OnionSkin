@@ -574,10 +574,19 @@ and it did that by running the whole pipeline into a temporary folder and
 removing the file unread — cropping every changed region, giving it a soft
 mask, compressing it, for nothing. `pipeline::examine` stops before that.
 
-The remaining shape is: rendering dominates, and it belongs to pdfium. The next
-thing worth trying, when it is worth trying, is overlapping the comparison with
-the rendering — the render must stay on one thread, but nothing says the
-comparison of page *n* cannot run while page *n+1* is being drawn.
+**And then the two were overlapped.** Rendering must stay on one thread, but
+nothing says the comparison of page *n* cannot run while page *n+1* is being
+drawn. It does now: one worker, one page of lookahead, a bounded channel each
+way. Drawing takes about three times as long as comparing, so the comparing
+disappears into the gaps entirely.
+
+One worker and one page, deliberately. A second worker would have nothing to do
+— there is not enough comparing to go round — and every page held in flight is
+another seventy-odd megabytes of pixels waiting about. The bounded channel is
+what enforces that: the drawing thread blocks rather than running ahead.
+
+Twenty-three seconds became thirteen for a delta and twelve for a report. The
+output is byte-for-byte identical on every path tested, proof images included.
 
 ## Placing words by what is already on the page
 
