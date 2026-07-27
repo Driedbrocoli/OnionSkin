@@ -40,6 +40,8 @@ pub struct State {
     colour: [u8; 3],
     placements: Vec<Placement>,
     output: Option<PathBuf>,
+    /// What the last look at the page said it was set in, if it was asked.
+    matched: Option<String>,
 }
 
 impl Default for State {
@@ -53,6 +55,7 @@ impl Default for State {
             colour: [0, 0, 0],
             placements: Vec::new(),
             output: None,
+            matched: None,
         }
     }
 }
@@ -103,8 +106,44 @@ pub fn show(state: &mut State, room: &mut Room) {
                             ui.selectable_value(&mut state.font, *candidate, candidate.base_name());
                         }
                     });
+
+                // The page in front of you knows what it is set in, and you do
+                // not. Nobody looks at a rent statement and thinks "Helvetica,
+                // eleven point" — they think "there is a gap after Received".
+                let can_look = state.scan.is_some();
+                if ui
+                    .add_enabled(can_look, egui::Button::new("Match the page"))
+                    .on_hover_text(
+                        "Read the words already on the scan and use the same face \
+                         and size",
+                    )
+                    .clicked()
+                {
+                    match onionskin::typeface::match_scan(
+                        state.scan.as_ref().expect("checked"),
+                        &state.page,
+                        false,
+                        false,
+                    ) {
+                        Some(found) => {
+                            state.font = found.font;
+                            state.size_pt = found.size_pt;
+                            state.matched = Some(found.describe());
+                        }
+                        None => {
+                            state.matched = Some(
+                                "Could not tell — too little text on the page, or \
+                                 too poor a scan. The choice above still stands."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
             });
         });
+        if let Some(said) = &state.matched {
+            widgets::hint(ui, said);
+        }
         widgets::file_row(
             ui,
             picker,

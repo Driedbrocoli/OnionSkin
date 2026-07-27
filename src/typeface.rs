@@ -165,6 +165,154 @@ pub fn detect(page: &PageText) -> Option<Typeface> {
     detect_measured(&measurable(page), page_coverage(page))
 }
 
+/// The faces worth trying to read a page against, and what each stands for.
+///
+/// Reading letters off a scan means comparing the ink to a font's own glyph
+/// shapes, so the answer depends on which font is doing the comparing: Times
+/// text read against a sans face comes back as gibberish, with almost every
+/// letter unsure. That is not a defeat, it is the measurement — the face whose
+/// shapes match best is the face the page is set in.
+///
+/// These are the metric-compatible clones that ship with nearly every system
+/// and with LibreOffice, paired with the built-in PDF face each one stands in
+/// for. Whichever is actually on the machine gets tried.
+const READING_FACES: &[(&[&str], pdf::Font)] = &[
+    (
+        &["Liberation Serif", "Times New Roman", "Nimbus Roman", "DejaVu Serif"],
+        pdf::Font::TimesRoman,
+    ),
+    (
+        &["Liberation Sans", "Arial", "Nimbus Sans", "DejaVu Sans"],
+        pdf::Font::Helvetica,
+    ),
+    (
+        &["Liberation Mono", "Courier New", "Nimbus Mono", "DejaVu Sans Mono"],
+        pdf::Font::Courier,
+    ),
+];
+
+/// What the words already on a scan are set in, if that can be worked out.
+///
+/// Somebody adding a line to a form wants it to look like the rest of the
+/// form, and the page itself knows what the rest of the form is set in — so
+/// asking them to name a font is asking a question the program can answer.
+///
+/// Two measurements, because neither alone is enough. Reading the page against
+/// each candidate face says which *shapes* match, which is what tells serif
+/// from sans. Then the widths of the words that were read are fitted against
+/// the exact published metrics, which is what gives the size — and confirms
+/// the family, or disagrees with it.
+///
+/// Everything here is allowed to fail into `None`. A page with no text on it,
+/// a scan too poor to read, no font on the machine to read it against: all of
+/// them mean "use the default", and none of them is worth stopping a job that
+/// was not about fonts in the first place.
+pub fn match_scan(
+    scan: &std::path::Path,
+    page: &str,
+    cropped: bool,
+    square: bool,
+) -> Option<Typeface> {
+    let page = crate::geometry::parse_page(page).ok()?;
+    let image = image::open(scan).ok()?;
+    let registration = crate::scan::register(
+        &image,
+        crate::scan::ScanOptions {
+            page,
+            assume_cropped: cropped,
+            assume_square: square,
+            ..crate::scan::ScanOptions::new(page)
+        },
+    )
+    .ok()?;
+    let gray = image.to_luma8();
+
+    let mut best: Option<(f64, pdf::Font, PageText)> = None;
+    for (names, face) in READING_FACES {
+        let Some(found) = names.iter().find_map(|name| crate::font::find_font(name)) else {
+            continue;
+        };
+        let Ok(reference) = crate::font::EmbeddedFont::load(&found) else {
+            continue;
+        };
+        // The common Latin shapes rather than everything the font can draw.
+        // DejaVu carries some six thousand glyphs, and asking which of six
+        // thousand a smudged `o` is gets a worse answer than asking which of
+        // eighty — every near-identical shape in some other script is another
+        // chance to be wrong, and it is thirty times the work.
+        let Ok(text) = crate::letters::read_with_font(
+            &gray,
+            &registration,
+            &crate::letters::ReadOptions::default(),
+            &reference,
+            Some(crate::letters::COMMON_LATIN),
+        ) else {
+            continue;
+        };
+
+        // How much of the page this face could actually account for. Letters
+        // it could not read count against it, which is the whole signal: a
+        // page of Times read against a sans face leaves most letters unsure.
+        let letters: Vec<&crate::letters::Letter> = text.letters().collect();
+        if letters.is_empty() {
+            continue;
+        }
+        let score = letters
+            .iter()
+            .map(|letter| if letter.text.is_some() { letter.confidence } else { 0.0 })
+            .sum::<f64>()
+            / letters.len() as f64;
+        if best.as_ref().map(|(seen, _, _)| score > *seen).unwrap_or(true) {
+            best = Some((score, *face, text));
+        }
+    }
+
+    let (score, shape_says, text) = best?;
+
+    // A typewriter face is recognised from the spacing of the letters and not
+    // from their shapes, so it is asked before the gate below — which is the
+    // very gate a Courier page trips. The only monospaced faces on most
+    // machines are sans ones, DejaVu Sans Mono and its relatives, which look
+    // nothing like Courier's slab serifs: the page comes back barely read, and
+    // then gets thrown away for being barely read, having been perfectly
+    // recognisable the whole time by how evenly it was spaced.
+    if monospaced(&text).is_some() {
+        if let Some(found) = detect(&text) {
+            return Some(found);
+        }
+    }
+
+    // Too little of the page read for the answer to mean anything. Better to
+    // say nothing and use the default than to set somebody's addition in a
+    // face picked by noise.
+    if score < 0.35 {
+        return None;
+    }
+
+    let mut found = detect(&text)?;
+    // The two measurements disagreeing is not a tie to be broken quietly. The
+    // shapes are the better witness for the family — that is what a person
+    // looking at the page would compare — so they win, and the width fit keeps
+    // the size it measured.
+    if family_of(found.font) != family_of(shape_says) {
+        found.font = shape_says;
+        found.confidence *= 0.5;
+    }
+    Some(found)
+}
+
+/// Which of the three families a built-in face belongs to.
+fn family_of(font: pdf::Font) -> pdf::Font {
+    match font {
+        pdf::Font::Helvetica | pdf::Font::HelveticaBold | pdf::Font::HelveticaOblique => {
+            pdf::Font::Helvetica
+        }
+        pdf::Font::TimesRoman | Font::TimesBold | Font::TimesItalic => pdf::Font::TimesRoman,
+        pdf::Font::Courier | pdf::Font::CourierBold => pdf::Font::Courier,
+    }
+}
+
+
 /// Every letter in Courier is exactly this wide, in ems. Not approximately:
 /// that is what makes it a typewriter face.
 const COURIER_ADVANCE_EM: f64 = 0.6;
