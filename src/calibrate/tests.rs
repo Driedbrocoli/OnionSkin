@@ -1,7 +1,10 @@
 //! Tests for calibration.
 
+use image::{GrayImage, Luma};
+
 use super::*;
 use crate::geometry::parse_page;
+use crate::scan::ScanRegistration;
 
 const A5: PageSize = PageSize {
     width_mm: 148.0,

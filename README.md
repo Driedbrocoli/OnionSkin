@@ -11,8 +11,8 @@ delta at 100%, and the new words land in the gaps.
 The name is the point: the delta is a transparent sheet laid over what is
 already there.
 
-It runs entirely on your own machine, never uses the network, and works on
-Linux, Windows and macOS.
+It runs entirely on your own machine, nothing about your documents ever leaves
+it, and it works on Linux, Windows and macOS.
 
 ## Install
 
@@ -292,6 +292,15 @@ Lines, boxes, circles and paths, anywhere on the page, in any colour. Drawings
 go into the delta on the same terms as words: what is new since the sheet was
 printed is what gets printed.
 
+It works on any document, not only Onionskin's own — a Word file, an
+OpenDocument, a PDF, a scan. The source is opened, measured, and left exactly
+as it was; what comes out is a delta with the shapes on it.
+
+```bash
+onionskin draw statement.pdf --box '20,140:100x14' --colour red -o delta.pdf
+onionskin write invoice.docx --at '25,120:Paid — 27 July' --size 13 -o delta.pdf
+```
+
 ```bash
 onionskin draw form.onionskin --line '20,100:190,100'          # a rule across
 onionskin draw form.onionskin --box '20,40:80x30' --radius 3   # a rounded box
@@ -319,6 +328,32 @@ onionskin add po.docx -o delta.pdf --at-mm '45,63:J. Bezzina — approved 25 Jul
 
 Because the text is placed at an absolute position, **nothing on the page can
 move** — the reflow problem below simply cannot happen.
+
+#### It picks the font off the page
+
+Adding words to a scan with no `--font` and no `--size`, Onionskin works out
+what the page is already set in and matches it:
+
+```bash
+$ onionskin add scan.png --at-mm '60,150:Approved'
+Matched the page: Times-Roman at about 11.9 pt, from 8 words
+  Say --font or --size to choose for yourself.
+```
+
+Somebody filling a gap on a form wants the words to look like the rest of the
+form, and the answer is printed on the sheet in their hand — it is not written
+down anywhere in their head. Nobody looks at a rent statement and thinks
+"Helvetica, eleven point".
+
+It reads the page against a serif, a sans and a monospaced face in turn, and
+whichever accounts for most of the ink says which family it is. Then the widths
+of the words it read are fitted against Adobe's published metrics, which gives
+the size. A typewriter face is caught a third way, from the letter spacing
+alone, because the only monospaced fonts on most machines are sans ones that
+look nothing like Courier.
+
+A blank page, a poor scan or a machine with no fonts all mean "use the default"
+rather than an error. `--font`, `--size` and `--no-match-font` all still win.
 
 ### Fill in a sheet you only have as a scan
 
@@ -362,6 +397,20 @@ Onionskin finds the paper's outline in the scan, measures how far it is turned,
 and works back to millimetres on the physical sheet. Across 360 combinations of
 page size, resolution, skew, margin and position, a point picked on the scan
 lands within **0.30 mm** of where it belongs on the paper.
+
+### See what changed
+
+A delta prints only what is new, which is the point — and can make the change
+hard to find on the sheet afterwards. `--outline` draws a box round each one:
+
+```bash
+onionskin delta before.odt after.odt -o delta.pdf --outline
+onionskin delta before.odt after.odt -o delta.pdf --outline --outline-colour blue
+```
+
+Boxes that would cross each other are merged into one, and none of them runs off
+the paper. It is off by default because the box is printed onto the sheet along
+with the change, and is therefore just as permanent.
 
 ### Compare two documents
 
@@ -452,6 +501,29 @@ on: a shift carries over to any sheet size, but rotation and scale are applied
 about the centre of the page, so an A4 profile used on Legal leaves some error
 behind. Onionskin says so when it spots the mismatch.
 
+## Fonts, and where they live
+
+`onionskin fonts` lists the eight faces built into every PDF reader, which need
+nothing installed anywhere and are what the delta uses unless told otherwise.
+
+LibreOffice ships its own fonts *inside its installation* rather than putting
+them where the system keeps fonts, which is the whole reason a face that looks
+right in Writer can be one Onionskin has never heard of. It now looks in
+LibreOffice's folders on all three systems, in the per-user places a font
+installed by double-clicking lands, and in any folder you name:
+
+```bash
+onionskin fonts                        # the built-in eight, and a count of the rest
+onionskin fonts --all                  # every font file found, and where it is
+onionskin fonts --folders              # where it looked
+onionskin fonts --add-folder ~/Fonts   # look here too, from now on
+onionskin fonts --forget-folder ~/Fonts
+```
+
+The folder is remembered between runs. One on a drive that is not plugged in
+today is skipped rather than complained about, and stays remembered for when it
+comes back.
+
 ## Writing in any language
 
 The fonts built into every PDF reader cover Western European text and nothing
@@ -483,6 +555,22 @@ whatever that font can draw, so the language is whatever the page is in. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how homoglyphs and right-to-left scripts
 are handled, and for the two honest limits (cursive scripts and combining
 marks).
+
+## The expert numbers
+
+Four numbers decide what Onionskin considers to be a change: how dark a pixel
+must be to count as ink, how far apart two marks can be and still be one change,
+how small a speck to ignore, and how far ink may move and still count as
+unchanged. The defaults are right for paper. They are reachable anyway, because
+a program that hides its own workings is asking to be trusted rather than
+checked:
+
+```bash
+onionskin delta a.pdf b.pdf -o delta.pdf   --ink-threshold 200 --group 2 --min-region 0.05 --tolerance 0.12 --pad 0.3
+```
+
+In the window they are under **Settings ▸ Expert**, two doors deep on purpose,
+with a button that puts them all back.
 
 ## Raster or vector
 
@@ -518,8 +606,39 @@ them but a socket — no CUPS libraries, no scanning software, nothing to instal
   platen with no auto-crop, no auto-deskew and no auto-rotate, because those
   throw away the paper's outline that the page is measured from.
 
+### Finding them
+
+You should not have to know your printer's address. `onionskin printers` asks
+this machine what is set up on it — which is where a printer plugged in by USB
+appears — and then listens for anything announcing itself on the local network,
+and prints an address you can paste straight back in:
+
 ```bash
-onionskin printers                                   # what CUPS knows about
+$ onionskin printers
+Set up on this machine, including anything plugged in by USB:
+
+  Brother_HL_L2350DW
+    Brother HL-L2350DW series
+    --printer ipp://127.0.0.1:631/printers/Brother_HL_L2350DW
+
+Announcing themselves on this network:
+
+  Reception
+    HP LaserJet 400
+    --printer ipp://192.168.1.5/ipp/print
+```
+
+`onionskin scanners` does the same: anything on a USB cable, through SANE, and
+any eSCL scanner on the network. In the window it is one button — **Find my
+printers and scanners** — and each result has a button that fills the address
+in for you.
+
+The discovery is DNS-SD, written in Rust here rather than pulled in: multicast
+UDP, the DNS message format with its compression pointers, guarded against
+malformed packets. It asks this network and no other.
+
+```bash
+onionskin printers --no-network                      # only what is set up here
 onionskin printers --server ipp://printer.local/     # or ask a printer directly
 onionskin fetch -o scan.png --scanner http://printer.local/eSCL --capabilities
 onionskin send delta.pdf --printer ipp://printer.local/ipp/print --copies 2
@@ -532,10 +651,19 @@ external asset in the browser UI — the page it serves contains nothing fetched
 from anywhere else. Verified by tracing a full delta run: not one internet
 socket is opened.
 
-The one time it opens a socket is when **you name a printer**. Then it talks to
-that printer, on your own network, and to nothing else. There is no discovery
-beacon and no directory service; if you never name a printer, nothing leaves the
-machine.
+It opens a socket in exactly two situations, both of which you asked for:
+
+* When **you name a printer or a scanner**. Then it talks to that machine, on
+  your own network, and to nothing else.
+* When **you ask it to find them** — `onionskin printers`, `onionskin scanners`,
+  or the Find button in the window. Then it sends a DNS-SD question to the
+  local multicast address and listens for a couple of seconds. That question
+  carries nothing about you and nothing about your documents; it reaches the
+  local network and no further, because multicast DNS is not routed off it.
+  `--no-network` skips it entirely.
+
+There is no beacon, no directory service and no check for updates. If you never
+name a printer and never ask it to look for one, nothing leaves the machine.
 
 `onionskin serve` binds to `127.0.0.1`, so the UI is reachable only from your
 own machine. It has no password: if you override `--host`, anyone who can reach

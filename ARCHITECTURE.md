@@ -471,6 +471,66 @@ compression methods it will not read rather than reading them wrongly. The XML
 scanner resolves no external entities and follows no DTD, so there is nothing to
 point at `/etc/passwd` and no entity expansion to run away with.
 
+## Reading the font off the page
+
+`src/typeface.rs`, and the trial in `match_the_page` in `src/main.rs`.
+
+The problem is circular and the way out of it is worth writing down. Reading
+letters off a scan means comparing ink to some font's glyph shapes, so what
+comes back depends on which font is doing the comparing — and the font is the
+thing being looked for. Times text read against a sans face comes back mostly
+unread.
+
+That is not a defeat, it is the measurement. The page is read against a serif, a
+sans and a monospaced face in turn, and whichever accounts for most of the ink
+is the family. Two details make it work in practice. The alphabet is restricted
+to the common Latin shapes rather than everything the font can draw — DejaVu
+carries some six thousand glyphs, and asking which of six thousand a smudged
+`o` is gets a worse answer than asking which of eighty, thirty times slower.
+And the reference faces are the metric-compatible clones that ship with nearly
+every system, so the comparison is against something that looks like what is on
+the paper.
+
+Then the size, from the widths. `pdf::builtin_width_mm` does not estimate the
+width of a word in one of the eight built-in faces; it knows it, from the table
+Adobe published. A page's worth of words is a page's worth of exact predictions,
+so the size falls out of a least-squares fit — **two** parameters, not one,
+because a scan measures the *ink* box and the metrics give the *advance*, which
+is wider by a side bearing at each end. Fitting only the size absorbs that
+bearing into the size and, worse, leaves every face wrong by the same shape of
+error, so the comparison stops depending on the page at all.
+
+Courier needed a third measurement. The only monospaced faces on most machines
+are sans ones, which look nothing like Courier's slab serifs, so a Courier page
+comes back barely read and is then discarded *for* being barely read — having
+been perfectly recognisable the whole time by how evenly it was spaced. So the
+letter pitch is measured directly, from the gaps between consecutive letters
+within words, before the gate that would have thrown it away.
+
+## Finding a printer without being told where it is
+
+`src/discover.rs`. DNS-SD over multicast UDP, written here rather than pulled
+in: the DNS message format, including name compression pointers, which
+responders rely on heavily. A hostile or broken packet must not hang or panic,
+so there is a jump budget on pointers, a cap on name length, and every field is
+bounds-checked against what actually arrived.
+
+Queries go out from an ephemeral port, which makes them one-shot queries that a
+responder answers unicast — so no share of port 5353 is needed and it works
+alongside Avahi and Bonjour. Two rounds: PTR questions first, then direct
+SRV/TXT/A questions for anything that answered with a name and nothing behind
+it, so a device that omits the additional records is usable rather than merely
+visible.
+
+Everything degrades to an empty list. No multicast permission, no network, a
+firewall: none of those is an error worth stopping a program over, and none of
+them is the user's fault.
+
+This is the one place Onionskin speaks to anything it was not told about by
+name, and the promise on the sidebar was rewritten to match rather than left to
+drift. A promise that is nearly true is worth less than a smaller one that is
+exactly true.
+
 ## Getting it onto somebody's machine
 
 The `package` module writes the archives and `install` unpacks itself into a
