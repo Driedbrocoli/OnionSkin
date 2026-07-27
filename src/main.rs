@@ -95,6 +95,9 @@ enum Command {
     Compare(CompareArgs),
     /// Check a printed sheet came out the way the delta asked.
     Verify(VerifyArgs),
+    /// Check the sheet in your hand is the one a delta was made for, before
+    /// printing onto it.
+    Fits(FitsArgs),
     /// See the sheet with the delta on it, before printing either.
     Proof(ProofArgs),
     /// Put several deltas onto one, so the sheet goes through once.
@@ -479,6 +482,28 @@ struct LearnArgs {
 /// certificates go in the envelopes and the mistake surfaces at the far end.
 ///
 /// So: scan the first one, and be told.
+#[derive(clap::Args)]
+struct FitsArgs {
+    /// A scan or photograph of the sheet you are about to feed, or the
+    /// document it was printed from.
+    sheet: PathBuf,
+    /// The delta you are about to print onto it.
+    #[arg(long)]
+    delta: PathBuf,
+    /// The paper it is. Not needed for a PDF, which says what size it is.
+    #[arg(long, default_value_t = default_page())]
+    page: String,
+    /// Which page of a multi-page sheet, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    sheet_number: usize,
+    /// The scan is already cropped to the sheet.
+    #[arg(long)]
+    cropped: bool,
+    /// The sheet is square in the scan; do not look for skew.
+    #[arg(long)]
+    square: bool,
+}
+
 #[derive(clap::Args)]
 struct VerifyArgs {
     /// A scan of the sheet after the delta was printed onto it.
@@ -1619,6 +1644,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Delta(args) => cmd_delta(args),
         Command::Compare(args) => cmd_compare(args),
         Command::Verify(args) => cmd_verify(args),
+        Command::Fits(args) => cmd_fits(args),
         Command::Proof(args) => cmd_proof(args),
         Command::Merge(args) => cmd_merge(args),
         Command::Blanks(args) => cmd_blanks(args),
@@ -4668,6 +4694,78 @@ fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> 
 /// marks spread across the page to say it. This one wants to know whether
 /// *this sheet* is right, which one addition can answer — and answers it before
 /// the other fifty-nine go through.
+/// Hold a delta against the sheet you are about to feed, before you feed it.
+///
+/// `verify` answers the same family of question one sheet too late: it looks at
+/// paper that has already been through the printer. The failure it cannot help
+/// with is the wrong form in the tray, where the delta prints perfectly onto a
+/// document it was never made for. Ink does not come off paper, and there is no
+/// undo at a printer.
+fn cmd_fits(args: FitsArgs) -> Result<ExitCode, String> {
+    let asked = calibrate::marks_on_delta(&args.delta).map_err(|e| e.to_string())?;
+    if asked.is_empty() {
+        return Err(format!(
+            "{} has nothing on it, so there is nothing to hold against the sheet.",
+            args.delta.display()
+        ));
+    }
+    let delta_page = onionskin::recipe::draw_page(&args.delta, 1)?.1.page;
+
+    // The sheet, however it arrives. A PDF of the form is as good as a scan of
+    // it and rather better, having no skew to measure — and it is what
+    // somebody has when the blank form came by e-mail.
+    let (gray, registration) = if is_document(&args.sheet) {
+        onionskin::recipe::draw_page(&args.sheet, args.sheet_number)?
+    } else {
+        let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+        let image = image::open(&args.sheet)
+            .map_err(|e| format!("could not read '{}': {e}", args.sheet.display()))?;
+        let registration = register(
+            &image,
+            ScanOptions {
+                page,
+                assume_cropped: args.cropped,
+                assume_square: args.square,
+                ..ScanOptions::new(page)
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        println!("{}", registration.describe());
+        (image.to_luma8(), registration)
+    };
+
+    let dpi = registration.px_per_mm * 25.4;
+    let width = gray.width() as usize;
+    let fit = onionskin::fits::against(
+        &asked,
+        gray.as_raw(),
+        width,
+        dpi,
+        delta_page,
+        registration.page,
+        onionskin::diff::DiffOptions::default().ink_threshold,
+    );
+
+    println!("\n{}", fit.describe());
+    if fit.belongs() {
+        println!(
+            "\nThis looks like the sheet '{}' was made for. Print at 100%, with \
+             \"Fit to page\" off.",
+            args.delta.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    // Exit 2, like the other refusals to print: a script that feeds a stack
+    // can stop on it rather than carry on through the box of letterhead.
+    eprintln!(
+        "\nDo not print this onto that sheet without looking at it first:\n  \
+         onionskin proof {} --delta {}",
+        args.sheet.display(),
+        args.delta.display()
+    );
+    Ok(ExitCode::from(2))
+}
+
 fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     let page = parse_page(&args.page).map_err(|e| e.to_string())?;
     let asked = calibrate::marks_on_delta(&args.delta).map_err(|e| e.to_string())?;

@@ -801,6 +801,42 @@ page, the paper size changed, the two files were handed over the wrong way round
 — the job is refused whole and no fresh file is written, because none of those
 are fixed by taking pages out.
 
+### Check the sheet before you feed it
+
+`verify` looks at a sheet that has already been through the printer, which is
+the right check one sheet too late. The mistake it cannot help with is the
+wrong form in the tray: the delta prints perfectly, onto a document it was
+never made for, and the additions land across whatever that sheet says.
+
+```bash
+onionskin fits form.pdf --delta delta.pdf
+```
+
+```
+The addition lands on clear paper. The tightest sits 25 mm from the nearest ink.
+
+This looks like the sheet 'delta.pdf' was made for. Print at 100%, with
+"Fit to page" off.
+```
+
+And on the wrong sheet:
+
+```
+The addition would land on top of something already printed:
+    60,37 to 76,40 mm — 7 mm² of the sheet's own ink is under this
+That is what happens when the wrong sheet is in the tray. Check it is the one
+this delta was made for.
+```
+
+It exits 2 when it refuses, so a script feeding a stack stops on it rather than
+carrying on through the box. The sheet can be a scan, a photograph, or the PDF
+the form came as — a PDF is better, having no skew to measure.
+
+This is evidence, not proof. It can say the paper is a different size and it can
+say an addition would land on existing ink; it cannot know that two sheets of
+the same letterhead are different copies. It reports what it found and how close
+everything came, and leaves the last word to you.
+
 ### Several deltas, one pass through the printer
 
 A day's work on one document arrives as more than one delta. The paid stamp is a

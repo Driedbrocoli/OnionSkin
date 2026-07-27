@@ -531,3 +531,135 @@ fn a_scanned_pdf_becomes_a_word_document() {
         "the Word document is empty"
     );
 }
+
+// --- the sheet in your hand, before you print onto it -----------------------
+
+/// The whole point of `fits`: the right sheet is accepted, and the wrong one
+/// is refused before any paper moves. `verify` answers a similar question one
+/// sheet too late, on paper that has already been through the printer.
+#[test]
+fn the_right_sheet_is_accepted_and_the_wrong_one_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    // A form with two labels, and a delta that fills in the first.
+    let form = a_printed_form(&home, dir.path(), &[(1, 40.0, "Name:"), (1, 60.0, "Date:")]);
+    let filled = dir.path().join("filled.osk").to_string_lossy().into_owned();
+    std::fs::copy(dir.path().join("form.osk"), &filled).unwrap();
+    assert!(
+        run(
+            &home,
+            &["write", &filled, "--at", "60,40:A. Smith", "--size", "12"]
+        )
+        .ok
+    );
+    let filled_pdf = dir.path().join("filled.pdf");
+    assert!(
+        run(
+            &home,
+            &["print", &filled, "-o", &filled_pdf.to_string_lossy()]
+        )
+        .ok
+    );
+
+    let delta = dir.path().join("delta.pdf");
+    assert!(
+        run(
+            &home,
+            &[
+                "delta",
+                &form.to_string_lossy(),
+                &filled_pdf.to_string_lossy(),
+                "-o",
+                &delta.to_string_lossy(),
+            ],
+        )
+        .ok
+    );
+
+    // The sheet it was made for.
+    let right = run(
+        &home,
+        &[
+            "fits",
+            &form.to_string_lossy(),
+            "--delta",
+            &delta.to_string_lossy(),
+        ],
+    );
+    assert!(right.ok, "the right sheet was refused: {}", right.said());
+    assert!(right.said().contains("clear paper"), "{}", right.said());
+
+    // A different form, whose own printing is where this delta wants to write.
+    let other = dir.path().join("other.osk").to_string_lossy().into_owned();
+    assert!(run(&home, &["new", &other, "--page", "a4"]).ok);
+    assert!(
+        run(
+            &home,
+            &[
+                "write",
+                &other,
+                "--at",
+                "55,38:ALREADY FILLED IN HERE",
+                "--size",
+                "12"
+            ]
+        )
+        .ok
+    );
+    let other_pdf = dir.path().join("other.pdf");
+    assert!(
+        run(
+            &home,
+            &["print", &other, "-o", &other_pdf.to_string_lossy()]
+        )
+        .ok
+    );
+
+    let wrong = run(
+        &home,
+        &[
+            "fits",
+            &other_pdf.to_string_lossy(),
+            "--delta",
+            &delta.to_string_lossy(),
+        ],
+    );
+    assert!(!wrong.ok, "the wrong sheet was accepted: {}", wrong.said());
+    assert!(
+        wrong.said().contains("on top of something already printed"),
+        "{}",
+        wrong.said()
+    );
+    assert!(
+        wrong.said().contains("wrong sheet"),
+        "the refusal does not say what this usually means: {}",
+        wrong.said()
+    );
+}
+
+/// A delta with nothing on it has nothing to hold against anything, and must
+/// say so rather than reporting a clean bill of health.
+#[test]
+fn a_delta_with_nothing_on_it_is_refused_rather_than_passed() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let form = a_printed_form(&home, dir.path(), &[(1, 40.0, "Name:")]);
+
+    let bare = dir.path().join("bare.osk").to_string_lossy().into_owned();
+    assert!(run(&home, &["new", &bare, "--page", "a4"]).ok);
+    let empty = dir.path().join("empty.pdf");
+    assert!(run(&home, &["print", &bare, "-o", &empty.to_string_lossy()]).ok);
+
+    let said = run(
+        &home,
+        &[
+            "fits",
+            &form.to_string_lossy(),
+            "--delta",
+            &empty.to_string_lossy(),
+        ],
+    );
+    assert!(!said.ok, "{}", said.said());
+    assert!(said.said().contains("nothing on it"), "{}", said.said());
+}
