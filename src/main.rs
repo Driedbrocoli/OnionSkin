@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use onionskin::acquire::{
     acquire, list_devices, scanning_available, unavailable_reason, AcquireOptions, PLACEMENT_ADVICE,
@@ -94,6 +94,14 @@ enum Command {
     /// Build an apt repository, so `apt install onionskin` works from your
     /// own server. For making a release.
     AptRepo(AptRepoArgs),
+    /// Print a completion script for your shell, so Tab knows every command.
+    Completions(CompletionsArgs),
+}
+
+#[derive(clap::Args)]
+struct CompletionsArgs {
+    /// bash, zsh, fish or powershell. Left out, it guesses from $SHELL.
+    shell: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -924,6 +932,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Uninstall(args) => cmd_uninstall(args),
         Command::Package(args) => cmd_package(args),
         Command::AptRepo(args) => cmd_apt_repo(args),
+        Command::Completions(args) => cmd_completions(args),
     }
 }
 
@@ -2700,6 +2709,269 @@ fn cmd_apt_repo(args: AptRepoArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+// ---------------------------------------------------------------------------
+// Shell completions
+// ---------------------------------------------------------------------------
+
+/// One subcommand, as a completion script needs to know it.
+struct Described {
+    name: String,
+    about: String,
+    flags: Vec<String>,
+}
+
+/// Every subcommand and its long options, read out of the command tree itself.
+///
+/// Read rather than written down. A completion script kept by hand is wrong
+/// within a month — a flag is added and Tab never learns about it, or one is
+/// removed and Tab keeps offering it — and the wrongness is invisible to the
+/// person who added the flag. Taking it from the same definition `--help`
+/// comes from means it cannot drift.
+fn command_tree() -> Vec<Described> {
+    Cli::command()
+        .get_subcommands()
+        .map(|sub| Described {
+            name: sub.get_name().to_string(),
+            about: sub
+                .get_about()
+                .map(|about| about.to_string())
+                .unwrap_or_default(),
+            flags: sub
+                .get_arguments()
+                .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Print a completion script for a shell.
+///
+/// Written out here rather than pulled in from `clap_complete`, which would be
+/// a dependency and a build of it on every machine for four shell scripts that
+/// do not change. The scripts are generated from the command tree, so they are
+/// exactly as correct as `--help` is.
+fn cmd_completions(args: CompletionsArgs) -> Result<ExitCode, String> {
+    let shell = match &args.shell {
+        Some(named) => named.trim().to_ascii_lowercase(),
+        None => guess_the_shell(),
+    };
+    let tree = command_tree();
+
+    let script = match shell.as_str() {
+        "bash" => bash_completions(&tree),
+        "zsh" => zsh_completions(&tree),
+        "fish" => fish_completions(&tree),
+        "powershell" | "pwsh" => powershell_completions(&tree),
+        other => {
+            return Err(format!(
+                "I do not know the shell '{other}'. Onionskin can write \
+                 completions for bash, zsh, fish and powershell.\n\
+                 Leave the name out and it will guess from $SHELL."
+            ))
+        }
+    };
+    print!("{script}");
+    // Where to put it, on stderr so that piping the script into a file still
+    // shows the instructions and does not put them in the file.
+    eprintln!("{}", where_to_put_it(&shell));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Which shell this probably is.
+fn guess_the_shell() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    for known in ["zsh", "fish", "bash"] {
+        if shell.ends_with(known) {
+            return known.to_string();
+        }
+    }
+    if cfg!(windows) {
+        return "powershell".to_string();
+    }
+    "bash".to_string()
+}
+
+fn where_to_put_it(shell: &str) -> String {
+    match shell {
+        "zsh" => "\n# Save this as _onionskin somewhere on your $fpath, for example:\n\
+                  #   onionskin completions zsh > ~/.zsh/completions/_onionskin\n\
+                  # and make sure that folder is on the path zsh looks down:\n\
+                  #   fpath=(~/.zsh/completions $fpath)  in ~/.zshrc, before compinit"
+            .to_string(),
+        "fish" => "\n# Save this where fish looks for completions:\n\
+                   #   onionskin completions fish > ~/.config/fish/completions/onionskin.fish\n\
+                   # fish picks it up straight away — no reloading."
+            .to_string(),
+        "powershell" | "pwsh" => "\n# Add this to your profile:\n\
+                                  #   onionskin completions powershell >> $PROFILE"
+            .to_string(),
+        _ => "\n# Save this where bash looks for completions:\n\
+              #   onionskin completions bash > ~/.local/share/bash-completion/completions/onionskin\n\
+              # or source it from ~/.bashrc:\n\
+              #   onionskin completions bash > ~/.onionskin-completions.bash\n\
+              #   echo 'source ~/.onionskin-completions.bash' >> ~/.bashrc"
+            .to_string(),
+    }
+}
+
+fn bash_completions(tree: &[Described]) -> String {
+    let names: Vec<&str> = tree.iter().map(|sub| sub.name.as_str()).collect();
+    let mut cases = String::new();
+    for sub in tree {
+        cases.push_str(&format!(
+            "        {})\n            options=\"{}\"\n            ;;\n",
+            sub.name,
+            sub.flags.join(" ")
+        ));
+    }
+    format!(
+        "# Onionskin completions for bash. Generated by `onionskin completions bash`.\n\
+         _onionskin() {{\n\
+         \x20   local current previous subcommand options\n\
+         \x20   current=\"${{COMP_WORDS[COMP_CWORD]}}\"\n\
+         \x20   previous=\"${{COMP_WORDS[COMP_CWORD-1]}}\"\n\
+         \x20   subcommand=\"\"\n\
+         \x20   local index\n\
+         \x20   for ((index = 1; index < COMP_CWORD; index++)); do\n\
+         \x20       case \"${{COMP_WORDS[index]}}\" in\n\
+         \x20           -*) ;;\n\
+         \x20           *) subcommand=\"${{COMP_WORDS[index]}}\"; break ;;\n\
+         \x20       esac\n\
+         \x20   done\n\
+         \n\
+         \x20   # A flag that takes a path: let the shell offer files.\n\
+         \x20   case \"$previous\" in\n\
+         \x20       -o|--output|--preview|--font-file|--deb|--out|--licence|--binary|--desktop|--library|--prefix|--add-folder|--forget-folder)\n\
+         \x20           COMPREPLY=($(compgen -f -- \"$current\"))\n\
+         \x20           return 0\n\
+         \x20           ;;\n\
+         \x20   esac\n\
+         \n\
+         \x20   if [ -z \"$subcommand\" ]; then\n\
+         \x20       COMPREPLY=($(compgen -W \"{commands} --help --version\" -- \"$current\"))\n\
+         \x20       return 0\n\
+         \x20   fi\n\
+         \n\
+         \x20   options=\"\"\n\
+         \x20   case \"$subcommand\" in\n{cases}\
+         \x20   esac\n\
+         \x20   if [[ \"$current\" == -* ]]; then\n\
+         \x20       COMPREPLY=($(compgen -W \"$options --help\" -- \"$current\"))\n\
+         \x20   else\n\
+         \x20       COMPREPLY=($(compgen -f -- \"$current\"))\n\
+         \x20   fi\n\
+         }}\n\
+         complete -F _onionskin onionskin\n",
+        commands = names.join(" "),
+        cases = cases,
+    )
+}
+
+fn zsh_completions(tree: &[Described]) -> String {
+    let mut commands = String::new();
+    for sub in tree {
+        commands.push_str(&format!(
+            "        '{}:{}'\n",
+            sub.name,
+            escape_for_zsh(&sub.about)
+        ));
+    }
+    let mut cases = String::new();
+    for sub in tree {
+        let flags: Vec<String> = sub
+            .flags
+            .iter()
+            .map(|flag| format!("'{flag}'"))
+            .collect();
+        cases.push_str(&format!(
+            "            {})\n                _arguments {} '*:file:_files'\n                ;;\n",
+            sub.name,
+            flags.join(" ")
+        ));
+    }
+    format!(
+        "#compdef onionskin\n\
+         # Onionskin completions for zsh. Generated by `onionskin completions zsh`.\n\
+         _onionskin() {{\n\
+         \x20   local -a commands\n\
+         \x20   commands=(\n{commands}\
+         \x20   )\n\
+         \x20   _arguments -C '1:command:->command' '*::arguments:->arguments'\n\
+         \x20   case $state in\n\
+         \x20       command) _describe 'onionskin command' commands ;;\n\
+         \x20       arguments)\n\
+         \x20           case $words[1] in\n{cases}\
+         \x20           esac\n\
+         \x20           ;;\n\
+         \x20   esac\n\
+         }}\n\
+         _onionskin \"$@\"\n"
+    )
+}
+
+fn fish_completions(tree: &[Described]) -> String {
+    let mut out = String::from(
+        "# Onionskin completions for fish. Generated by `onionskin completions fish`.\n",
+    );
+    for sub in tree {
+        out.push_str(&format!(
+            "complete -c onionskin -n __fish_use_subcommand -a {} -d '{}'\n",
+            sub.name,
+            escape_for_fish(&sub.about)
+        ));
+    }
+    out.push('\n');
+    for sub in tree {
+        for flag in &sub.flags {
+            out.push_str(&format!(
+                "complete -c onionskin -n '__fish_seen_subcommand_from {}' -l {}\n",
+                sub.name,
+                flag.trim_start_matches("--")
+            ));
+        }
+    }
+    out
+}
+
+fn powershell_completions(tree: &[Described]) -> String {
+    let names: Vec<String> = tree.iter().map(|sub| format!("'{}'", sub.name)).collect();
+    let mut cases = String::new();
+    for sub in tree {
+        let flags: Vec<String> = sub.flags.iter().map(|flag| format!("'{flag}'")).collect();
+        cases.push_str(&format!(
+            "        '{}' {{ @({}) }}\n",
+            sub.name,
+            flags.join(", ")
+        ));
+    }
+    format!(
+        "# Onionskin completions for PowerShell.\n\
+         Register-ArgumentCompleter -Native -CommandName onionskin -ScriptBlock {{\n\
+         \x20   param($wordToComplete, $commandAst, $cursorPosition)\n\
+         \x20   $words = $commandAst.CommandElements | ForEach-Object {{ $_.ToString() }}\n\
+         \x20   $sub = $words | Select-Object -Skip 1 | Where-Object {{ -not $_.StartsWith('-') }} | Select-Object -First 1\n\
+         \x20   $candidates = if (-not $sub) {{ @({commands}) }} else {{\n\
+         \x20       switch ($sub) {{\n{cases}\
+         \x20           default {{ @() }}\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         \x20   $candidates | Where-Object {{ $_ -like \"$wordToComplete*\" }} |\n\
+         \x20       ForEach-Object {{ [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }}\n\
+         }}\n",
+        commands = names.join(", "),
+        cases = cases,
+    )
+}
+
+/// Quote a description so a shell script cannot be broken by it.
+fn escape_for_zsh(text: &str) -> String {
+    text.replace('\'', "'\\''").replace(':', " -")
+}
+
+fn escape_for_fish(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 /// Read the words on the first page of a document, by drawing it and looking.
 ///
 /// A Word file knows where its words are, but only after it has been laid out,
@@ -3620,6 +3892,80 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_command_line_itself_is_valid() {
+        // clap checks a great deal about the command tree, but only when
+        // asked. Without this, a duplicated flag or a `requires` naming an
+        // argument that does not exist is a panic the first time somebody
+        // runs the program, and never during a build.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_completions_are_taken_from_the_real_commands() {
+        // The whole reason for generating them: a script kept by hand is
+        // wrong within a month — a flag is added and Tab never learns of it —
+        // and the wrongness is invisible to whoever added the flag.
+        let tree = command_tree();
+        assert!(tree.len() > 20, "only {} commands found", tree.len());
+
+        let delta = tree
+            .iter()
+            .find(|sub| sub.name == "delta")
+            .expect("no delta command");
+        for flag in ["--outline", "--mode", "--ink-threshold", "--profile"] {
+            assert!(
+                delta.flags.iter().any(|had| had == flag),
+                "delta is missing {flag}: {:?}",
+                delta.flags
+            );
+        }
+        assert!(!delta.about.is_empty());
+    }
+
+    #[test]
+    fn every_shell_gets_a_script_naming_every_command() {
+        let tree = command_tree();
+        let scripts = [
+            bash_completions(&tree),
+            zsh_completions(&tree),
+            fish_completions(&tree),
+            powershell_completions(&tree),
+        ];
+        for script in &scripts {
+            assert!(!script.is_empty());
+            for sub in &tree {
+                assert!(
+                    script.contains(&sub.name),
+                    "a script never mentions '{}'",
+                    sub.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_description_cannot_break_the_script_it_goes_into() {
+        // Descriptions are prose written by whoever added the command, and
+        // prose contains apostrophes. One unescaped quote turns a completion
+        // script into a syntax error in somebody's shell startup, which is a
+        // memorable way to meet a program for the first time.
+        assert_eq!(escape_for_fish("don't"), "don\\'t");
+        assert!(escape_for_zsh("a 'quoted' word").contains("'\\''"));
+        // zsh reads a colon as the end of the name, so it cannot survive one.
+        assert!(!escape_for_zsh("Print: a thing").contains(':'));
+    }
+
+    #[test]
+    fn an_unknown_shell_is_refused_by_name() {
+        let said = cmd_completions(CompletionsArgs {
+            shell: Some("tcsh".into()),
+        })
+        .unwrap_err();
+        assert!(said.contains("tcsh"), "{said}");
+        assert!(said.contains("bash"), "{said}");
+    }
 
     #[test]
     fn a_result_goes_beside_the_file_it_came_from() {
