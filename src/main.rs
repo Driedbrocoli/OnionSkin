@@ -3472,41 +3472,25 @@ fn options_from_settings(
     preview: Option<PathBuf>,
     tuning: &Tuning,
 ) -> Result<pipeline::Options, String> {
+    // Onionskin's own answer, then this person's saved settings, then the
+    // flag — each one written over the last, so the flag is what survives.
+    // The middle step is in the library, because the window applies it too and
+    // two spellings of "use my calibration profile" is how one of them stops.
     let mine = onionskin::settings::load().defaults;
-    let mut options = pipeline::Options {
+    let mut options = mine.over(pipeline::Options {
         preview_dir: preview,
         ..Default::default()
-    };
+    });
 
-    // Onionskin's own answer, then this person's, then the flag — each one
-    // written over the last, so the flag is what survives.
-    if let Some(dpi) = mine.dpi {
-        options.dpi = dpi;
-    }
     if let Some(dpi) = tuning.dpi {
         options.dpi = dpi;
     }
     if !(50.0..=1200.0).contains(&options.dpi) {
         return Err("dpi must be between 50 and 1200".into());
     }
-    if let Some(margin) = mine.margin_mm {
-        options.margin_mm = margin;
-    }
-    if let Some(mode) = mine.mode.as_deref().and_then(pipeline::Mode::parse) {
-        options.mode = mode;
-    }
-    if let Some(profile) = mine.profile.clone() {
-        options.profile = Some(profile);
-    }
     if let Some(profile) = tuning.profile.clone() {
         options.profile = Some(profile);
     }
-
-    // The `outline` setting is deliberately not applied here. Boxes round the
-    // changes are drawn by the raster delta writer, which only the
-    // compare-two-documents path uses — so setting it and honouring it here
-    // would produce nothing, and a setting that quietly does nothing is worse
-    // than one that plainly does not apply. `delta` is where it works.
     Ok(options)
 }
 

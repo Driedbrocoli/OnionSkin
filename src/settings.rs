@@ -301,7 +301,9 @@ pub fn remember_output_folder(written: &Path) {
 /// than reporting success twice for the same folder. The path is resolved
 /// first, so the same folder named two ways is stored once.
 pub fn add_font_folder(folder: &Path) -> bool {
-    let resolved = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    let resolved = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf());
     let mut added = false;
     remember(|settings| {
         if !settings.font_folders.contains(&resolved) {
@@ -314,7 +316,9 @@ pub fn add_font_folder(folder: &Path) -> bool {
 
 /// Stop looking in a folder for fonts. Returns whether it was there.
 pub fn forget_font_folder(folder: &Path) -> bool {
-    let resolved = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    let resolved = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf());
     let mut removed = false;
     remember(|settings| {
         let before = settings.font_folders.len();
@@ -375,6 +379,38 @@ fn restrict_file(path: &Path) {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+}
+
+impl Defaults {
+    /// These settings, laid over Onionskin's own answers.
+    ///
+    /// The one place saved defaults become a run's options, so the window and
+    /// the command line cannot apply them differently — a saved job is meant
+    /// to behave the same wherever it is run from, and "the window ignored
+    /// your calibration profile" is exactly the kind of difference nobody
+    /// finds until a sheet comes out two millimetres off.
+    ///
+    /// A flag still beats these: callers apply theirs afterwards.
+    ///
+    /// `outline` is deliberately left out. Boxes round the changes are drawn
+    /// by the raster delta writer, which only the compare-two-documents path
+    /// uses, so honouring it here would produce nothing — and a setting that
+    /// quietly does nothing is worse than one that plainly does not apply.
+    pub fn over(&self, mut options: crate::pipeline::Options) -> crate::pipeline::Options {
+        if let Some(dpi) = self.dpi {
+            options.dpi = dpi;
+        }
+        if let Some(margin) = self.margin_mm {
+            options.margin_mm = margin;
+        }
+        if let Some(mode) = self.mode.as_deref().and_then(crate::pipeline::Mode::parse) {
+            options.mode = mode;
+        }
+        if let Some(profile) = self.profile.clone() {
+            options.profile = Some(profile);
+        }
+        options
     }
 }
 

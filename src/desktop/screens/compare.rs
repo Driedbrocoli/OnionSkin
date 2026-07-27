@@ -61,21 +61,38 @@ const OUTLINE_COLOURS: &[(&str, (f64, f64, f64))] = &[
 
 impl Default for State {
     fn default() -> Self {
+        // The controls open on whatever `onionskin config set` was told, not on
+        // Onionskin's own answers. Somebody who measured their printer once and
+        // set that profile as their default meant it — and a window that opens
+        // with the profile box empty quietly gives them the two millimetres of
+        // error they went to the trouble of removing.
+        let mine = onionskin::settings::load().defaults;
+        let saved = mine.over(pipeline::Options::default());
         State {
             original: None,
             edited: None,
             output: None,
-            dpi: pipeline::DEFAULT_DPI,
-            margin_mm: onionskin::safety::DEFAULT_MARGIN_MM,
-            mode: pipeline::Mode::Raster,
-            profile: String::new(),
+            dpi: saved.dpi,
+            margin_mm: saved.margin_mm,
+            mode: saved.mode,
+            profile: saved.profile.unwrap_or_default(),
             show_settings: false,
-            outline: false,
-            outline_colour: 0,
+            // The one setting `over` leaves alone, because it applies to this
+            // path and no other: boxes are drawn by the raster delta writer.
+            outline: mine.outline.unwrap_or(false),
+            outline_colour: mine
+                .outline_colour
+                .as_deref()
+                .and_then(|wanted| {
+                    OUTLINE_COLOURS
+                        .iter()
+                        .position(|(name, _)| name.eq_ignore_ascii_case(wanted))
+                })
+                .unwrap_or(0),
             keep_beside: false,
             split_moved: true,
             expert: onionskin::diff::DiffOptions::default(),
-            pad_mm: pipeline::Options::default().pad_mm,
+            pad_mm: saved.pad_mm,
         }
     }
 }
@@ -532,5 +549,31 @@ mod tests {
                 "'{name}' would have written its fresh pages over itself"
             );
         }
+    }
+
+    /// The saved outline colour is matched by name, whatever case it was
+    /// written in — a settings file is edited by hand as well as by the
+    /// program, and "Blue" and "blue" are the same wish.
+    #[test]
+    fn a_saved_outline_colour_is_found_by_name_in_any_case() {
+        for (written, expected) in [("blue", "Blue"), ("GREEN", "Green"), ("Black", "Black")] {
+            let found = OUTLINE_COLOURS
+                .iter()
+                .position(|(name, _)| name.eq_ignore_ascii_case(written))
+                .expect("a colour on the list");
+            assert_eq!(OUTLINE_COLOURS[found].0, expected);
+        }
+    }
+
+    /// A colour the list does not have falls back to red rather than to
+    /// nothing — somebody who typed "burgundy" into the settings file still
+    /// gets boxes, and red is the one that reads as "this is new".
+    #[test]
+    fn an_outline_colour_nobody_offers_falls_back_to_red() {
+        let found = OUTLINE_COLOURS
+            .iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case("burgundy"))
+            .unwrap_or(0);
+        assert_eq!(OUTLINE_COLOURS[found].0, "Red");
     }
 }

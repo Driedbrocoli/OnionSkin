@@ -335,6 +335,14 @@ fn run(state: &mut State, job: &onionskin::jobs::Job, room: &mut Room) {
         };
 
         report.saying("Drawing the delta…");
+        // The same saved settings the command line applies. A job is the one
+        // thing in the program meant to behave identically wherever it is run
+        // from, so a window that ignored somebody's calibration profile would
+        // put the words half a millimetre out from where `onionskin job run`
+        // puts them — on the same job, on the same form, on the same printer.
+        let options = onionskin::settings::load()
+            .defaults
+            .over(onionskin::pipeline::Options::default());
         let outcome = match onionskin::pipeline::compose_run_pictures(
             &document,
             &laid.items,
@@ -342,7 +350,7 @@ fn run(state: &mut State, job: &onionskin::jobs::Job, room: &mut Room) {
             &laid.images,
             &output,
             None,
-            &onionskin::pipeline::Options::default(),
+            &options,
         ) {
             Ok(outcome) => outcome,
             Err(e) => return Outcome::refused(e.to_string()),

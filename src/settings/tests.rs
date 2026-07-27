@@ -233,7 +233,10 @@ fn a_setting_is_kept_and_can_be_taken_away_again() {
 
     set_default("dpi", None).unwrap();
     assert!(load().defaults.dpi.is_none());
-    assert!(load().defaults.is_empty(), "the file should be back to bare");
+    assert!(
+        load().defaults.is_empty(),
+        "the file should be back to bare"
+    );
 }
 
 #[test]
@@ -285,7 +288,10 @@ fn every_setting_is_listed_with_something_to_read() {
     assert_eq!(listed.len(), 7, "{listed:?}");
     for (name, value, what) in &listed {
         assert!(!name.is_empty());
-        assert!(value.is_none(), "{name} has a value before anything was set");
+        assert!(
+            value.is_none(),
+            "{name} has a value before anything was set"
+        );
         assert!(!what.is_empty(), "{name} has no description");
         // And every listed name has to be one `set` will actually accept.
         assert!(
@@ -320,4 +326,77 @@ fn settings_written_before_defaults_existed_still_load() {
     let read = load();
     assert_eq!(read.last_screen.as_deref(), Some("Compare"));
     assert!(read.defaults.is_empty());
+}
+
+/// Saved settings become a run's options in one place, so that the window and
+/// the command line cannot apply them differently — which is how one of them
+/// quietly stops honouring somebody's calibration profile.
+#[test]
+fn saved_settings_lie_over_onionskins_own_answers() {
+    let mine = Defaults {
+        dpi: Some(150.0),
+        margin_mm: Some(12.5),
+        mode: Some("vector".into()),
+        profile: Some("office-laser".into()),
+        ..Default::default()
+    };
+    let options = mine.over(crate::pipeline::Options::default());
+
+    assert_eq!(options.dpi, 150.0);
+    assert_eq!(options.margin_mm, 12.5);
+    assert_eq!(options.mode, crate::pipeline::Mode::Vector);
+    assert_eq!(options.profile.as_deref(), Some("office-laser"));
+}
+
+/// Anything not set is left exactly as it was, rather than being written over
+/// with a zero — an empty settings file must change nothing at all.
+#[test]
+fn settings_that_were_never_set_change_nothing() {
+    let plain = crate::pipeline::Options::default();
+    let untouched = Defaults::default().over(crate::pipeline::Options::default());
+
+    assert_eq!(untouched.dpi, plain.dpi);
+    assert_eq!(untouched.margin_mm, plain.margin_mm);
+    assert_eq!(untouched.mode, plain.mode);
+    assert!(untouched.profile.is_none());
+}
+
+/// Anything the caller had already decided survives, except where a setting
+/// speaks to it: the preview folder is not a preference and must come through.
+#[test]
+fn what_the_caller_asked_for_is_not_thrown_away() {
+    let asked = crate::pipeline::Options {
+        preview_dir: Some(std::path::PathBuf::from("/tmp/proofs")),
+        pad_mm: 0.9,
+        ..Default::default()
+    };
+    let options = Defaults {
+        dpi: Some(600.0),
+        ..Default::default()
+    }
+    .over(asked);
+
+    assert_eq!(options.dpi, 600.0, "the setting was applied");
+    assert_eq!(
+        options.preview_dir,
+        Some(std::path::PathBuf::from("/tmp/proofs")),
+        "the preview folder was thrown away"
+    );
+    assert_eq!(options.pad_mm, 0.9, "an untouched field was reset");
+}
+
+/// A mode that is not a mode is ignored rather than guessed at. A settings
+/// file can be edited by hand, and "vecter" must not silently become raster
+/// *or* vector — it must leave whatever was already decided alone.
+#[test]
+fn a_setting_that_makes_no_sense_is_left_alone() {
+    let options = Defaults {
+        mode: Some("vecter".into()),
+        ..Default::default()
+    }
+    .over(crate::pipeline::Options {
+        mode: crate::pipeline::Mode::Vector,
+        ..Default::default()
+    });
+    assert_eq!(options.mode, crate::pipeline::Mode::Vector);
 }
