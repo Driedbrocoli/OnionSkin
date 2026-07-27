@@ -523,18 +523,13 @@ fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
     let field = |name: &str| parts.iter().find(|p| p.name == name);
 
     let Some(scan) = field("scan").filter(|p| !p.data.is_empty()) else {
-        return Err("Choose a scan to read: a PNG, JPEG, TIFF or BMP.".into());
+        return Err("Choose a scan to read: a PDF, or a PNG, JPEG, TIFF or BMP.".into());
     };
-    let Some(font_part) = field("font").filter(|p| !p.data.is_empty()) else {
-        return Err(
-            "Choose the font the page was set in.\n\nWithout it Onionskin can see \
-             where the ink is but not what it says, and there would be nothing to \
-             write into the document. Any .ttf or .otf file will do — on Windows \
-             they are in C:\\Windows\\Fonts, on macOS in /Library/Fonts, on Linux \
-             in /usr/share/fonts."
-                .into(),
-        );
-    };
+    // Optional. The command line stopped asking for a font when it learned to
+    // work out which face a page is set in, and the browser kept asking —
+    // sending people to hunt through C:\Windows\Fonts for a question the page
+    // can answer itself.
+    let font_part = field("font").filter(|p| !p.data.is_empty());
 
     let page = field("page")
         .map(|p| p.text())
@@ -547,23 +542,58 @@ fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
             height_mm: 297.0,
         });
 
-    let image = image::load_from_memory(&scan.data)
-        .map_err(|e| format!("That does not look like an image Onionskin can read: {e}"))?;
-    let registration = register(&image, ScanOptions::new(page)).map_err(|e| e.to_string())?;
-    let gray = image.to_luma8();
-
-    // The font has to be a file on disk, because that is what the loader takes
-    // — it memory-maps the programme rather than copying it about.
+    // A file on disk either way: the renderer opens documents by path, and the
+    // font loader memory-maps the programme rather than copying it about.
     let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
-    let font_path = workspace.path.join(safe_name(
-        font_part.filename.as_deref().unwrap_or("font.ttf"),
-        "font.ttf",
-    ));
-    std::fs::write(&font_path, &font_part.data).map_err(|e| e.to_string())?;
-    let font = crate::font::EmbeddedFont::load(&font_path).map_err(|e| e.to_string())?;
 
-    let text = read_with_font(&gray, &registration, &ReadOptions::default(), &font, None)
-        .map_err(|e| e.to_string())?;
+    // A PDF is what every multifunction printer produces by default, so it is
+    // the commonest thing to be handed — and it needs no finding, because a
+    // document says where its own edges are.
+    let looks_like_a_document = scan.data.starts_with(b"%PDF");
+    let (gray, registration) = if looks_like_a_document {
+        let path = workspace.path.join(safe_name(
+            scan.filename.as_deref().unwrap_or("scan.pdf"),
+            "scan.pdf",
+        ));
+        std::fs::write(&path, &scan.data).map_err(|e| e.to_string())?;
+        crate::recipe::draw_page(&path, 1)?
+    } else {
+        let image = image::load_from_memory(&scan.data).map_err(|e| {
+            format!("That does not look like a scan Onionskin can read: {e}")
+        })?;
+        let registration = register(&image, ScanOptions::new(page)).map_err(|e| e.to_string())?;
+        (image.to_luma8(), registration)
+    };
+    // The page turned out to be whatever it turned out to be. For a picture
+    // that is the size given; for a PDF the document said so itself.
+    let page = registration.page;
+
+    let text = match &font_part {
+        Some(part) => {
+            let font_path = workspace.path.join(safe_name(
+                part.filename.as_deref().unwrap_or("font.ttf"),
+                "font.ttf",
+            ));
+            std::fs::write(&font_path, &part.data).map_err(|e| e.to_string())?;
+            let font = crate::font::EmbeddedFont::load(&font_path).map_err(|e| e.to_string())?;
+            read_with_font(&gray, &registration, &ReadOptions::default(), &font, None)
+                .map_err(|e| e.to_string())?
+        }
+        // No font given, so the page is asked which one it is set in — the
+        // same answer the command line works out, from the same code.
+        None => match crate::typeface::read_and_match_in(&gray, &registration) {
+            Some((text, _)) => text,
+            None => {
+                return Err(
+                    "There is no font on this machine to read the page against, so \
+                     Onionskin can see where the ink is but not what it says.\n\n\
+                     Install a common face — DejaVu, Liberation — or choose the font \
+                     the page was set in below. Any .ttf or .otf file will do."
+                        .into(),
+                )
+            }
+        },
+    };
     if text.lines.is_empty() {
         return Err(
             "No writing was found on that scan.\n\nCheck the paper size is right, \
@@ -808,13 +838,15 @@ const PAGE_BODY: &str = r#"
     <legend>The scan</legend>
 
     <label for="scan">The scanned page
-      <span class="hint">— .png, .jpg, .tiff, .bmp</span></label>
-    <input type="file" id="scan" name="scan" accept="image/*" required>
+      <span class="hint">— a .pdf straight off the scanner, or a picture of
+      the page: .png, .jpg, .tiff, .bmp</span></label>
+    <input type="file" id="scan" name="scan" accept=".pdf,image/*" required>
 
     <label for="font">The font the page was set in
-      <span class="hint">— .ttf or .otf. Without it, Onionskin can see where
-      the ink is but not what it says.</span></label>
-    <input type="file" id="font" name="font" accept=".ttf,.otf,.ttc" required>
+      <span class="hint">— optional. Onionskin works out which face the page
+      is set in. Give one only for an alphabet the built-in faces do not
+      cover. .ttf, .otf or .ttc.</span></label>
+    <input type="file" id="font" name="font" accept=".ttf,.otf,.ttc">
 
     <div class="row">
       <div>
@@ -833,7 +865,8 @@ const PAGE_BODY: &str = r#"
         </select>
       </div>
       <div>
-        <label for="page">Paper</label>
+        <label for="page">Paper
+          <span class="hint">— not needed for a PDF</span></label>
         <input type="text" id="page" name="page" value="a4" placeholder="a4">
       </div>
     </div>

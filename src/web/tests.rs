@@ -620,12 +620,17 @@ fn the_page_offers_to_read_a_scan() {
     let flowed = page();
     let flowed = flowed.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(page().contains("action=\"/convert\""), "no conversion form");
-    // Somebody has to be told the font is needed and why, or they will pick a
-    // scan, see it refused, and conclude the thing does not work.
+    // The font is still offered, for an alphabet the built-in faces do not
+    // cover — but as an option, and the page has to say so. Presenting it as
+    // required is what made people go looking for a .ttf they did not need.
     assert!(flowed.contains("The font the page was set in"), "{flowed}");
     assert!(
-        flowed.contains("where the ink is but not what it says"),
-        "the page does not say why the font is needed"
+        flowed.contains("optional"),
+        "the page does not say the font is optional:\n{flowed}"
+    );
+    assert!(
+        flowed.contains("works out which face"),
+        "the page does not say Onionskin will work the face out itself"
     );
     for offered in ["docx", "odt", "onionskin"] {
         assert!(page().contains(offered), "{offered} is not offered");
@@ -659,8 +664,14 @@ fn a_scan_comes_back_as_a_word_document() {
     assert!(file.len() > 500, "only {} bytes came back", file.len());
 }
 
+/// A scan with no font is read anyway, against the faces on this machine.
+///
+/// This used to be a refusal that sent somebody to C:\\Windows\\Fonts. The
+/// command line stopped asking that question when it learned to work out which
+/// face a page is set in, and the browser — where the person is least likely
+/// to know the answer, and least able to find a .ttf — went on asking it.
 #[test]
-fn a_scan_with_no_font_is_refused_with_a_reason() {
+fn a_scan_with_no_font_is_read_against_the_faces_on_this_machine() {
     let Some((scan, _)) = a_scan_and_its_font() else {
         eprintln!("no DejaVu on this machine; skipping");
         return;
@@ -668,16 +679,14 @@ fn a_scan_with_no_font_is_refused_with_a_reason() {
     let address = start();
     let (content_type, body) =
         multipart(&[("scan", Some("page.png"), &scan), ("format", None, b"docx")]);
-    let (headers, message) = split_response(&post_to(&address, "/convert", &content_type, &body));
-    let message = String::from_utf8_lossy(&message);
+    let (headers, file) = split_response(&post_to(&address, "/convert", &content_type, &body));
 
-    assert!(headers.starts_with("HTTP/1.1 422"), "{headers}");
-    // The refusal has to say what to do next, not merely that it will not.
-    assert!(message.contains("font"), "{message}");
     assert!(
-        message.contains(".ttf") && message.contains("Fonts"),
-        "it does not say where to find one:\n{message}"
+        headers.starts_with("HTTP/1.1 200"),
+        "a scan without a font was refused:\n{headers}\n{}",
+        String::from_utf8_lossy(&file)
     );
+    assert_eq!(&file[0..2], b"PK", "that is not a zip, so not a .docx");
 }
 
 #[test]
@@ -728,4 +737,102 @@ fn the_page_offers_the_box_round_every_change() {
     assert!(page.contains("name=\"outline_colour\""), "no colour choice");
     // And says what it costs, because the box goes onto the paper.
     assert!(page.contains("printed onto the paper"), "{page}");
+}
+
+// ---------------------------------------------------------------------------
+// Reading a scan, in the browser
+// ---------------------------------------------------------------------------
+
+/// A request as the server would have built it from a browser's POST.
+fn posted(fields: &[(&str, Option<&str>, &[u8])]) -> Request {
+    let (content_type, body) = multipart(fields);
+    Request {
+        method: "POST".to_string(),
+        path: "/convert".to_string(),
+        content_type,
+        body,
+        accept: String::new(),
+    }
+}
+
+/// The font was required, so the browser sent people hunting through
+/// C:\Windows\Fonts for a question the page can answer itself — a question the
+/// command line stopped asking a long time ago.
+#[test]
+fn the_font_is_no_longer_demanded_before_anything_is_read() {
+    let said = convert_scan(&posted(&[
+        ("scan", Some("scan.png"), b"not really a png"),
+        ("format", None, b"docx"),
+    ]))
+    .unwrap_err();
+    // It gets as far as looking at the scan, rather than stopping at the font.
+    assert!(
+        !said.contains("Choose the font"),
+        "a missing font still stops the run before the scan is looked at: {said}"
+    );
+    assert!(
+        said.contains("does not look like a scan"),
+        "the refusal was not about the thing actually wrong: {said}"
+    );
+}
+
+/// With no scan there is nothing to do, and the message has to name every kind
+/// that would work — a PDF first, because that is what a scanner produces.
+#[test]
+fn a_missing_scan_names_the_kinds_that_would_work() {
+    let said = convert_scan(&posted(&[("format", None, b"docx")])).unwrap_err();
+    assert!(said.contains("PDF"), "{said}");
+    assert!(said.contains("PNG"), "{said}");
+}
+
+/// A PDF is recognised by what is in it rather than by what it is called: a
+/// browser sends whatever name the file had, and a scanner is as likely to
+/// produce "Scan_001" with no extension at all.
+#[test]
+fn a_pdf_is_recognised_by_its_contents_not_its_name() {
+    // Not a real PDF beyond the marker, so this fails in the renderer rather
+    // than in the image decoder — which is the whole point: it was routed to
+    // the renderer at all.
+    let said = convert_scan(&posted(&[
+        ("scan", Some("Scan_001"), b"%PDF-1.4 but not a whole one"),
+        ("format", None, b"docx"),
+    ]))
+    .unwrap_err();
+    assert!(
+        !said.contains("does not look like a scan"),
+        "a PDF with no extension was sent to the image decoder: {said}"
+    );
+}
+
+/// The form must not ask for a font as though it were required, or the change
+/// above is invisible to the person it was made for.
+#[test]
+fn the_form_asks_for_a_font_as_an_option_not_a_requirement() {
+    let html = page();
+    let font_input = html
+        .lines()
+        .find(|line| line.contains("id=\"font\""))
+        .expect("a font input on the page");
+    assert!(
+        !font_input.contains("required"),
+        "the font is still marked required: {font_input}"
+    );
+    assert!(
+        html.contains("optional"),
+        "nothing on the page says the font is optional"
+    );
+}
+
+/// And it must offer to take a PDF, since that is what comes off a scanner.
+#[test]
+fn the_form_takes_a_pdf_as_well_as_a_picture() {
+    let html = page();
+    let scan_input = html
+        .lines()
+        .find(|line| line.contains("id=\"scan\""))
+        .expect("a scan input on the page");
+    assert!(
+        scan_input.contains(".pdf"),
+        "the file browser will not offer PDFs: {scan_input}"
+    );
 }
