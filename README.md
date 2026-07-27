@@ -344,6 +344,38 @@ them there:
 onionskin add po.docx -o delta.pdf --at-mm '45,63:J. Bezzina — approved 25 July'
 ```
 
+#### You do not have to know the millimetres
+
+Nobody holding a form knows the gap after `Received:` starts 44.9 mm across and
+40.1 mm down. They know it is the gap after `Received:`. So say that:
+
+```bash
+onionskin add form.png --after 'Received:Approved 27 July'
+onionskin add form.png --below 'Signature:J. Bezzina'
+```
+
+```
+Found "Received" on the line: Received:
+  putting the words at 44.9, 40.1 mm
+```
+
+The page is read, the anchor is found, and the words go where a person would
+have put them. It works on a scan, a PDF, a Word file or an OpenDocument — for
+a document the page is drawn and then read, which is what a person does when
+they look at one.
+
+Matching is forgiving, because a scan is never read perfectly: case, spacing
+and punctuation are ignored, and up to a quarter of the letters may be wrong.
+`Received:` really does come back as `Peceived:` off a noisy scan. Exact matches
+are tried first and always win.
+
+What it will not do is guess. An anchor that is not there is an error listing
+what **is** on the page. An anchor that appears twice is an error saying where
+both are and asking for more words — putting the date next to the first of five
+`Date:` fields is a coin toss, and a coin toss that ruins a sheet of paper is
+worse than a question. Under five letters nothing is forgiven at all, because
+`Date` and `Rate` are both plausible labels on the same form.
+
 Because the text is placed at an absolute position, **nothing on the page can
 move** — the reflow problem below simply cannot happen.
 
@@ -715,6 +747,19 @@ accounts on a shared machine cannot read documents you have processed.
 
 Onionskin also refuses to write a delta over one of the documents it was made
 from, since that would destroy the sheet you were about to print onto.
+
+## Tab completion
+
+```bash
+onionskin completions bash > ~/.local/share/bash-completion/completions/onionskin
+onionskin completions zsh  > ~/.zsh/completions/_onionskin
+onionskin completions fish > ~/.config/fish/completions/onionskin.fish
+onionskin completions powershell >> $PROFILE
+```
+
+With no shell named it guesses from `$SHELL`. The script is generated from the
+same command definitions `--help` comes from, so it cannot drift: a flag added
+tomorrow is one Tab knows about tomorrow.
 
 ## Development
 

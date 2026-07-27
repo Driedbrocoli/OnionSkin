@@ -531,6 +531,34 @@ name, and the promise on the sidebar was rewritten to match rather than left to
 drift. A promise that is nearly true is worth less than a smaller one that is
 exactly true.
 
+## Placing words by what is already on the page
+
+`src/anchor.rs`. Everything else in Onionskin wants millimetres from the
+top-left corner. That is the honest unit and a miserable thing to have to
+supply, so the page is read and the new words are put after something already
+on it.
+
+The matching is deliberately forgiving and deliberately bounded, and the two
+halves of that are the whole design. Forgiving, because a scan is never read
+perfectly — `Received:` genuinely comes back as `Peceived:` off a noisy one, and
+refusing over that sends somebody back to the ruler this exists to replace. So
+case, spacing and punctuation are discarded and up to a quarter of the letters
+may be wrong, by a bounded edit distance that abandons a row as soon as every
+reachable cell in it is over budget.
+
+Bounded, because the failure mode is a sheet of paper. Exact matches are tried
+across the whole page first and only then near ones, so a page carrying both
+`Dispatched` and `Dispatcher` resolves to the right one instead of reporting a
+tie. Under five letters nothing is forgiven, because `Date` and `Rate` are both
+plausible labels on the same form and one wrong letter between them is a coin
+toss. An anchor found twice is refused with both positions rather than resolved
+by taking the first.
+
+The matcher works on a list of rows rather than on a `PageText`, for the same
+reason `typeface::detect_measured` takes widths: a page of letters carries the
+straightened bitmap each was matched from and cannot be built by hand, which
+would leave the logic tested only through the thing that produces it.
+
 ## Measuring a printer instead of asking somebody to
 
 `src/calibrate.rs`. Calibration was always the part that made Onionskin
