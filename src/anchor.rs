@@ -136,6 +136,70 @@ pub fn rows(page: &PageText) -> Vec<Row> {
         .collect()
 }
 
+/// Every place on the page where `wanted` appears, as boxes round the words.
+///
+/// For covering something up rather than writing beside it, so the thing to
+/// hide can be named instead of measured: somebody redacting a payslip knows
+/// they want the salary hidden and does not know it starts 46.2 mm across.
+///
+/// Unlike [`place_in`], several matches are not an ambiguity to refuse — they
+/// are several things to cover, and covering all of them is what was meant.
+/// Matching is the same forgiving comparison, because a scan is never read
+/// perfectly and half-covering a name is worse than not trying.
+pub fn boxes_for(page: &PageText, wanted: &str) -> Vec<Rect> {
+    boxes_in(&rows(page), wanted)
+}
+
+/// The same, from rows rather than from a page.
+pub fn boxes_in(rows: &[Row], wanted: &str) -> Vec<Rect> {
+    let wanted_key = squash(wanted);
+    if wanted_key.is_empty() {
+        return Vec::new();
+    }
+    let slack = slack(&wanted_key);
+    let mut found = Vec::new();
+
+    for row in rows {
+        // Runs of words, so a phrase spanning several of them is one box.
+        for start in 0..row.words.len() {
+            let mut joined = String::new();
+            for end in start..row.words.len() {
+                if !joined.is_empty() {
+                    joined.push(' ');
+                }
+                joined.push_str(&row.words[end].0);
+                let joined_key = squash(&joined);
+                if joined_key.len() > wanted_key.len() + slack {
+                    break;
+                }
+                if within(&joined_key, &wanted_key, slack) {
+                    found.push(union_of(&row.words[start..=end]));
+                    break;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// One box round a run of words.
+fn union_of(words: &[(String, Rect, f64)]) -> Rect {
+    let mut rect = words[0].1;
+    for (_, other, _) in &words[1..] {
+        let x0 = rect.x_mm.min(other.x_mm);
+        let y0 = rect.y_mm.min(other.y_mm);
+        let x1 = (rect.x_mm + rect.width_mm).max(other.x_mm + other.width_mm);
+        let y1 = (rect.y_mm + rect.height_mm).max(other.y_mm + other.height_mm);
+        rect = Rect {
+            x_mm: x0,
+            y_mm: y0,
+            width_mm: x1 - x0,
+            height_mm: y1 - y0,
+        };
+    }
+    rect
+}
+
 /// The same rows, from a document's own layout rather than from a scan.
 ///
 /// A document knows exactly where each of its words sits, so anchoring in one

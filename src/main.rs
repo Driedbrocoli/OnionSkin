@@ -76,6 +76,8 @@ enum Command {
     Tidy,
     /// One sheet each for everybody on a list: certificates, tickets, forms.
     Batch(BatchArgs),
+    /// Print solid over something on a sheet you have to hand over.
+    Cover(CoverArgs),
     /// Write a document out as a PDF, whole or as a delta onto the printed sheet.
     Print(PrintArgs),
     /// Read the letters off a scanned page.
@@ -517,6 +519,44 @@ struct Tuning {
     /// Rendering resolution, overriding any saved one.
     #[arg(long, value_name = "DPI")]
     dpi: Option<f64>,
+}
+
+/// Covering something up on a sheet that is already printed.
+///
+/// A separate command rather than a note in `draw`'s help, because it is a
+/// separate intention and it carries a warning that a filled rectangle does
+/// not: a printer can only add toner, so this hides what is underneath from
+/// the eye and from a photocopier — it does not remove it from the paper, and
+/// somebody holding the sheet up to a strong light may still make it out.
+#[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
+struct CoverArgs {
+    /// The sheet to cover something on.
+    document: PathBuf,
+    /// What to cover: 'X,Y:WIDTHxHEIGHT', with X,Y its top-left corner, in
+    /// millimetres.
+    #[arg(long = "over", value_name = "X,Y:WxH", allow_hyphen_values = true)]
+    over: Vec<String>,
+    /// Cover whatever a word sits on, rather than measuring it: 'Salary'.
+    #[arg(long = "word", value_name = "WORDS")]
+    word: Vec<String>,
+    /// How much beyond the words to cover, in millimetres.
+    #[arg(long, default_value_t = 1.0)]
+    pad: f64,
+    /// Which page, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    /// Where to write the delta.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Write proof images here, showing what will be covered.
+    #[arg(long)]
+    preview: Option<PathBuf>,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
+    #[command(flatten)]
+    tuning: Tuning,
 }
 
 /// One sheet each, from a spreadsheet.
@@ -1071,6 +1111,45 @@ fn ours_to_replace(path: &Path) -> bool {
 /// could appear in the text of a page Onionskin had nothing to do with.
 const PRODUCER: &[u8] = b"/Producer(Onionskin)";
 
+/// Say what printing only the additions saved.
+///
+/// The whole argument for the program, in one line. Only said when there is
+/// something on the page to have saved against — a percentage of a blank
+/// sheet reads as a bug, and is one.
+fn report_saving(outcome: &pipeline::Outcome) {
+    let Some(saving) = outcome.saving() else {
+        return;
+    };
+    let fraction = saving.ink_fraction();
+
+    // Where the page is nearly as bare as the delta there is nothing to
+    // claim, and claiming it anyway would be the kind of number that makes a
+    // reader stop believing the others.
+    if fraction > 0.9 {
+        return;
+    }
+
+    let per_cent = fraction * 100.0;
+    let ink = if per_cent < 0.1 {
+        // "0%" would be a rounding claim rather than a measurement.
+        "under 0.1%".to_string()
+    } else if per_cent < 10.0 {
+        format!("{per_cent:.1}%")
+    } else {
+        format!("{per_cent:.0}%")
+    };
+
+    let carrying = outcome.pages_with_additions().len();
+    let sheets = outcome.pages.len();
+    println!("\nThis uses {ink} of the ink that printing it whole would.");
+    if sheets > 1 && carrying < sheets {
+        println!(
+            "  {carrying} sheet{} to feed, out of {sheets}.",
+            if carrying == 1 { "" } else { "s" }
+        );
+    }
+}
+
 const PRINT_INSTRUCTIONS: &str = "\
 Printing the delta
   1. Put the scanned sheet back in the tray. Check which way up and which end
@@ -1138,6 +1217,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Undo(args) => cmd_undo(args),
         Command::Tidy => cmd_tidy(),
         Command::Batch(args) => cmd_batch(args),
+        Command::Cover(args) => cmd_cover(args),
         Command::Print(args) => cmd_print(args),
         Command::Read(args) => cmd_read(args),
         Command::Delta(args) => cmd_delta(args),
@@ -1311,6 +1391,111 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
 /// The anchors are worked out once, against the sheet itself, because the
 /// sheet is the same for everybody — only the words change. Two hundred
 /// certificates therefore cost one reading of the page, not two hundred.
+/// Print solid over something on a sheet that has to be handed over.
+///
+/// The words can be named instead of measured, because somebody redacting a
+/// payslip knows they want the salary hidden and does not know it starts
+/// 46.2 mm across.
+fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
+    if args.over.is_empty() && args.word.is_empty() {
+        return Err(
+            "nothing to cover. Say what to hide:\n    \
+             --word 'Salary'            cover whatever that word sits on\n    \
+             --over '40,100:70x8'       cover a rectangle, in millimetres"
+                .into(),
+        );
+    }
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-covered", "pdf"));
+    refuse_to_clobber(&output, "delta", &[(&args.document, "sheet")])?;
+    check_writable(&output, "delta")?;
+
+    let mut boxes: Vec<(f64, f64, f64, f64)> = Vec::new();
+    for spec in &args.over {
+        let ((x_mm, y_mm), size) = parse_placement(spec)?;
+        let (w, h) = parse_size(&size)?;
+        boxes.push((x_mm, y_mm, w, h));
+    }
+
+    // Named words are found by reading the page, the same way anchors are.
+    if !args.word.is_empty() {
+        let page_text = read_a_document(&args.document)?;
+        for wanted in &args.word {
+            let found = onionskin::anchor::boxes_for(&page_text, wanted);
+            if found.is_empty() {
+                return Err(format!(
+                    "nothing on the page reads as '{wanted}', so there is \
+                     nothing to cover.\n    Run `onionskin read` to see what \
+                     is on it, or give millimetres with --over."
+                ));
+            }
+            for rect in found {
+                boxes.push((
+                    rect.x_mm - args.pad,
+                    rect.y_mm - args.pad,
+                    rect.width_mm + args.pad * 2.0,
+                    rect.height_mm + args.pad * 2.0,
+                ));
+            }
+        }
+    }
+
+    let shapes: Vec<(usize, onionskin::pdf::PlacedShape)> = boxes
+        .iter()
+        .map(|(x, y, w, h)| {
+            (
+                args.page,
+                onionskin::pdf::PlacedShape {
+                    drawing: onionskin::pdf::Drawing::Rect {
+                        x_mm: *x,
+                        y_mm: *y,
+                        width_mm: *w,
+                        height_mm: *h,
+                        radius_mm: 0.0,
+                    },
+                    stroke: None,
+                    fill: Some((0.0, 0.0, 0.0)),
+                    width_mm: 0.0,
+                    dash_mm: None,
+                },
+            )
+        })
+        .collect();
+
+    let options = options_from_settings(args.preview.clone(), &args.tuning)?;
+    let outcome =
+        pipeline::compose_run_drawing(&args.document, &[], &shapes, &output, None, &options)
+            .map_err(|e| e.to_string())?;
+
+    report_checks(&outcome.checks);
+    if outcome.blocked() {
+        eprintln!("\nBlocked — see above. Nothing worth printing was produced.");
+        return Ok(ExitCode::from(2));
+    }
+    println!(
+        "\n{}: {} area{} covered.",
+        output.display(),
+        shapes.len(),
+        if shapes.len() == 1 { "" } else { "s" }
+    );
+    for path in &outcome.previews {
+        println!("proof: {}", path.display());
+    }
+    println!(
+        "\nWhat this does, and what it does not\n  \
+         Printing this lays solid toner over those areas. It hides them from \
+         the eye\n  and from a photocopier. It does not take the old ink off \
+         the paper —\n  a strong light behind the sheet may still show it \
+         through.\n  \
+         For anything that must not be recoverable, print a fresh page \
+         without it."
+    );
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() {
         return Err(
@@ -3220,6 +3405,7 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    report_saving(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
@@ -3452,6 +3638,7 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
             "s"
         }
     );
+    report_saving(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
@@ -4140,6 +4327,7 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         outcome.total_regions(),
         if outcome.total_regions() == 1 { "" } else { "s" }
     );
+    report_saving(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
@@ -4181,6 +4369,7 @@ fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> R
         outcome.total_regions(),
         if outcome.total_regions() == 1 { "" } else { "s" }
     );
+    report_saving(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }

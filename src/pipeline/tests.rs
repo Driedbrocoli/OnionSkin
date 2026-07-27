@@ -799,3 +799,61 @@ fn a_step_describes_itself_the_way_a_person_reads_it() {
     assert_eq!(whole.describe(), "Opening both documents");
     assert_eq!(whole.fraction(), None);
 }
+
+// ---------------------------------------------------------------------------
+// What printing only the additions saved
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_saving_is_the_deltas_ink_against_a_whole_reprint() {
+    let saving = Saving {
+        delta_mm2: 5.0,
+        whole_mm2: 500.0,
+        sheets: 1,
+    };
+    assert!((saving.ink_fraction() - 0.01).abs() < 1e-9);
+    assert!(saving.worth_saying());
+}
+
+#[test]
+fn a_blank_page_cannot_be_saved_against() {
+    // Nought ink on the page is a real answer, not a missing one — but a
+    // percentage of nothing is not, so it reports the whole and says so.
+    let saving = Saving {
+        delta_mm2: 5.0,
+        whole_mm2: 0.0,
+        sheets: 1,
+    };
+    assert!((saving.ink_fraction() - 1.0).abs() < 1e-9);
+    assert!(!saving.worth_saying(), "a blank page claimed a saving");
+}
+
+#[test]
+fn a_delta_heavier_than_the_page_never_claims_more_than_all_of_it() {
+    // Adding more ink than the page already carries is possible — a big
+    // signature on a nearly-empty form. "140% of a reprint" is arithmetic
+    // nobody wants to read.
+    let saving = Saving {
+        delta_mm2: 700.0,
+        whole_mm2: 500.0,
+        sheets: 1,
+    };
+    assert!((saving.ink_fraction() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_saving_is_only_reported_where_it_was_measured() {
+    // The compare-two-documents path does not measure the page underneath,
+    // and `None` there means "not measured" rather than "nothing".
+    let outcome = Outcome {
+        output: PathBuf::new(),
+        pages: Vec::new(),
+        checks: Vec::new(),
+        previews: Vec::new(),
+        mode: Mode::Raster,
+        dpi: 400.0,
+        profile: None,
+        whole_page_ink_mm2: None,
+    };
+    assert!(outcome.saving().is_none());
+}

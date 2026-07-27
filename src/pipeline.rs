@@ -125,6 +125,47 @@ pub struct Outcome {
     pub mode: Mode,
     pub dpi: f64,
     pub profile: Option<Profile>,
+    /// How much ink the pages already carry, across every sheet being printed
+    /// onto — that is, what printing them whole again would cost.
+    ///
+    /// `None` where it was not measured, rather than nought, because nought
+    /// is a real answer meaning "these pages are blank".
+    pub whole_page_ink_mm2: Option<f64>,
+}
+
+/// What printing only the additions saved, against printing the pages whole.
+///
+/// This is the entire argument for the program, and until now nothing said
+/// it out loud.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Saving {
+    /// Ink in the delta.
+    pub delta_mm2: f64,
+    /// Ink on the pages as they already are.
+    pub whole_mm2: f64,
+    /// How many sheets go through the printer.
+    pub sheets: usize,
+}
+
+impl Saving {
+    /// The delta's ink as a fraction of a full reprint's, from 0 to 1.
+    ///
+    /// A page with no ink on it cannot be improved on, so it reports 1: the
+    /// delta is the whole of what would be printed either way.
+    pub fn ink_fraction(&self) -> f64 {
+        if self.whole_mm2 <= 0.0 {
+            return 1.0;
+        }
+        (self.delta_mm2 / self.whole_mm2).min(1.0)
+    }
+
+    /// Whether it is worth saying anything at all.
+    ///
+    /// Below a twentieth of a square millimetre there is nothing on the page
+    /// to compare against, and a percentage of nothing reads as a bug.
+    pub fn worth_saying(&self) -> bool {
+        self.whole_mm2 > 0.05
+    }
 }
 
 impl Outcome {
@@ -138,6 +179,17 @@ impl Outcome {
 
     pub fn total_added_mm2(&self) -> f64 {
         self.pages.iter().map(|p| p.added_ink_mm2()).sum()
+    }
+
+    /// What printing only the additions saved, where that was measured.
+    pub fn saving(&self) -> Option<Saving> {
+        let whole_mm2 = self.whole_page_ink_mm2?;
+        let saving = Saving {
+            delta_mm2: self.total_added_mm2(),
+            whole_mm2,
+            sheets: self.pages.len(),
+        };
+        saving.worth_saying().then_some(saving)
     }
 
     pub fn pages_with_additions(&self) -> Vec<usize> {
@@ -577,6 +629,18 @@ pub(crate) fn compose_onto(
         }
     }
 
+    // What printing these pages whole would cost in ink, summed over every
+    // sheet — which for a batch means the same page two hundred times, and
+    // rightly so: printing them whole would mean printing it two hundred
+    // times. Counted off the same small rendering, so it is free.
+    let whole_page_ink_mm2 = sheets
+        .iter()
+        .filter_map(|sheet| beneath.get(&sheet.from))
+        .map(|(gray, width)| {
+            ink_area_mm2(gray, *width, safety::BENEATH_DPI, options.diff.ink_threshold)
+        })
+        .sum();
+
     for (index, size) in sizes.iter().enumerate() {
         let drawn = composed.render(index, options.dpi)?;
         let added = crate::diff::ink_mask(
@@ -671,7 +735,18 @@ pub(crate) fn compose_onto(
         mode: options.mode,
         dpi: options.dpi,
         profile,
+        whole_page_ink_mm2: Some(whole_page_ink_mm2),
     })
+}
+
+/// How much of a greyscale page is inked, in square millimetres.
+fn ink_area_mm2(gray: &[u8], width: usize, dpi: f64, threshold: u8) -> f64 {
+    if width == 0 || dpi <= 0.0 {
+        return 0.0;
+    }
+    let dark = gray.iter().filter(|value| **value < threshold).count();
+    let per_pixel = crate::geometry::px_to_mm(1.0, dpi).powi(2);
+    dark as f64 * per_pixel
 }
 
 /// Compare two documents and write the delta PDF.
@@ -1012,6 +1087,7 @@ fn compare_documents(
             mode: options.mode,
             dpi: options.dpi,
             profile,
+            whole_page_ink_mm2: None,
         });
     };
     if let Some(parent) = output.parent() {
@@ -1047,6 +1123,7 @@ fn compare_documents(
         mode: options.mode,
         dpi: options.dpi,
         profile,
+        whole_page_ink_mm2: None,
     })
 }
 

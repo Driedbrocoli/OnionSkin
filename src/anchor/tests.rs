@@ -296,3 +296,37 @@ fn rows_come_back_down_the_page_whatever_order_they_were_written_in() {
     let order: Vec<&str> = rows.iter().map(|r| r.words[0].0.as_str()).collect();
     assert_eq!(order, vec!["first", "second", "third"]);
 }
+
+#[test]
+fn every_place_a_word_appears_is_a_box_to_cover() {
+    // Unlike placing words beside an anchor, several matches are not an
+    // ambiguity to refuse — they are several things to hide, and hiding all
+    // of them is what was meant.
+    // Driven through rows rather than a scan, like the rest of these tests.
+    let rows = vec![
+        row(40.0, 20.0, &["Salary", "48200"]),
+        row(60.0, 20.0, &["Department:", "Bindery"]),
+        row(80.0, 20.0, &["Salary", "48200"]),
+    ];
+    let found = boxes_in(&rows, "Salary 48200");
+    assert_eq!(found.len(), 2, "{found:?}");
+    // Each box spans both words of the run.
+    assert!(found[0].width_mm >= 12.0 + 10.0, "{:?}", found[0]);
+    assert!((found[0].y_mm - 37.0).abs() < 1e-9, "{:?}", found[0]);
+    assert!((found[1].y_mm - 77.0).abs() < 1e-9, "{:?}", found[1]);
+}
+
+#[test]
+fn a_word_that_is_not_on_the_page_covers_nothing() {
+    let rows = vec![row(40.0, 20.0, &["Salary", "48200"])];
+    assert!(boxes_in(&rows, "Bonus").is_empty());
+    assert!(boxes_in(&rows, "   ").is_empty());
+}
+
+#[test]
+fn covering_forgives_what_a_scan_gets_wrong() {
+    // The same forgiving comparison as placing: half-covering a name because
+    // one letter was misread is worse than not trying.
+    let rows = vec![row(40.0, 20.0, &["Salaty"])];
+    assert_eq!(boxes_in(&rows, "Salary").len(), 1);
+}
