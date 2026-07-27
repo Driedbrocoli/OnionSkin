@@ -44,7 +44,7 @@ enum Command {
     Add(AddArgs),
     /// Scan a sheet, ready to add words to.
     Acquire(AcquireArgs),
-    /// List the scanners this machine can see.
+    /// Find the scanners on this machine and on this network.
     Scanners,
     /// List the fonts available.
     Fonts(FontsArgs),
@@ -78,7 +78,7 @@ enum Command {
     /// Open the browser interface, on this machine only.
     Serve(ServeArgs),
 
-    /// List the printers a print server knows about.
+    /// Find the printers on this machine and on this network.
     Printers(PrintersArgs),
     /// Send a PDF straight to a printer, at 100% and without scaling.
     Send(SendArgs),

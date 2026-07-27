@@ -10,7 +10,7 @@
 //! surface, so the program remains one file that runs on a machine with nothing
 //! installed — which is the whole promise, and a bundled browser would break it
 //! twice over: a hundred megabytes to download, and a network stack sitting
-//! inside a program that says it never uses the network.
+//! inside a program that says nothing of yours leaves the machine.
 
 // No console window behind the app on Windows. Left on for a debug build,
 // because that is where being able to see a panic is worth more.

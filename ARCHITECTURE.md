@@ -49,7 +49,7 @@ prints to nowhere. One file cannot be both.
 The obvious way to build a desktop application now is to wrap a browser engine.
 It is the wrong answer here twice over. It would add something like a hundred
 megabytes to a five-megabyte download, and it would put a full network stack
-inside a program whose central claim is that it never uses the network — a claim
+inside a program whose central claim is that nothing of yours leaves the machine — a claim
 that would then be impossible to verify by reading the code.
 
 So the window is [egui](https://github.com/emilk/egui), which draws every widget
