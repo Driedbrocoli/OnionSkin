@@ -309,37 +309,109 @@ pub fn compose_run_drawing(
     font: Option<&crate::font::EmbeddedFont>,
     options: &Options,
 ) -> Result<Outcome, PipelineError> {
-    // One output sheet per source page, which is the ordinary case: the delta
-    // has the same shape as the thing it is going onto.
-    let pages = source_page_count(source, options)?;
-    let mut sheets: Vec<Sheet> = (0..pages)
-        .map(|from| Sheet {
-            from,
-            items: Vec::new(),
-            shapes: Vec::new(),
-            images: Vec::new(),
-        })
-        .collect();
-    for item in items {
-        let index = item.page.saturating_sub(1);
-        let Some(sheet) = sheets.get_mut(index) else {
-            return Err(PipelineError::Invalid(format!(
-                "there is no page {} — the document has {pages}",
-                item.page
-            )));
-        };
-        sheet.items.push(item.clone());
-    }
-    for (page, shape) in shapes {
-        let index = page.saturating_sub(1);
-        let Some(sheet) = sheets.get_mut(index) else {
-            return Err(PipelineError::Invalid(format!(
+    compose_onto(
+        source,
+        Plan::PerPage {
+            items,
+            shapes,
+            images: &[],
+        },
+        output,
+        font,
+        options,
+    )
+}
+
+/// What is to go on the delta, before it is known how many pages the source
+/// has.
+///
+/// The page count can only be had by converting the source, and converting a
+/// Word file means running LibreOffice — so it must happen exactly once. An
+/// earlier version of this counted the pages first and then converted again
+/// inside, which doubled the slowest thing the program does.
+pub(crate) enum Plan<'a> {
+    /// One sheet per page of the source, each piece of text or drawing placed
+    /// by the page number it names.
+    PerPage {
+        items: &'a [crate::document::Item],
+        shapes: &'a [(usize, crate::pdf::PlacedShape)],
+        images: &'a [(usize, crate::pdf::PlacedImage)],
+    },
+    /// Many sheets, all onto the same page of the source: a certificate each
+    /// for two hundred people.
+    Repeat {
+        /// Counted from 1, as a person would say it.
+        from_page: usize,
+        per_sheet: &'a [Vec<crate::document::Item>],
+    },
+}
+
+impl Plan<'_> {
+    /// Turn the plan into one sheet per page of the delta, now that the
+    /// source has been opened and its page count is known.
+    fn sheets(&self, pages: usize) -> Result<Vec<Sheet>, PipelineError> {
+        let missing = |page: usize| {
+            PipelineError::Invalid(format!(
                 "there is no page {page} — the document has {pages}"
-            )));
+            ))
         };
-        sheet.shapes.push(shape.clone());
+        match self {
+            Plan::PerPage {
+                items,
+                shapes,
+                images,
+            } => {
+                let mut sheets: Vec<Sheet> = (0..pages)
+                    .map(|from| Sheet {
+                        from,
+                        items: Vec::new(),
+                        shapes: Vec::new(),
+                        images: Vec::new(),
+                    })
+                    .collect();
+                for item in *items {
+                    sheets
+                        .get_mut(item.page.saturating_sub(1))
+                        .ok_or_else(|| missing(item.page))?
+                        .items
+                        .push(item.clone());
+                }
+                for (page, shape) in *shapes {
+                    sheets
+                        .get_mut(page.saturating_sub(1))
+                        .ok_or_else(|| missing(*page))?
+                        .shapes
+                        .push(shape.clone());
+                }
+                for (page, image) in *images {
+                    sheets
+                        .get_mut(page.saturating_sub(1))
+                        .ok_or_else(|| missing(*page))?
+                        .images
+                        .push(image.clone());
+                }
+                Ok(sheets)
+            }
+            Plan::Repeat {
+                from_page,
+                per_sheet,
+            } => {
+                let from = from_page.saturating_sub(1);
+                if from >= pages {
+                    return Err(missing(*from_page));
+                }
+                Ok(per_sheet
+                    .iter()
+                    .map(|items| Sheet {
+                        from,
+                        items: items.clone(),
+                        shapes: Vec::new(),
+                        images: Vec::new(),
+                    })
+                    .collect())
+            }
+        }
     }
-    compose_onto(source, &sheets, output, font, options)
 }
 
 /// The same as `compose_run_drawing`, with pictures as well.
@@ -356,40 +428,17 @@ pub fn compose_run_pictures(
     font: Option<&crate::font::EmbeddedFont>,
     options: &Options,
 ) -> Result<Outcome, PipelineError> {
-    let pages = source_page_count(source, options)?;
-    let mut sheets: Vec<Sheet> = (0..pages)
-        .map(|from| Sheet {
-            from,
-            items: Vec::new(),
-            shapes: Vec::new(),
-            images: Vec::new(),
-        })
-        .collect();
-    let missing = |page: usize| {
-        PipelineError::Invalid(format!("there is no page {page} — the document has {pages}"))
-    };
-    for item in items {
-        sheets
-            .get_mut(item.page.saturating_sub(1))
-            .ok_or_else(|| missing(item.page))?
-            .items
-            .push(item.clone());
-    }
-    for (page, shape) in shapes {
-        sheets
-            .get_mut(page.saturating_sub(1))
-            .ok_or_else(|| missing(*page))?
-            .shapes
-            .push(shape.clone());
-    }
-    for (page, image) in images {
-        sheets
-            .get_mut(page.saturating_sub(1))
-            .ok_or_else(|| missing(*page))?
-            .images
-            .push(image.clone());
-    }
-    compose_onto(source, &sheets, output, font, options)
+    compose_onto(
+        source,
+        Plan::PerPage {
+            items,
+            shapes,
+            images,
+        },
+        output,
+        font,
+        options,
+    )
 }
 
 /// Many sheets from one page: a certificate each for two hundred people.
@@ -414,17 +463,16 @@ pub fn compose_sheets(
             "there are no sheets to make".to_string(),
         ));
     }
-    let from = from_page.saturating_sub(1);
-    let sheets: Vec<Sheet> = per_sheet
-        .iter()
-        .map(|items| Sheet {
-            from,
-            items: items.clone(),
-            shapes: Vec::new(),
-            images: Vec::new(),
-        })
-        .collect();
-    compose_onto(source, &sheets, output, font, options)
+    compose_onto(
+        source,
+        Plan::Repeat {
+            from_page,
+            per_sheet,
+        },
+        output,
+        font,
+        options,
+    )
 }
 
 /// One sheet of the delta: which page of the source it will be printed onto,
@@ -444,21 +492,9 @@ pub(crate) struct Sheet {
     pub images: Vec<crate::pdf::PlacedImage>,
 }
 
-/// How many pages the source has, without laying anything out.
-fn source_page_count(source: &Path, options: &Options) -> Result<usize, PipelineError> {
-    options.validate()?;
-    let engine = render::engine()?;
-    let workspace = Workspace::new(false)?;
-    let (source_pdf, _, _) = render::to_pdf_noting(source, &workspace.path, 180)?;
-    let doc = engine.open(&source_pdf)?;
-    let pages = doc.page_sizes.len();
-    drop(doc);
-    Ok(pages)
-}
-
 pub(crate) fn compose_onto(
     source: &Path,
-    sheets: &[Sheet],
+    plan: Plan<'_>,
     output: &Path,
     font: Option<&crate::font::EmbeddedFont>,
     options: &Options,
@@ -484,17 +520,11 @@ pub(crate) fn compose_onto(
     let (source_pdf, _, source_notes) = render::to_pdf_noting(source, work, 180)?;
     let doc = engine.open(&source_pdf)?;
 
-    // Every sheet takes the size and the frame of the source page it is going
-    // onto — which for a batch is the same page over and over.
-    for sheet in sheets {
-        if sheet.from >= doc.page_sizes.len() {
-            return Err(PipelineError::Invalid(format!(
-                "there is no page {} — the document has {}",
-                sheet.from + 1,
-                doc.page_sizes.len()
-            )));
-        }
-    }
+    // Now, and only now, is the page count known — and it cost one conversion
+    // rather than two. Every sheet takes the size and the frame of the source
+    // page it is going onto, which for a batch is the same page over and over.
+    let sheets = plan.sheets(doc.page_sizes.len())?;
+    let sheets = &sheets[..];
     let sizes: Vec<crate::geometry::PageSize> =
         sheets.iter().map(|s| doc.page_sizes[s.from]).collect();
     let frames: Vec<render::PageFrame> = sheets.iter().map(|s| doc.frames[s.from]).collect();

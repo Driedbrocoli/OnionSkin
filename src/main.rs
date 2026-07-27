@@ -498,6 +498,27 @@ struct NewArgs {
 
 // Positions on a page are routinely negative when someone is nudging
 // something, and a leading minus would otherwise read as another flag.
+/// The delta settings worth overriding for one run.
+///
+/// Flattened into `write`, `draw` and `batch` rather than repeated in each.
+/// Deliberately only two: the calibration profile and the resolution, which
+/// are the settings these commands actually act on. Boxes round the changes
+/// are not here, because only `delta` draws them — offering a flag that does
+/// nothing would be worse than offering none.
+///
+/// They exist because the stored settings are now honoured here at all. A
+/// setting that cannot be departed from for one run is not a preference, it
+/// is a rule, and stating a preference must not cost the ability to break it.
+#[derive(clap::Args, Clone, Default)]
+struct Tuning {
+    /// Which calibration profile to use, overriding any saved one.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+    /// Rendering resolution, overriding any saved one.
+    #[arg(long, value_name = "DPI")]
+    dpi: Option<f64>,
+}
+
 /// One sheet each, from a spreadsheet.
 ///
 /// Deliberately the same placement flags as `write`, because it is the same
@@ -555,6 +576,8 @@ struct BatchArgs {
     /// Open the stack when it is written.
     #[arg(long)]
     open: bool,
+    #[command(flatten)]
+    tuning: Tuning,
 }
 
 #[derive(clap::Args)]
@@ -620,6 +643,8 @@ struct WriteArgs {
     /// Open the delta when it is written.
     #[arg(long)]
     open: bool,
+    #[command(flatten)]
+    tuning: Tuning,
 }
 
 #[derive(clap::Args)]
@@ -677,6 +702,8 @@ struct DrawArgs {
     /// Open the delta when it is written.
     #[arg(long)]
     open: bool,
+    #[command(flatten)]
+    tuning: Tuning,
 }
 
 #[derive(clap::Args)]
@@ -1331,6 +1358,13 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     // Every copy is the same page, so the answer cannot differ between them.
     let anchors = batch_anchors(&args)?;
 
+    if args.first == Some(0) {
+        return Err(
+            "--first 0 would make no sheets at all. Leave it out to make one \
+             for everybody, or give the number to try first — --first 2."
+                .into(),
+        );
+    }
     let wanted = args.first.unwrap_or(list.rows.len()).min(list.rows.len());
     if args.first.is_some_and(|first| first < list.rows.len()) {
         println!(
@@ -1353,10 +1387,7 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         per_sheet.push(items);
     }
 
-    let options = pipeline::Options {
-        preview_dir: args.preview.clone(),
-        ..Default::default()
-    };
+    let options = options_from_settings(args.preview.clone(), &args.tuning)?;
     let outcome = pipeline::compose_sheets(
         &args.document,
         args.page,
@@ -2873,6 +2904,56 @@ fn delta_options(
     })
 }
 
+/// Options for the commands that make a delta without the full expert flags:
+/// `write`, `draw`, `batch`, and adding to a document.
+///
+/// The point is the middle step. A flag beats what this person chose for
+/// themselves, which beats Onionskin's own answer — and three commands were
+/// skipping the middle one entirely, so somebody who had calibrated their
+/// printer and set it as their default was told they had no profile and got
+/// two millimetres of error instead of half of one.
+fn options_from_settings(
+    preview: Option<PathBuf>,
+    tuning: &Tuning,
+) -> Result<pipeline::Options, String> {
+    let mine = onionskin::settings::load().defaults;
+    let mut options = pipeline::Options {
+        preview_dir: preview,
+        ..Default::default()
+    };
+
+    // Onionskin's own answer, then this person's, then the flag — each one
+    // written over the last, so the flag is what survives.
+    if let Some(dpi) = mine.dpi {
+        options.dpi = dpi;
+    }
+    if let Some(dpi) = tuning.dpi {
+        options.dpi = dpi;
+    }
+    if !(50.0..=1200.0).contains(&options.dpi) {
+        return Err("dpi must be between 50 and 1200".into());
+    }
+    if let Some(margin) = mine.margin_mm {
+        options.margin_mm = margin;
+    }
+    if let Some(mode) = mine.mode.as_deref().and_then(pipeline::Mode::parse) {
+        options.mode = mode;
+    }
+    if let Some(profile) = mine.profile.clone() {
+        options.profile = Some(profile);
+    }
+    if let Some(profile) = tuning.profile.clone() {
+        options.profile = Some(profile);
+    }
+
+    // The `outline` setting is deliberately not applied here. Boxes round the
+    // changes are drawn by the raster delta writer, which only the
+    // compare-two-documents path uses — so setting it and honouring it here
+    // would produce nothing, and a setting that quietly does nothing is worse
+    // than one that plainly does not apply. `delta` is where it works.
+    Ok(options)
+}
+
 /// Apply the expert settings, leaving anything not given at its default.
 ///
 /// Separate from [`delta_options`] so that the ordinary path reads as the
@@ -3350,11 +3431,9 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
         });
     }
 
-    let options = pipeline::Options {
-        margin_mm: args.margin,
-        preview_dir: args.preview.clone(),
-        ..Default::default()
-    };
+    let mut options = options_from_settings(args.preview.clone(), &Tuning::default())?;
+    // `add` has a margin flag of its own, which beats the stored one.
+    options.margin_mm = args.margin;
     let outcome = pipeline::compose_run(&args.scan, &items, &output, font.as_ref(), &options)
         .map_err(|e| e.to_string())?;
 
@@ -4038,10 +4117,7 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
     }
 
     let images = placed_images(&args.image, args.page)?;
-    let options = pipeline::Options {
-        preview_dir: args.preview.clone(),
-        ..Default::default()
-    };
+    let options = options_from_settings(args.preview.clone(), &args.tuning)?;
     let outcome = pipeline::compose_run_pictures(
         &args.document,
         &items,
@@ -4089,10 +4165,7 @@ fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> R
     let placed: Vec<(usize, onionskin::pdf::PlacedShape)> =
         shapes.iter().map(|shape| (shape.page, shape.placed())).collect();
 
-    let options = pipeline::Options {
-        preview_dir: args.preview.clone(),
-        ..Default::default()
-    };
+    let options = options_from_settings(args.preview.clone(), &args.tuning)?;
     let outcome =
         pipeline::compose_run_drawing(&args.document, &[], &placed, &output, None, &options)
             .map_err(|e| e.to_string())?;
@@ -5221,6 +5294,42 @@ mod naming_tests {
         let list = dir.join("people.csv");
         std::fs::write(&list, "name,course\nA. One,Bookbinding\nB. Two,Letterpress\n").unwrap();
         (sheet, list)
+    }
+
+    #[test]
+    fn a_saved_setting_reaches_the_commands_that_make_a_delta() {
+        // `write`, `draw` and `batch` were building their options from
+        // Onionskin's own defaults and skipping the middle step entirely, so
+        // somebody who had calibrated their printer and saved it as their
+        // default was told they had no profile — and got two millimetres of
+        // error where they should have had half of one.
+        //
+        // The settings file is process-wide, so this drives the pure part
+        // rather than the file: what matters is that a flag beats a stored
+        // value and a stored value beats nothing.
+        let nothing = Tuning::default();
+        let base = options_from_settings(None, &nothing).unwrap();
+        assert!(base.dpi >= 50.0);
+
+        let asked = Tuning {
+            profile: Some("office".to_string()),
+            dpi: Some(250.0),
+        };
+        let tuned = options_from_settings(None, &asked).unwrap();
+        assert_eq!(tuned.profile.as_deref(), Some("office"));
+        assert!((tuned.dpi - 250.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_silly_resolution_is_refused_where_it_is_typed() {
+        for silly in [0.0, 49.0, 1201.0] {
+            let asked = Tuning {
+                profile: None,
+                dpi: Some(silly),
+            };
+            let said = options_from_settings(None, &asked).unwrap_err();
+            assert!(said.contains("between 50 and 1200"), "{silly}: {said}");
+        }
     }
 
     #[test]

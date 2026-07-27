@@ -435,24 +435,28 @@ pub fn write_page_content_with_pictures(
     // on all two hundred sheets of a batch is carried once, not two hundred
     // times — which is the difference between a sensible file and one nobody
     // can email.
-    let mut pictures: Vec<(crate::picture::Picture, String)> = Vec::new();
+    // Matched on a fingerprint rather than by comparing the pictures
+    // themselves. Two hundred sheets carrying the same five-megabyte logo
+    // would otherwise be two hundred five-megabyte comparisons, and two
+    // hundred *different* pictures would be twenty thousand of them.
+    let mut pictures: BTreeMap<u64, String> = BTreeMap::new();
     let mut xobjects = lopdf::Dictionary::new();
     for images in images_per_page {
         for image in images {
-            if pictures.iter().any(|(seen, _)| seen == &image.picture) {
+            let mark = fingerprint(&image.picture);
+            if pictures.contains_key(&mark) {
                 continue;
             }
             let name = format!("Im{}", pictures.len());
             let id = add_picture(&mut doc, &image.picture);
             xobjects.set(name.clone(), Object::Reference(id));
-            pictures.push((image.picture.clone(), name));
+            pictures.insert(mark, name);
         }
     }
     let picture_key = |picture: &crate::picture::Picture| -> String {
         pictures
-            .iter()
-            .find(|(seen, _)| seen == picture)
-            .map(|(_, name)| name.clone())
+            .get(&fingerprint(picture))
+            .cloned()
             .unwrap_or_else(|| "Im0".to_string())
     };
 
@@ -720,6 +724,35 @@ fn add_picture(doc: &mut Document, picture: &crate::picture::Picture) -> lopdf::
             doc.add_object(Stream::new(entries, deflate(rgb)))
         }
     }
+}
+
+/// A number that stands for a picture, so two of them can be told apart
+/// without comparing every byte twice.
+///
+/// The size goes in as well as the pixels, so two pictures that happen to
+/// hash alike still have to differ in shape to collide — and a collision
+/// would only mean one picture drawn where another was meant, never a broken
+/// file. `DefaultHasher` is in the standard library, so this costs no
+/// dependency.
+fn fingerprint(picture: &crate::picture::Picture) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write_u32(picture.width());
+    hasher.write_u32(picture.height());
+    match picture {
+        crate::picture::Picture::Jpeg { bytes, .. } => {
+            hasher.write_u8(1);
+            hasher.write(bytes);
+        }
+        crate::picture::Picture::Samples { rgb, alpha, .. } => {
+            hasher.write_u8(2);
+            hasher.write(rgb);
+            if let Some(alpha) = alpha {
+                hasher.write(alpha);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 /// Deflate, which is what `FlateDecode` means.
