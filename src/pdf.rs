@@ -108,6 +108,22 @@ pub enum LineFont {
     Embedded,
 }
 
+/// A picture, positioned in page space (mm from the top-left).
+///
+/// `y_mm` is the *top* edge, not a baseline: a picture has no baseline, and
+/// somebody placing a signature is thinking about the box it fills rather
+/// than a line it sits on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedImage {
+    pub picture: crate::picture::Picture,
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub width_mm: f64,
+    pub height_mm: f64,
+    /// Turned clockwise on the page, about its top-left corner.
+    pub rotation_deg: f64,
+}
+
 /// A single line of text, positioned in page space (mm from the top-left).
 ///
 /// `y_mm` is the text *baseline*, not the top of the block — the caller has
@@ -325,6 +341,28 @@ pub fn write_page_content(
     title: &str,
     embedded: Option<&EmbeddedFont>,
 ) -> Result<(), PdfError> {
+    write_page_content_with_pictures(
+        path,
+        pages,
+        lines_per_page,
+        shapes_per_page,
+        &[],
+        title,
+        embedded,
+    )
+}
+
+/// The same, with pictures as well as words and drawings.
+#[allow(clippy::too_many_arguments)]
+pub fn write_page_content_with_pictures(
+    path: &Path,
+    pages: &[PageSize],
+    lines_per_page: &[Vec<PlacedLine>],
+    shapes_per_page: &[Vec<PlacedShape>],
+    images_per_page: &[Vec<PlacedImage>],
+    title: &str,
+    embedded: Option<&EmbeddedFont>,
+) -> Result<(), PdfError> {
     let mut doc = Document::with_version("1.4");
     let pages_id = doc.new_object_id();
 
@@ -393,7 +431,36 @@ pub fn write_page_content(
         font_dict.set(EMBEDDED_KEY, id);
     }
 
-    let resources_id = doc.add_object(dictionary! { "Font" => font_dict });
+    // One PDF object per distinct picture, however many pages use it. A logo
+    // on all two hundred sheets of a batch is carried once, not two hundred
+    // times — which is the difference between a sensible file and one nobody
+    // can email.
+    let mut pictures: Vec<(crate::picture::Picture, String)> = Vec::new();
+    let mut xobjects = lopdf::Dictionary::new();
+    for images in images_per_page {
+        for image in images {
+            if pictures.iter().any(|(seen, _)| seen == &image.picture) {
+                continue;
+            }
+            let name = format!("Im{}", pictures.len());
+            let id = add_picture(&mut doc, &image.picture);
+            xobjects.set(name.clone(), Object::Reference(id));
+            pictures.push((image.picture.clone(), name));
+        }
+    }
+    let picture_key = |picture: &crate::picture::Picture| -> String {
+        pictures
+            .iter()
+            .find(|(seen, _)| seen == picture)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| "Im0".to_string())
+    };
+
+    let mut resources = dictionary! { "Font" => font_dict };
+    if !xobjects.is_empty() {
+        resources.set("XObject", xobjects);
+    }
+    let resources_id = doc.add_object(resources);
 
     let mut page_ids: Vec<Object> = Vec::new();
     for (index, size) in pages.iter().enumerate() {
@@ -403,7 +470,21 @@ pub fn write_page_content(
         let glyphs = shaped.get(index).unwrap_or(&no_glyphs);
         let no_drawings: Vec<PlacedShape> = Vec::new();
         let drawings = shapes_per_page.get(index).unwrap_or(&no_drawings);
-        let content = page_content(size, lines, glyphs, drawings, &font_key, EMBEDDED_KEY)?;
+        let no_pictures: Vec<PlacedImage> = Vec::new();
+        let page_pictures = images_per_page.get(index).unwrap_or(&no_pictures);
+        let named: Vec<(String, &PlacedImage)> = page_pictures
+            .iter()
+            .map(|image| (picture_key(&image.picture), image))
+            .collect();
+        let content = page_content(
+            size,
+            lines,
+            glyphs,
+            drawings,
+            &named,
+            &font_key,
+            EMBEDDED_KEY,
+        )?;
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
 
         let page_id = doc.add_object(dictionary! {
@@ -573,6 +654,150 @@ const KAPPA: f64 = 0.552_284_749_831;
 
 /// The operators that draw one shape.
 ///
+/// Write a picture into the document, and hand back the object to draw it by.
+///
+/// A JPEG goes in as its own bytes with `DCTDecode`, which is PDF asking the
+/// reader to do the decoding it already knows how to do. Anything else goes
+/// in as plain samples, deflated — the only shape that can carry a PNG's
+/// transparency.
+///
+/// Transparency becomes an `/SMask`: a second, greyscale picture the same
+/// size where white shows the picture and black shows the paper. Without it a
+/// signature saved on a see-through background prints inside a white box, and
+/// the box covers the line it is meant to be sitting on.
+fn add_picture(doc: &mut Document, picture: &crate::picture::Picture) -> lopdf::ObjectId {
+    use crate::picture::Picture;
+    match picture {
+        Picture::Jpeg {
+            bytes,
+            width,
+            height,
+            grey,
+        } => doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => *width as i64,
+                "Height" => *height as i64,
+                "ColorSpace" => if *grey { "DeviceGray" } else { "DeviceRGB" },
+                "BitsPerComponent" => 8,
+                "Filter" => "DCTDecode",
+            },
+            bytes.clone(),
+        )),
+        Picture::Samples {
+            width,
+            height,
+            rgb,
+            alpha,
+        } => {
+            let mask = alpha.as_ref().map(|alpha| {
+                doc.add_object(Stream::new(
+                    dictionary! {
+                        "Type" => "XObject",
+                        "Subtype" => "Image",
+                        "Width" => *width as i64,
+                        "Height" => *height as i64,
+                        "ColorSpace" => "DeviceGray",
+                        "BitsPerComponent" => 8,
+                        "Filter" => "FlateDecode",
+                    },
+                    deflate(alpha),
+                ))
+            });
+            let mut entries = dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => *width as i64,
+                "Height" => *height as i64,
+                "ColorSpace" => "DeviceRGB",
+                "BitsPerComponent" => 8,
+                "Filter" => "FlateDecode",
+            };
+            if let Some(mask) = mask {
+                entries.set("SMask", Object::Reference(mask));
+            }
+            doc.add_object(Stream::new(entries, deflate(rgb)))
+        }
+    }
+}
+
+/// Deflate, which is what `FlateDecode` means.
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    // Writing to a Vec cannot fail, and neither can finishing it.
+    let _ = encoder.write_all(bytes);
+    encoder.finish().unwrap_or_default()
+}
+
+/// Where a picture goes and how big, as PDF operators.
+///
+/// PDF draws every image into the unit square and lets the matrix say where
+/// that square lands, so the width and height *are* the matrix. Page space is
+/// y-down from the top-left and PDF is y-up from the bottom, so the top edge
+/// given here becomes the bottom edge of the square down there.
+fn image_operations(size: &PageSize, name: &str, image: &PlacedImage) -> Vec<Operation> {
+    let w = mm_to_pt(image.width_mm);
+    let h = mm_to_pt(image.height_mm);
+    let x = mm_to_pt(image.x_mm);
+    // The picture hangs down from its top edge, so its bottom is that much
+    // lower — and in PDF's y-up world, that is where the unit square starts.
+    let y = size.height_pt() - mm_to_pt(image.y_mm) - h;
+
+    let mut operations = vec![Operation::new("q", vec![])];
+    if image.rotation_deg.abs() > 1e-9 {
+        // Turned about its top-left corner, which is the corner somebody
+        // placed. Page-space clockwise is counter-clockwise in y-up PDF.
+        let theta = (-image.rotation_deg).to_radians();
+        let (sin_t, cos_t) = theta.sin_cos();
+        let top = size.height_pt() - mm_to_pt(image.y_mm);
+        operations.push(Operation::new(
+            "cm",
+            vec![
+                Object::Real(cos_t as f32),
+                Object::Real(sin_t as f32),
+                Object::Real(-sin_t as f32),
+                Object::Real(cos_t as f32),
+                Object::Real(x as f32),
+                Object::Real(top as f32),
+            ],
+        ));
+        // Inside the turned frame the picture starts at the origin and hangs
+        // downwards, so its square begins one height below.
+        operations.push(Operation::new(
+            "cm",
+            vec![
+                Object::Real(w as f32),
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(h as f32),
+                Object::Real(0.0),
+                Object::Real(-h as f32),
+            ],
+        ));
+    } else {
+        operations.push(Operation::new(
+            "cm",
+            vec![
+                Object::Real(w as f32),
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(h as f32),
+                Object::Real(x as f32),
+                Object::Real(y as f32),
+            ],
+        ));
+    }
+    operations.push(Operation::new(
+        "Do",
+        vec![Object::Name(name.as_bytes().to_vec())],
+    ));
+    operations.push(Operation::new("Q", vec![]));
+    operations
+}
+
 /// Page space is y-down from the top-left and PDF is y-up from the bottom, so
 /// every y is turned over here — once, in one place, rather than at each call.
 fn shape_operations(size: &PageSize, shape: &PlacedShape) -> Vec<Operation> {
@@ -762,11 +987,13 @@ impl PathBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn page_content(
     size: &PageSize,
     lines: &[PlacedLine],
     glyphs_per_line: &[Option<Vec<crate::font::Glyph>>],
     drawings: &[PlacedShape],
+    images: &[(String, &PlacedImage)],
     font_key: &BTreeMap<&str, String>,
     embedded_key: &str,
 ) -> Result<Vec<u8>, PdfError> {
@@ -775,6 +1002,12 @@ fn page_content(
     // Drawings first, so a label written over a filled box stays readable.
     for shape in drawings {
         operations.extend(shape_operations(size, shape));
+    }
+
+    // Then pictures, then words: a signature goes over the ruled line it sits
+    // on, and anything written stays on top of everything.
+    for (name, image) in images {
+        operations.extend(image_operations(size, name, image));
     }
 
     for (index, line) in lines.iter().enumerate() {

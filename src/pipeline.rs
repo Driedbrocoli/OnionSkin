@@ -309,6 +309,160 @@ pub fn compose_run_drawing(
     font: Option<&crate::font::EmbeddedFont>,
     options: &Options,
 ) -> Result<Outcome, PipelineError> {
+    // One output sheet per source page, which is the ordinary case: the delta
+    // has the same shape as the thing it is going onto.
+    let pages = source_page_count(source, options)?;
+    let mut sheets: Vec<Sheet> = (0..pages)
+        .map(|from| Sheet {
+            from,
+            items: Vec::new(),
+            shapes: Vec::new(),
+            images: Vec::new(),
+        })
+        .collect();
+    for item in items {
+        let index = item.page.saturating_sub(1);
+        let Some(sheet) = sheets.get_mut(index) else {
+            return Err(PipelineError::Invalid(format!(
+                "there is no page {} — the document has {pages}",
+                item.page
+            )));
+        };
+        sheet.items.push(item.clone());
+    }
+    for (page, shape) in shapes {
+        let index = page.saturating_sub(1);
+        let Some(sheet) = sheets.get_mut(index) else {
+            return Err(PipelineError::Invalid(format!(
+                "there is no page {page} — the document has {pages}"
+            )));
+        };
+        sheet.shapes.push(shape.clone());
+    }
+    compose_onto(source, &sheets, output, font, options)
+}
+
+/// The same as `compose_run_drawing`, with pictures as well.
+///
+/// Signatures, stamps and logos: the commonest things anybody adds to a page
+/// that is already printed, and the ones that could not be added at all until
+/// now.
+pub fn compose_run_pictures(
+    source: &Path,
+    items: &[crate::document::Item],
+    shapes: &[(usize, crate::pdf::PlacedShape)],
+    images: &[(usize, crate::pdf::PlacedImage)],
+    output: &Path,
+    font: Option<&crate::font::EmbeddedFont>,
+    options: &Options,
+) -> Result<Outcome, PipelineError> {
+    let pages = source_page_count(source, options)?;
+    let mut sheets: Vec<Sheet> = (0..pages)
+        .map(|from| Sheet {
+            from,
+            items: Vec::new(),
+            shapes: Vec::new(),
+            images: Vec::new(),
+        })
+        .collect();
+    let missing = |page: usize| {
+        PipelineError::Invalid(format!("there is no page {page} — the document has {pages}"))
+    };
+    for item in items {
+        sheets
+            .get_mut(item.page.saturating_sub(1))
+            .ok_or_else(|| missing(item.page))?
+            .items
+            .push(item.clone());
+    }
+    for (page, shape) in shapes {
+        sheets
+            .get_mut(page.saturating_sub(1))
+            .ok_or_else(|| missing(*page))?
+            .shapes
+            .push(shape.clone());
+    }
+    for (page, image) in images {
+        sheets
+            .get_mut(page.saturating_sub(1))
+            .ok_or_else(|| missing(*page))?
+            .images
+            .push(image.clone());
+    }
+    compose_onto(source, &sheets, output, font, options)
+}
+
+/// Many sheets from one page: a certificate each for two hundred people.
+///
+/// Every sheet goes onto the *same* page of the source — the blank
+/// certificate, the pre-printed form — with different words on each. What
+/// comes out is one PDF of two hundred pages, which is a stack of paper
+/// through the printer once rather than two hundred separate jobs.
+///
+/// `from_page` is counted from 1, like every other page number a person
+/// types.
+pub fn compose_sheets(
+    source: &Path,
+    from_page: usize,
+    per_sheet: &[Vec<crate::document::Item>],
+    output: &Path,
+    font: Option<&crate::font::EmbeddedFont>,
+    options: &Options,
+) -> Result<Outcome, PipelineError> {
+    if per_sheet.is_empty() {
+        return Err(PipelineError::Invalid(
+            "there are no sheets to make".to_string(),
+        ));
+    }
+    let from = from_page.saturating_sub(1);
+    let sheets: Vec<Sheet> = per_sheet
+        .iter()
+        .map(|items| Sheet {
+            from,
+            items: items.clone(),
+            shapes: Vec::new(),
+            images: Vec::new(),
+        })
+        .collect();
+    compose_onto(source, &sheets, output, font, options)
+}
+
+/// One sheet of the delta: which page of the source it will be printed onto,
+/// and what goes on it.
+///
+/// Two very different jobs meet here. Writing on a document makes one sheet
+/// per page of it. Making two hundred certificates makes two hundred sheets
+/// that all go onto the *same* page — the blank certificate — with different
+/// words each time. Both are a list of sheets, so both get the same laying
+/// out, the same checks and the same registration, rather than a second
+/// delta pipeline that has to be kept honest separately.
+pub(crate) struct Sheet {
+    /// Index into the source document's pages.
+    pub from: usize,
+    pub items: Vec<crate::document::Item>,
+    pub shapes: Vec<crate::pdf::PlacedShape>,
+    pub images: Vec<crate::pdf::PlacedImage>,
+}
+
+/// How many pages the source has, without laying anything out.
+fn source_page_count(source: &Path, options: &Options) -> Result<usize, PipelineError> {
+    options.validate()?;
+    let engine = render::engine()?;
+    let workspace = Workspace::new(false)?;
+    let (source_pdf, _, _) = render::to_pdf_noting(source, &workspace.path, 180)?;
+    let doc = engine.open(&source_pdf)?;
+    let pages = doc.page_sizes.len();
+    drop(doc);
+    Ok(pages)
+}
+
+pub(crate) fn compose_onto(
+    source: &Path,
+    sheets: &[Sheet],
+    output: &Path,
+    font: Option<&crate::font::EmbeddedFont>,
+    options: &Options,
+) -> Result<Outcome, PipelineError> {
     options.validate()?;
     guard_output(output, &[source])?;
 
@@ -329,45 +483,45 @@ pub fn compose_run_drawing(
 
     let (source_pdf, _, source_notes) = render::to_pdf_noting(source, work, 180)?;
     let doc = engine.open(&source_pdf)?;
-    let sizes = doc.page_sizes.clone();
 
-    // Lay the text out against the pages it is going onto.
-    let mut per_page: Vec<Vec<crate::pdf::PlacedLine>> = vec![Vec::new(); sizes.len()];
-    for item in items {
-        let index = item.page.saturating_sub(1);
-        if index >= per_page.len() {
+    // Every sheet takes the size and the frame of the source page it is going
+    // onto — which for a batch is the same page over and over.
+    for sheet in sheets {
+        if sheet.from >= doc.page_sizes.len() {
             return Err(PipelineError::Invalid(format!(
                 "there is no page {} — the document has {}",
-                item.page,
-                sizes.len()
+                sheet.from + 1,
+                doc.page_sizes.len()
             )));
         }
-        per_page[index].extend(
-            item.lines(font)
-                .map_err(|e| PipelineError::Invalid(e.to_string()))?,
-        );
+    }
+    let sizes: Vec<crate::geometry::PageSize> =
+        sheets.iter().map(|s| doc.page_sizes[s.from]).collect();
+    let frames: Vec<render::PageFrame> = sheets.iter().map(|s| doc.frames[s.from]).collect();
+
+    // Lay the text out against the pages it is going onto.
+    let mut per_page: Vec<Vec<crate::pdf::PlacedLine>> = vec![Vec::new(); sheets.len()];
+    for (index, sheet) in sheets.iter().enumerate() {
+        for item in &sheet.items {
+            per_page[index].extend(
+                item.lines(font)
+                    .map_err(|e| PipelineError::Invalid(e.to_string()))?,
+            );
+        }
     }
 
-    // Shapes are placed by page the same way the words are, and a shape aimed
-    // at a page that is not there is the same mistake as a word aimed at one.
-    let mut drawings_per_page: Vec<Vec<crate::pdf::PlacedShape>> = vec![Vec::new(); sizes.len()];
-    for (page, shape) in shapes {
-        let index = page.saturating_sub(1);
-        if index >= drawings_per_page.len() {
-            return Err(PipelineError::Invalid(format!(
-                "there is no page {page} — the document has {}",
-                sizes.len()
-            )));
-        }
-        drawings_per_page[index].push(shape.clone());
-    }
+    let drawings_per_page: Vec<Vec<crate::pdf::PlacedShape>> =
+        sheets.iter().map(|s| s.shapes.clone()).collect();
+    let pictures_per_page: Vec<Vec<crate::pdf::PlacedImage>> =
+        sheets.iter().map(|s| s.images.clone()).collect();
 
     let staged = work.join("delta-raw.pdf");
-    crate::pdf::write_page_content(
+    crate::pdf::write_page_content_with_pictures(
         &staged,
         &sizes,
         &per_page,
         &drawings_per_page,
+        &pictures_per_page,
         "Onionskin delta",
         font,
     )
@@ -406,7 +560,7 @@ pub fn compose_run_drawing(
         };
 
         if let Some(dir) = &options.preview_dir {
-            let page = doc.render(index, options.dpi)?;
+            let page = doc.render(sheets[index].from, options.dpi)?;
             let image = preview_page(&diff, &page.gray, page.width);
             let path = dir.join(format!("page-{:03}.png", index + 1));
             image.save(&path)?;
@@ -455,7 +609,7 @@ pub fn compose_run_drawing(
         correction,
         &sizes,
     )?;
-    conform_to_source(&corrected, output, &doc.frames)?;
+    conform_to_source(&corrected, output, &frames)?;
 
     Ok(Outcome {
         output: output.to_path_buf(),

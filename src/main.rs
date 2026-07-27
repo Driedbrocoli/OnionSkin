@@ -19,7 +19,7 @@ use onionskin::geometry::{parse_page, PageSize};
 use onionskin::install;
 use onionskin::letters;
 use onionskin::package;
-use onionskin::pdf::{write_delta, Font, LineFont, PlacedLine};
+use onionskin::pdf::{write_delta, Font, LineFont, PlacedImage, PlacedLine};
 use onionskin::pipeline;
 use onionskin::printer;
 use onionskin::scan::{register, ScanOptions, ScanRegistration};
@@ -74,6 +74,8 @@ enum Command {
     Undo(UndoArgs),
     /// Delete the deltas Onionskin is holding on to.
     Tidy,
+    /// One sheet each for everybody on a list: certificates, tickets, forms.
+    Batch(BatchArgs),
     /// Write a document out as a PDF, whole or as a delta onto the printed sheet.
     Print(PrintArgs),
     /// Read the letters off a scanned page.
@@ -496,6 +498,65 @@ struct NewArgs {
 
 // Positions on a page are routinely negative when someone is nudging
 // something, and a leading minus would otherwise read as another flag.
+/// One sheet each, from a spreadsheet.
+///
+/// Deliberately the same placement flags as `write`, because it is the same
+/// question — where do the words go — asked once for two hundred sheets
+/// rather than once for one. The only new idea is `{column}`.
+#[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
+struct BatchArgs {
+    /// The printed sheet everybody's copy goes onto: the blank certificate,
+    /// the form, the ticket.
+    document: PathBuf,
+    /// The list, as a CSV file. Its first line names the columns.
+    #[arg(long = "from", value_name = "LIST.csv")]
+    from: PathBuf,
+    /// Where the words go, in millimetres, with {column} standing for each
+    /// person's own: '60,120:{name}'.
+    #[arg(long = "at", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
+    at: Vec<String>,
+    /// Just after something already printed on the sheet: 'Awarded to:{name}'.
+    #[arg(long = "after", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    after: Vec<String>,
+    /// One line below it: 'Name:{name}'.
+    #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    below: Vec<String>,
+    /// Which page of the sheet, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    /// Stop after this many, to try a few before committing the whole stack.
+    #[arg(long, value_name = "N")]
+    first: Option<usize>,
+    /// Type size in points.
+    #[arg(long, default_value_t = 11.0)]
+    size: f64,
+    /// A built-in font's name (see `onionskin fonts`).
+    #[arg(long, default_value_t = String::from("Helvetica"))]
+    font: String,
+    /// Wrap the words at this many millimetres.
+    #[arg(long)]
+    width: Option<f64>,
+    /// Turn the words, degrees clockwise on the page.
+    #[arg(long, default_value_t = 0.0)]
+    rotation: f64,
+    /// Colour as #rrggbb. Most printers only have black.
+    #[arg(long, default_value_t = String::from("#000000"))]
+    colour: String,
+    /// Space between wrapped lines, as a multiple of the type size.
+    #[arg(long, default_value_t = 1.2)]
+    leading: f64,
+    /// Where to write the stack of deltas.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Write proof images here, showing where the words land.
+    #[arg(long)]
+    preview: Option<PathBuf>,
+    /// Open the stack when it is written.
+    #[arg(long)]
+    open: bool,
+}
+
 #[derive(clap::Args)]
 #[command(allow_negative_numbers = true)]
 struct WriteArgs {
@@ -515,6 +576,14 @@ struct WriteArgs {
     /// 'Signature:J. Bezzina'.
     #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
     below: Vec<String>,
+    /// A picture to put on the page: a signature, a stamp, a logo.
+    ///
+    /// 'FILE:X,Y:WIDTH' — the file, where its top-left corner goes in
+    /// millimetres, and how wide it is in millimetres. The height follows the
+    /// picture's own shape, so it is never squashed. Give 'WIDTHxHEIGHT' to
+    /// set both: 'sign.png:120,240:40x15'.
+    #[arg(long = "image", value_name = "FILE:X,Y:SIZE")]
+    image: Vec<String>,
     /// Which page, counted from 1.
     #[arg(long, default_value_t = 1)]
     page: usize,
@@ -1041,6 +1110,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Erase(args) => cmd_erase(args),
         Command::Undo(args) => cmd_undo(args),
         Command::Tidy => cmd_tidy(),
+        Command::Batch(args) => cmd_batch(args),
         Command::Print(args) => cmd_print(args),
         Command::Read(args) => cmd_read(args),
         Command::Delta(args) => cmd_delta(args),
@@ -1116,13 +1186,18 @@ fn cmd_new(args: NewArgs) -> Result<ExitCode, String> {
 }
 
 fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
-    if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() {
+    if args.at.is_empty()
+        && args.after.is_empty()
+        && args.below.is_empty()
+        && args.image.is_empty()
+    {
         return Err(
             "nothing to write. Say where the words go — easiest first:\n    \
              --after 'Received:Approved 27 July'   just after something \
              already there\n    --below 'Signature:J. Bezzina'        one \
              line under it\n    --at '25,40:Dear Sir'                 \
-             millimetres measured on the paper"
+             millimetres measured on the paper\n    \
+             --image 'sign.png:120,240:40'        a signature, stamp or logo"
                 .into(),
         );
     }
@@ -1132,6 +1207,19 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
     // sheet is a different thing from editing what made it.
     if is_document(&args.document) {
         return write_on_document(&args);
+    }
+    // A picture on one of Onionskin's own documents would have to be stored
+    // in it, and the document format has no place for one yet. Saying so is
+    // better than writing the words and quietly dropping the signature.
+    if !args.image.is_empty() {
+        return Err(format!(
+            "a picture cannot be stored in an Onionskin document yet — only \
+             printed onto one.\n    Print it first, then put the picture on \
+             that:\n    onionskin print {} -o sheet.pdf\n    onionskin write \
+             sheet.pdf --image '{}'",
+            args.document.display(),
+            args.image[0]
+        ));
     }
 
     let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
@@ -1191,6 +1279,167 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// One sheet each for everybody on a list.
+///
+/// The anchors are worked out once, against the sheet itself, because the
+/// sheet is the same for everybody — only the words change. Two hundred
+/// certificates therefore cost one reading of the page, not two hundred.
+fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
+    if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() {
+        return Err(
+            "nothing to put on them. Say where the words go, with {column} \
+             standing for each person's own:\n    \
+             --after 'Awarded to:{name}'\n    --at '60,120:{name}'"
+                .into(),
+        );
+    }
+    let list = onionskin::rows::List::read(&args.from).map_err(|e| e.to_string())?;
+
+    // Every template checked against the columns before a single sheet is
+    // made. Two hundred certificates reading "{nmae}" is a discovery to make
+    // now, not at the printer.
+    let templates: Vec<String> = args
+        .at
+        .iter()
+        .chain(args.after.iter())
+        .chain(args.below.iter())
+        .cloned()
+        .collect();
+    let unknown = onionskin::rows::unknown_columns(&templates, &list);
+    if !unknown.is_empty() {
+        return Err(format!(
+            "{} has no column called {}.\n    It has: {}\n    \
+             {{number}} also works, and counts the sheets for you.",
+            args.from.display(),
+            unknown
+                .iter()
+                .map(|name| format!("'{name}'"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            list.describe_columns()
+        ));
+    }
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-batch", "pdf"));
+    refuse_to_clobber(&output, "stack", &[(&args.document, "sheet"), (&args.from, "list")])?;
+    check_writable(&output, "stack")?;
+
+    // Where the anchored words land, worked out once against the sheet.
+    // Every copy is the same page, so the answer cannot differ between them.
+    let anchors = batch_anchors(&args)?;
+
+    let wanted = args.first.unwrap_or(list.rows.len()).min(list.rows.len());
+    if args.first.is_some_and(|first| first < list.rows.len()) {
+        println!(
+            "Making the first {wanted} of {}, because --first says so.",
+            list.rows.len()
+        );
+    }
+
+    let mut per_sheet: Vec<Vec<Item>> = Vec::with_capacity(wanted);
+    for row in list.rows.iter().take(wanted) {
+        let mut items = Vec::new();
+        for placement in &args.at {
+            let ((x_mm, y_mm), text) = parse_placement(&onionskin::rows::fill(placement, row))?;
+            items.push(batch_item(&args, x_mm, y_mm, unescape(&text)));
+        }
+        for (x_mm, y_mm, template) in &anchors {
+            let text = onionskin::rows::fill(template, row);
+            items.push(batch_item(&args, *x_mm, *y_mm, unescape(&text)));
+        }
+        per_sheet.push(items);
+    }
+
+    let options = pipeline::Options {
+        preview_dir: args.preview.clone(),
+        ..Default::default()
+    };
+    let outcome = pipeline::compose_sheets(
+        &args.document,
+        args.page,
+        &per_sheet,
+        &output,
+        None,
+        &options,
+    )
+    .map_err(|e| e.to_string())?;
+
+    report_checks(&outcome.checks);
+    if outcome.blocked() {
+        eprintln!("\nBlocked — see above. Nothing worth printing was produced.");
+        return Ok(ExitCode::from(2));
+    }
+    println!(
+        "\n{}: {wanted} sheet{}, {} addition{} in all.",
+        output.display(),
+        if wanted == 1 { "" } else { "s" },
+        outcome.total_regions(),
+        if outcome.total_regions() == 1 { "" } else { "s" }
+    );
+    for path in &outcome.previews {
+        println!("proof: {}", path.display());
+    }
+    println!(
+        "\nPrinting a stack\n  \
+         1. Put {wanted} blank sheet{} in the tray, the same way up as the \
+         first one\n     you printed.\n  \
+         2. Print at 100% / \"Actual size\", with \"Fit to page\" off.\n  \
+         3. Try --first 2 and hold them against a real sheet before \
+         committing the stack.",
+        if wanted == 1 { "" } else { "s" }
+    );
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One piece of text on a batch sheet, set the way the flags asked for.
+fn batch_item(args: &BatchArgs, x_mm: f64, y_mm: f64, text: String) -> Item {
+    Item {
+        id: 0,
+        page: 1,
+        x_mm,
+        y_mm,
+        text,
+        size_pt: args.size,
+        font: args.font.clone(),
+        width_mm: args.width,
+        rotation_deg: args.rotation,
+        colour: args.colour.clone(),
+        leading: args.leading,
+    }
+}
+
+/// Resolve `--after` and `--below` against the sheet, once.
+///
+/// Returns where each one lands and the template that goes there. The anchor
+/// is read off the sheet itself — the words already printed on it — so it is
+/// the same for everybody on the list.
+fn batch_anchors(args: &BatchArgs) -> Result<Vec<(f64, f64, String)>, String> {
+    if args.after.is_empty() && args.below.is_empty() {
+        return Ok(Vec::new());
+    }
+    let page_text = read_a_document(&args.document)?;
+    let gap_mm = onionskin::geometry::pt_to_mm(args.size * 0.3);
+    let step_mm = onionskin::geometry::pt_to_mm(args.size * 1.15);
+
+    let mut out = Vec::new();
+    for (flag, put) in [
+        (&args.after, onionskin::anchor::Where::After),
+        (&args.below, onionskin::anchor::Where::Below),
+    ] {
+        for spec in flag {
+            let (anchor, text) = split_anchor(spec)?;
+            let placed = onionskin::anchor::place(&page_text, &anchor, put, gap_mm, step_mm)
+                .map_err(|e| e.to_string())?;
+            out.push((placed.x_mm, placed.y_mm, text));
+        }
+    }
+    Ok(out)
+}
+
 /// Work out where `--after` and `--below` put their words on a document.
 ///
 /// The document's own layout is used rather than a rendering of it, so the
@@ -1240,6 +1489,115 @@ fn anchored_places(
                 .map_err(|e| e.to_string())?;
             out.push((placed.x_mm, placed.y_mm, unescape(&text)));
         }
+    }
+    Ok(out)
+}
+
+/// Read `FILE:X,Y:WIDTH` or `FILE:X,Y:WIDTHxHEIGHT` into a placed picture.
+///
+/// The file name comes first and may itself contain colons — `C:\\scans\\a.png`
+/// on Windows does — so the two that matter are found from the *end*: the
+/// size after the last colon, the position after the one before it, and
+/// whatever is left in front is the name.
+///
+/// Giving only a width is the ordinary case. The height then follows the
+/// picture's own shape, because a signature squashed into a box it was not
+/// drawn for is worse than no signature at all.
+fn parse_image(spec: &str) -> Result<ImageSpec, String> {
+    let bad = || {
+        format!(
+            "bad picture '{spec}'. Expected 'FILE:X,Y:WIDTH' — the file, where \
+             its top-left corner goes in millimetres, and how wide it is:\n    \
+             --image 'signature.png:120,240:40'"
+        )
+    };
+    let (rest, size) = spec.rsplit_once(':').ok_or_else(bad)?;
+    let (file, position) = rest.rsplit_once(':').ok_or_else(bad)?;
+    if file.trim().is_empty() {
+        return Err(bad());
+    }
+
+    let (x, y) = position.split_once(',').ok_or_else(bad)?;
+    let x_mm: f64 = x.trim().parse().map_err(|_| bad())?;
+    let y_mm: f64 = y.trim().parse().map_err(|_| bad())?;
+
+    let (width, height) = match size.split_once(['x', 'X']) {
+        Some((w, h)) => (w.trim(), Some(h.trim())),
+        None => (size.trim(), None),
+    };
+    let width_mm: Option<f64> = if width.is_empty() {
+        None
+    } else {
+        Some(width.parse().map_err(|_| bad())?)
+    };
+    let height_mm: Option<f64> = match height {
+        Some(h) if !h.is_empty() => Some(h.parse().map_err(|_| bad())?),
+        _ => None,
+    };
+    if width_mm.is_none() && height_mm.is_none() {
+        return Err(bad());
+    }
+    for measure in [width_mm, height_mm].into_iter().flatten() {
+        if !(measure.is_finite() && measure > 0.0) {
+            return Err(format!(
+                "a picture cannot be {measure} mm across. Give a size greater \
+                 than nothing."
+            ));
+        }
+    }
+    Ok(ImageSpec {
+        path: PathBuf::from(file),
+        x_mm,
+        y_mm,
+        width_mm,
+        height_mm,
+    })
+}
+
+/// A `--image` as it was typed: which file, where its top-left corner goes,
+/// and whichever of the two measurements were given.
+#[derive(Debug, PartialEq)]
+struct ImageSpec {
+    path: PathBuf,
+    x_mm: f64,
+    y_mm: f64,
+    /// `None` when only a height was given, and the width is to follow the
+    /// picture's own shape.
+    width_mm: Option<f64>,
+    /// `None` when only a width was given, which is the ordinary case.
+    height_mm: Option<f64>,
+}
+
+/// Load every `--image` and work out the box each one fills.
+fn placed_images(specs: &[String], page: usize) -> Result<Vec<(usize, PlacedImage)>, String> {
+    let mut out = Vec::new();
+    for spec in specs {
+        let ImageSpec {
+            path,
+            x_mm,
+            y_mm,
+            width_mm,
+            height_mm,
+        } = parse_image(spec)?;
+        let picture = onionskin::picture::load(&path).map_err(|e| e.to_string())?;
+        // Whichever measurement was left out follows the picture's own shape.
+        let (width_mm, height_mm) = match (width_mm, height_mm) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, w / picture.aspect()),
+            (None, Some(h)) => (h * picture.aspect(), h),
+            (None, None) => unreachable!("parse_image refuses both missing"),
+        };
+        out.push((
+            page,
+            PlacedImage {
+                picture,
+                x_mm,
+                y_mm,
+                width_mm,
+                height_mm,
+                rotation_deg: 0.0,
+            },
+        ));
     }
     Ok(out)
 }
@@ -3679,12 +4037,21 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         });
     }
 
+    let images = placed_images(&args.image, args.page)?;
     let options = pipeline::Options {
         preview_dir: args.preview.clone(),
         ..Default::default()
     };
-    let outcome = pipeline::compose_run(&args.document, &items, &output, None, &options)
-        .map_err(|e| e.to_string())?;
+    let outcome = pipeline::compose_run_pictures(
+        &args.document,
+        &items,
+        &[],
+        &images,
+        &output,
+        None,
+        &options,
+    )
+    .map_err(|e| e.to_string())?;
 
     report_checks(&outcome.checks);
     if outcome.blocked() {
@@ -4821,6 +5188,177 @@ mod naming_tests {
 
         let doc = Document::load(&path).unwrap();
         assert_eq!(doc.items.len(), 1, "something was written anyway");
+    }
+
+    /// `onionskin batch …`, straight through the real parser.
+    fn batch_run(args: &[&str]) -> Result<ExitCode, String> {
+        let mut argv = vec!["onionskin", "batch"];
+        argv.extend_from_slice(args);
+        let Some(Command::Batch(parsed)) = Cli::parse_from(argv).command else {
+            panic!("batch did not parse");
+        };
+        cmd_batch(parsed)
+    }
+
+    /// A blank sheet to print onto, and a list of people.
+    fn a_sheet_and_a_list(dir: &Path) -> (PathBuf, PathBuf) {
+        let doc = dir.join("blank.onionskin");
+        Document::blank(onionskin::calibrate::A4, 1).save(&doc).unwrap();
+        let sheet = dir.join("sheet.pdf");
+        let Some(Command::Print(print)) = Cli::parse_from([
+            "onionskin",
+            "print",
+            doc.to_str().unwrap(),
+            "-o",
+            sheet.to_str().unwrap(),
+        ])
+        .command
+        else {
+            panic!("print did not parse");
+        };
+        cmd_print(print).unwrap();
+
+        let list = dir.join("people.csv");
+        std::fs::write(&list, "name,course\nA. One,Bookbinding\nB. Two,Letterpress\n").unwrap();
+        (sheet, list)
+    }
+
+    #[test]
+    fn a_picture_is_read_from_the_end_so_a_windows_path_still_works() {
+        // The file name comes first and may hold colons of its own, so the
+        // two parts that matter are found from the end.
+        let spec = parse_image("signature.png:120,240:40").unwrap();
+        assert_eq!(spec.path, PathBuf::from("signature.png"));
+        assert_eq!((spec.x_mm, spec.y_mm), (120.0, 240.0));
+        assert_eq!((spec.width_mm, spec.height_mm), (Some(40.0), None));
+
+        let spec = parse_image(r"C:\scans\sign.png:10,20:30").unwrap();
+        assert_eq!(spec.path, PathBuf::from(r"C:\scans\sign.png"));
+
+        // Both measurements, when somebody wants the box exactly.
+        let spec = parse_image("s.png:10,20:40x15").unwrap();
+        assert_eq!((spec.width_mm, spec.height_mm), (Some(40.0), Some(15.0)));
+    }
+
+    #[test]
+    fn a_picture_with_no_size_or_a_silly_one_is_refused_by_name() {
+        for bad in [
+            "signature.png",
+            "signature.png:120,240",
+            ":120,240:40",
+            "s.png:120:40",
+            "s.png:a,b:40",
+            "s.png:10,20:wide",
+        ] {
+            assert!(parse_image(bad).is_err(), "{bad} was accepted");
+        }
+        for silly in ["s.png:10,20:0", "s.png:10,20:-5"] {
+            let said = parse_image(silly).unwrap_err();
+            assert!(said.contains("greater than nothing"), "{said}");
+        }
+    }
+
+    #[test]
+    fn the_measurement_left_out_follows_the_pictures_own_shape() {
+        // A signature squashed into a box it was not drawn for is worse than
+        // no signature at all.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.png");
+        // Four across, one down: four times as wide as it is tall.
+        let mut img = image::RgbImage::new(4, 1);
+        for pixel in img.pixels_mut() {
+            *pixel = image::Rgb([0, 0, 0]);
+        }
+        img.save(&path).unwrap();
+
+        let spec = format!("{}:10,20:40", path.to_str().unwrap());
+        let placed = placed_images(&[spec], 1).unwrap();
+        assert_eq!(placed.len(), 1);
+        let image = &placed[0].1;
+        assert!((image.width_mm - 40.0).abs() < 1e-9);
+        assert!((image.height_mm - 10.0).abs() < 1e-9, "{image:?}");
+
+        // And giving only a height works the other way round.
+        let spec = format!("{}:10,20:x10", path.to_str().unwrap());
+        let placed = placed_images(&[spec], 1).unwrap();
+        assert!((placed[0].1.width_mm - 40.0).abs() < 1e-9, "{:?}", placed[0].1);
+    }
+
+    #[test]
+    fn a_picture_that_is_not_there_says_so_rather_than_writing_a_blank_page() {
+        let said = placed_images(&["nowhere.png:10,20:40".to_string()], 1).unwrap_err();
+        assert!(said.contains("nowhere.png"), "{said}");
+    }
+
+    #[test]
+    fn a_misspelt_column_is_caught_before_a_single_sheet_is_made() {
+        // Two hundred certificates reading "{nmae}" is a discovery to make
+        // now rather than at the printer, so this must not even reach the
+        // point of writing a file.
+        let dir = tempfile::tempdir().unwrap();
+        let (sheet, list) = a_sheet_and_a_list(dir.path());
+        let out = dir.path().join("stack.pdf");
+
+        let said = batch_run(&[
+            sheet.to_str().unwrap(),
+            "--from",
+            list.to_str().unwrap(),
+            "--at",
+            "60,140:{nmae}",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .unwrap_err();
+        assert!(said.contains("nmae"), "{said}");
+        // And says what it could have meant.
+        assert!(said.contains("{name}"), "{said}");
+        assert!(!out.exists(), "a stack was written anyway");
+    }
+
+    #[test]
+    fn first_makes_only_that_many() {
+        // Try two before committing two hundred sheets of paper.
+        let dir = tempfile::tempdir().unwrap();
+        let (sheet, list) = a_sheet_and_a_list(dir.path());
+        let out = dir.path().join("stack.pdf");
+        batch_run(&[
+            sheet.to_str().unwrap(),
+            "--from",
+            list.to_str().unwrap(),
+            "--at",
+            "60,140:{name}",
+            "--first",
+            "1",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(out.is_file());
+
+        // The real question is whose names are on it: the first person's and
+        // not the second's. Counting pages would pass even if both names had
+        // been printed on the one sheet.
+        let written = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+        assert!(written.contains("A. One"), "the first name is missing");
+        assert!(
+            !written.contains("B. Two"),
+            "--first 1 made a sheet for the second person too"
+        );
+    }
+
+    #[test]
+    fn batch_needs_to_be_told_where_the_words_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sheet, list) = a_sheet_and_a_list(dir.path());
+        let said = batch_run(&[
+            sheet.to_str().unwrap(),
+            "--from",
+            list.to_str().unwrap(),
+            "-o",
+            dir.path().join("stack.pdf").to_str().unwrap(),
+        ])
+        .unwrap_err();
+        assert!(said.contains("where the words go"), "{said}");
     }
 
     #[test]
