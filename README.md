@@ -1049,6 +1049,62 @@ onionskin fetch -o scan.png --scanner http://printer.local/eSCL --capabilities
 onionskin send delta.pdf --printer ipp://printer.local/ipp/print --copies 2
 ```
 
+## The same job, again next week
+
+An office does the same thing to the same form every day. The paid stamp goes at
+150,40 in nine point; the received date goes under the third line. Working that
+out once is fine — working it out again every Monday, out of a note in somebody's
+head or a shell history that has scrolled away, is how a box of letterhead gets
+reprinted.
+
+Save it once:
+
+```bash
+onionskin write invoice.pdf --at '150,40:PAID {today}' --size 9 --save-as paid
+```
+
+```
+Saved as job 'paid' in ~/.onionskin/jobs/paid.json.
+  onionskin job run paid <another document>
+```
+
+Run it on tomorrow's:
+
+```bash
+onionskin job run paid invoice-4472.pdf
+onionskin job list
+onionskin job show paid
+onionskin job delete paid
+```
+
+**`{today}` fills itself in.** It is the commonest thing anybody stamps onto a
+piece of paper, it is different every day, and somebody typing it by hand
+eventually stamps yesterday's. `{year}`, `{month}` and `{day}` too. Say
+`--set today=2026-07-26` and you are believed, for the post that should have
+gone out yesterday.
+
+**Anything else in braces is a blank the job will ask for**, and it asks
+*before* writing anything:
+
+```bash
+onionskin write letter.pdf --after 'Our ref:{ref}' --save-as our-ref
+onionskin job run our-ref letter.pdf
+```
+
+```
+error: job 'our-ref' needs {ref} filled in.
+    --set ref=…
+    onionskin job show our-ref   says what it wants and why
+```
+
+That is the same reasoning as the CSV batch: a hundred letters reading `{ref}`
+is a bad afternoon, and a hundred reading nothing at all is worse, because they
+look finished.
+
+`--dry-run` shows exactly what it would place, filled in, without writing a
+file. Running a job never re-saves it — otherwise "the job" quietly becomes
+whatever it was last used for, which is the one thing a saved job must not be.
+
 ## What was added to which sheet, and when
 
 Overprinting is the one thing Onionskin does that cannot be undone. Toner does

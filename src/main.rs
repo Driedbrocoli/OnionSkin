@@ -97,6 +97,9 @@ enum Command {
     Blanks(BlanksArgs),
     /// What was added to which sheet, and when.
     History(HistoryArgs),
+    /// Jobs you have saved, to run again on another document.
+    #[command(subcommand)]
+    Job(JobCommand),
     /// Measure a printer's second-pass registration, once per printer.
     #[command(subcommand)]
     Calibrate(CalibrateCommand),
@@ -558,6 +561,52 @@ struct BlanksArgs {
     json: bool,
 }
 
+#[derive(clap::Subcommand)]
+enum JobCommand {
+    /// List the jobs saved on this machine.
+    List,
+    /// Show one in full, including what it will ask for.
+    Show(JobName),
+    /// Run one on a document.
+    Run(RunJobArgs),
+    /// Delete one.
+    Delete(JobName),
+}
+
+#[derive(clap::Args)]
+struct JobName {
+    /// The job's name.
+    name: String,
+}
+
+/// Doing the same thing to today's document that was done to yesterday's.
+///
+/// An office does the same thing to the same form every day: the paid stamp at
+/// 150,40 in nine point, the received date under the third line. Working that
+/// out once is fine; working it out again every Monday out of a note in
+/// somebody's head is how a box of letterhead gets reprinted.
+#[derive(clap::Args)]
+struct RunJobArgs {
+    /// The job to run.
+    name: String,
+    /// The document to run it on.
+    document: PathBuf,
+    /// Fill in one of the job's blanks: --set ref=4471.
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    set: Vec<String>,
+    /// Delta PDF to write. Without it, beside the document.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Say what it would do without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
+    #[command(flatten)]
+    tuning: Tuning,
+}
+
 /// The record of what has been added to sheets of paper.
 ///
 /// "What did we add to that invoice, and when" is a question somebody asks
@@ -854,6 +903,9 @@ struct WriteArgs {
     /// Open the delta when it is written.
     #[arg(long)]
     open: bool,
+    /// Keep this as a named job, to run again on another document.
+    #[arg(long = "save-as", value_name = "NAME")]
+    save_as: Option<String>,
     #[command(flatten)]
     tuning: Tuning,
 }
@@ -1448,6 +1500,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Proof(args) => cmd_proof(args),
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
+        Command::Job(command) => cmd_job(command),
         Command::Calibrate(command) => cmd_calibrate(command),
         Command::Doctor => cmd_doctor(),
         Command::Serve(args) => {
@@ -1518,6 +1571,18 @@ fn cmd_new(args: NewArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The names Onionskin fills in without being asked: {today} and its family.
+///
+/// One place rather than three, because a `{today}` that works when the words
+/// are anchored and not when they are placed by millimetre is worse than one
+/// that never worked — nobody would report it, they would just stop using it.
+fn today_row() -> onionskin::rows::Row {
+    onionskin::jobs::values(
+        &std::collections::BTreeMap::new(),
+        onionskin::history::now(),
+    )
+}
+
 fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
     if args.at.is_empty()
         && args.after.is_empty()
@@ -1562,9 +1627,11 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
     // Half a page of new words and then a refusal would be the worst of both.
     let anchored = anchored_places(&document, &args)?;
 
+    let today = today_row();
     let mut added = Vec::new();
     for placement in &args.at {
-        let ((x_mm, y_mm), text) = parse_placement(placement)?;
+        let ((x_mm, y_mm), text) =
+            parse_placement(&onionskin::rows::fill(placement, &today))?;
         let item = Item {
             id: 0,
             page: args.page,
@@ -1597,6 +1664,7 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
         added.push(document.add(item).map_err(|e| e.to_string())?);
     }
     document.save(&args.document).map_err(|e| e.to_string())?;
+    save_the_job(&args);
 
     for id in &added {
         let item = document.get(*id).expect("just added");
@@ -1749,7 +1817,11 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         .chain(args.images.iter())
         .cloned()
         .collect();
-    let unknown = onionskin::rows::unknown_columns(&templates, &list);
+    let unknown: Vec<String> = onionskin::rows::unknown_columns(&templates, &list)
+        .into_iter()
+        // {today} is not a column and is not a mistake.
+        .filter(|name| !onionskin::jobs::known_without_asking(name))
+        .collect();
     if !unknown.is_empty() {
         return Err(format!(
             "{} has no column called {}.\n    It has: {}\n    \
@@ -1790,9 +1862,24 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         );
     }
 
+    // {today} and its relatives, available to every sheet alongside the
+    // columns. A certificate saying "Awarded {today}" should not need a column
+    // in the spreadsheet holding the same date two hundred times.
+    let known = onionskin::jobs::what_the_day_is(onionskin::history::now());
+
     let mut per_sheet: Vec<Vec<Item>> = Vec::with_capacity(wanted);
     let mut pictures_per_sheet: Vec<Vec<PlacedImage>> = Vec::with_capacity(wanted);
     for row in list.rows.iter().take(wanted) {
+        // A column of the same name wins: a list that carries its own dates,
+        // one per row, means them.
+        let row = &{
+            let mut values = known.clone();
+            values.extend(row.values.clone());
+            onionskin::rows::Row {
+                values,
+                number: row.number,
+            }
+        };
         let mut items = Vec::new();
         for placement in &args.at {
             let ((x_mm, y_mm), text) = parse_placement(&onionskin::rows::fill(placement, row))?;
@@ -1946,13 +2033,18 @@ fn anchored_places(
     let gap_mm = onionskin::geometry::pt_to_mm(args.size * 0.3);
     let step_mm = onionskin::geometry::pt_to_mm(args.size * 1.15);
 
+    // The same {today} the placed-by-millimetre route fills in. The anchor
+    // itself is filled too: "Invoice {year}:" is a perfectly ordinary thing to
+    // be looking for on a page.
+    let today = today_row();
+
     let mut out = Vec::new();
     for (flag, put) in [
         (&args.after, onionskin::anchor::Where::After),
         (&args.below, onionskin::anchor::Where::Below),
     ] {
         for wanted in flag {
-            let (anchor, text) = split_anchor(wanted)?;
+            let (anchor, text) = split_anchor(&onionskin::rows::fill(wanted, &today))?;
             let placed = onionskin::anchor::place_in(&rows, &anchor, put, gap_mm, step_mm)
                 .map_err(|e| e.to_string())?;
             out.push((placed.x_mm, placed.y_mm, unescape(&text)));
@@ -4608,6 +4700,193 @@ fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     })
 }
 
+/// Jobs saved on this machine.
+fn cmd_job(command: JobCommand) -> Result<ExitCode, String> {
+    match command {
+        JobCommand::List => {
+            let jobs = onionskin::jobs::list();
+            if jobs.is_empty() {
+                println!(
+                    "No jobs saved yet.\n\n\
+                     Add --save-as NAME to a write command and it is kept, ready to \
+                     run on\nanother document:\n  \
+                     onionskin write invoice.pdf --at '150,40:PAID {{today}}' --size 9 --save-as paid\n  \
+                     onionskin job run paid invoice-4472.pdf"
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("Saved jobs:\n");
+            for job in &jobs {
+                let wants = job.wants();
+                println!(
+                    "  {:<20} {} placement(s){}",
+                    job.name,
+                    job.templates().len(),
+                    if wants.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", asks for {}", wants.join(", "))
+                    }
+                );
+            }
+            println!("\nonionskin job show NAME   to see one in full");
+            Ok(ExitCode::SUCCESS)
+        }
+
+        JobCommand::Show(args) => {
+            let job = onionskin::jobs::load(&args.name).map_err(|e| e.to_string())?;
+            println!("{}", job.describe());
+            println!("\nKept in {}", onionskin::jobs::path_of(&job.name).display());
+            Ok(ExitCode::SUCCESS)
+        }
+
+        JobCommand::Delete(args) => {
+            if onionskin::jobs::delete(&args.name).map_err(|e| e.to_string())? {
+                println!("Deleted job '{}'.", args.name);
+            } else {
+                println!("There was no job called '{}'.", args.name);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        JobCommand::Run(args) => cmd_job_run(args),
+    }
+}
+
+/// Run a saved job on a document.
+fn cmd_job_run(args: RunJobArgs) -> Result<ExitCode, String> {
+    let job = onionskin::jobs::load(&args.name).map_err(|e| e.to_string())?;
+
+    let mut given = std::collections::BTreeMap::new();
+    for pair in &args.set {
+        let (name, value) = pair.split_once('=').ok_or_else(|| {
+            format!(
+                "bad --set '{pair}'. Expected NAME=VALUE, as in --set ref=4471."
+            )
+        })?;
+        if name.trim().is_empty() {
+            return Err(format!("bad --set '{pair}'. It has no name before the '='."));
+        }
+        given.insert(name.trim().to_string(), value.to_string());
+    }
+
+    // Everything the job needs, checked before a single word is placed. "You
+    // did not say what {ref} is" belongs at the keyboard, not on a hundred
+    // sheets of paper reading {ref}.
+    let missing = job.missing(&given);
+    if !missing.is_empty() {
+        return Err(format!(
+            "job '{}' needs {} filled in.\n    {}\n    \
+             onionskin job show {}   says what it wants and why",
+            job.name,
+            missing
+                .iter()
+                .map(|name| format!("{{{name}}}"))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            missing
+                .iter()
+                .map(|name| format!("--set {name}=…"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            job.name
+        ));
+    }
+
+    let row = onionskin::jobs::values(&given, onionskin::history::now());
+    let fill = |templates: &[String]| -> Vec<String> {
+        templates
+            .iter()
+            .map(|template| onionskin::rows::fill(template, &row))
+            .collect()
+    };
+
+    let written = WriteArgs {
+        document: args.document.clone(),
+        at: fill(&job.at),
+        after: fill(&job.after),
+        below: fill(&job.below),
+        image: fill(&job.images),
+        page: job.page,
+        size: job.size_pt,
+        font: job.font.clone(),
+        width: job.width_mm,
+        rotation: job.rotation_deg,
+        colour: job.colour.clone(),
+        leading: job.leading,
+        output: args.output.clone(),
+        preview: None,
+        open: args.open,
+        // Running a saved job does not re-save it. Saving on every run would
+        // make "the job" whatever it was last used for, which is the one thing
+        // a saved job must not be.
+        save_as: None,
+        tuning: args.tuning,
+    };
+
+    if args.dry_run {
+        println!("job '{}' on {}:\n", job.name, args.document.display());
+        for placement in &written.at {
+            println!("  at       {placement}");
+        }
+        for anchor in &written.after {
+            println!("  after    {anchor}");
+        }
+        for anchor in &written.below {
+            println!("  below    {anchor}");
+        }
+        for image in &written.image {
+            println!("  picture  {image}");
+        }
+        println!("\nNothing written — --dry-run.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("Running job '{}' on {}.", job.name, args.document.display());
+    write_on_document(&written)
+}
+
+/// Keep what was just written as a named job, if asked.
+fn save_the_job(args: &WriteArgs) {
+    let Some(name) = &args.save_as else { return };
+    let job = onionskin::jobs::Job {
+        name: name.clone(),
+        at: args.at.clone(),
+        after: args.after.clone(),
+        below: args.below.clone(),
+        images: args.image.clone(),
+        size_pt: args.size,
+        font: args.font.clone(),
+        colour: args.colour.clone(),
+        width_mm: args.width,
+        rotation_deg: args.rotation,
+        leading: args.leading,
+        page: args.page,
+        notes: String::new(),
+        created: onionskin::history::now(),
+    };
+    match onionskin::jobs::save(&job) {
+        Ok(path) => {
+            println!("\nSaved as job '{name}' in {}.", path.display());
+            println!("  onionskin job run {name} <another document>");
+            let wants = job.wants();
+            if !wants.is_empty() {
+                println!(
+                    "  It will ask for {} — the words in braces were kept as blanks.",
+                    wants
+                        .iter()
+                        .map(|w| format!("{{{w}}}"))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                );
+            }
+        }
+        // Not a failure of the delta, which is written and correct. Saying so
+        // and carrying on beats throwing away work that succeeded.
+        Err(e) => eprintln!("\nThe delta was written, but the job was not saved: {e}"),
+    }
+}
+
 /// Show what has been added to sheets of paper.
 fn cmd_history(args: HistoryArgs) -> Result<ExitCode, String> {
     if args.forget {
@@ -5004,8 +5283,21 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
     refuse_to_clobber(&output, "delta", &[(&args.document, "document")])?;
     check_writable(&output, "delta")?;
 
+    // {today} and its relatives, filled in before anything is placed. It is
+    // the commonest thing anybody stamps onto a piece of paper, it is
+    // different every day, and somebody typing it by hand eventually stamps
+    // yesterday's. Anything else in braces is left visible, so a name that
+    // stands for nothing is obvious rather than silently blank.
+    let today = today_row();
+    let dated = |templates: &[String]| -> Vec<String> {
+        templates
+            .iter()
+            .map(|template| onionskin::rows::fill(template, &today))
+            .collect()
+    };
+
     let mut items = Vec::new();
-    for placement in &args.at {
+    for placement in &dated(&args.at) {
         let ((x_mm, y_mm), text) = parse_placement(placement)?;
         items.push(Item {
             id: 0,
@@ -5022,7 +5314,7 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         });
     }
 
-    let images = placed_images(&args.image, args.page)?;
+    let images = placed_images(&dated(&args.image), args.page)?;
     let options = options_from_settings(args.preview.clone(), &args.tuning)?;
     let outcome = pipeline::compose_run_pictures(
         &args.document,
@@ -5052,6 +5344,7 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         println!("proof: {}", path.display());
     }
     note_the_delta(&args.document, &output, outcome.total_regions(), outcome.pages.len());
+    save_the_job(args);
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)

@@ -119,6 +119,17 @@ fn values_go_into_a_line_where_the_column_is_named() {
 }
 
 #[test]
+fn a_list_with_its_own_number_column_means_those_numbers() {
+    // The bug this pins: `{number}` used to be answered by the row counter
+    // before the columns were even looked at, so a list of invoices keyed by a
+    // "number" column printed 1, 2, 3 instead of the real numbers — wrong in a
+    // way nobody notices until they are in the post.
+    let list = list_of("number,name\n4471,Wickham\n4472,Ashby\n");
+    assert_eq!(fill("Invoice {number}", &list.rows[0]), "Invoice 4471");
+    assert_eq!(fill("Invoice {number}", &list.rows[1]), "Invoice 4472");
+}
+
+#[test]
 fn the_row_can_number_itself_without_a_column_of_numbers() {
     // Tickets and invoices: "No. 1", "No. 2" with nothing in the file.
     let list = list_of("name\nA\nB\nC\n");

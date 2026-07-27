@@ -259,16 +259,19 @@ pub fn fill(template: &str, row: &Row) -> String {
             return out;
         };
         let name = &after[..close];
-        match name {
-            "number" => out.push_str(&row.number.to_string()),
-            _ => match row.get(name) {
-                Some(value) => out.push_str(value),
-                None => {
-                    out.push('{');
-                    out.push_str(name);
-                    out.push('}');
-                }
-            },
+        // A column wins over the counter. `{number}` counts the sheets when
+        // the list has no column of that name — but a list that *does* have
+        // one means those numbers, and a run of invoices printed 1, 2, 3
+        // instead of their real numbers is wrong in a way nobody notices
+        // until they are in the post.
+        match row.get(name) {
+            Some(value) => out.push_str(value),
+            None if name == "number" => out.push_str(&row.number.to_string()),
+            None => {
+                out.push('{');
+                out.push_str(name);
+                out.push('}');
+            }
         }
         rest = &after[close + 1..];
     }

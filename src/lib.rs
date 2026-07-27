@@ -11,6 +11,7 @@ pub mod font;
 pub mod geometry;
 pub mod history;
 pub mod install;
+pub mod jobs;
 pub mod letters;
 pub mod office;
 pub mod package;
