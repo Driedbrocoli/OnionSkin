@@ -423,6 +423,76 @@ look nothing like Courier.
 A blank page, a poor scan or a machine with no fonts all mean "use the default"
 rather than an error. `--font`, `--size` and `--no-match-font` all still win.
 
+### One sheet each, for everybody on a list
+
+Two hundred certificates. Two hundred names. One command.
+
+```bash
+onionskin batch certificate.pdf --from people.csv \
+    --after 'Awarded to:{name}' \
+    --at '60,140:{course} — no. {number}' \
+    -o certificates.pdf
+```
+
+```
+certificates.pdf: 3 sheets, 6 additions in all.
+```
+
+The list is an ordinary spreadsheet saved as CSV. Its first line names the
+columns, and `{name}` anywhere in a placement means that person's own. There
+is also `{number}`, which counts the sheets for you — invoice numbers, ticket
+numbers and asset tags need no column of their own.
+
+Out comes one PDF with one page per person: a stack through the printer once,
+not two hundred separate jobs.
+
+**Before you commit two hundred sheets of paper:**
+
+```bash
+onionskin batch certificate.pdf --from people.csv --after 'Awarded to:{name}' --first 2
+```
+
+`--first 2` makes two, so you can hold a real one against a real sheet.
+
+A column name that does not exist is caught **before anything is written**:
+
+```
+error: people.csv has no column called 'nmae'.
+    It has: {name}, {course}
+    {number} also works, and counts the sheets for you.
+```
+
+That check matters more than it looks. Two hundred certificates reading
+`{nmae}` is a bad day; two hundred reading *nothing at all* is worse, because
+the stack looks right until somebody reads one. So a name in braces that is
+not a column is left visible rather than quietly blanked.
+
+Commas and line breaks inside a value are fine as long as the value is
+quoted, which every spreadsheet does for you — `"Smith, John"` stays one name,
+and an address typed across two lines of one cell stays one address.
+
+### A signature, a stamp, or a logo
+
+The commonest thing anybody adds to a document that is already printed:
+
+```bash
+onionskin write contract.pdf --image 'signature.png:120,240:40'
+```
+
+The file, where its top-left corner goes in millimetres, and how wide it is.
+The height follows the picture's own shape, so a signature is never squashed
+into a box it was not drawn for. Give `40x15` if you want both exactly.
+
+**Transparency is carried through.** A signature saved on a see-through
+background prints as a signature — not as a signature inside a white
+rectangle covering the ruled line it is meant to be sitting on. PNG, JPEG,
+TIFF and BMP all work.
+
+A JPEG is passed through exactly as it arrived, because PDF reads JPEG
+itself; a photographed letterhead stays the size it was instead of becoming
+megabytes of raw pixels. A logo used on all two hundred sheets of a batch is
+stored once.
+
 ### Fill in a sheet you only have as a scan
 
 ```bash

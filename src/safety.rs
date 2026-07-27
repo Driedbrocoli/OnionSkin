@@ -252,6 +252,105 @@ pub fn check_margins(diff: &PageDiff, margin_mm: f64) -> Vec<Check> {
     .on_page(diff.index + 1)]
 }
 
+/// How much of what is underneath an addition may be dark before the addition
+/// stops being readable.
+///
+/// A word crossing a ruled line covers very little of its own box and prints
+/// perfectly well. A word on top of a logo covers most of it, and does not.
+/// A third of the way between is where it stops being worth the sheet.
+pub const UNREADABLE_FRACTION: f64 = 0.35;
+
+/// Resolution to look at the page underneath.
+///
+/// Deliberately coarse. The question is "is there a dark blob here", not
+/// "which letter is this", and asking it at printing resolution would double
+/// the rendering the delta already costs to answer something a thumbnail
+/// settles. At this size a whole page is about half a megabyte.
+pub const BENEATH_DPI: f64 = 100.0;
+
+/// Will the additions actually be readable where they land?
+///
+/// A printer adds toner; it cannot take it away. Black words printed onto a
+/// black logo are invisible, and there is no way to find that out except by
+/// printing the sheet — unless something already knows what is on it.
+/// Onionskin does know, because it has the page in order to compare against
+/// it.
+///
+/// `beneath` is the source page in greyscale at `dpi`, which need not be —
+/// and for the sake of the time it takes, should not be — the resolution the
+/// delta itself was measured at.
+pub fn check_legibility(
+    diff: &PageDiff,
+    beneath: &[u8],
+    width: usize,
+    dpi: f64,
+    ink_threshold: u8,
+) -> Vec<Check> {
+    if diff.added_regions.is_empty() || width == 0 || beneath.is_empty() || dpi <= 0.0 {
+        return Vec::new();
+    }
+    let height = beneath.len() / width;
+
+    let mut worst: Option<(crate::diff::Region, f64)> = None;
+    let mut offenders = 0usize;
+    for region in &diff.added_regions {
+        // The region is in millimetres on the paper, so it maps onto any
+        // rendering of that paper whatever resolution it was drawn at.
+        let x0 = crate::geometry::mm_to_px(region.x0_mm, dpi).floor().max(0.0) as usize;
+        let y0 = crate::geometry::mm_to_px(region.y0_mm, dpi).floor().max(0.0) as usize;
+        let x1 = (crate::geometry::mm_to_px(region.x1_mm, dpi).ceil().max(0.0) as usize).min(width);
+        let y1 = (crate::geometry::mm_to_px(region.y1_mm, dpi).ceil().max(0.0) as usize).min(height);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+
+        let mut dark = 0usize;
+        let mut seen = 0usize;
+        for y in y0..y1 {
+            for value in &beneath[y * width + x0..y * width + x1] {
+                if *value < ink_threshold {
+                    dark += 1;
+                }
+                seen += 1;
+            }
+        }
+        if seen == 0 {
+            continue;
+        }
+        let fraction = dark as f64 / seen as f64;
+        if fraction >= UNREADABLE_FRACTION {
+            offenders += 1;
+            // Not `is_none_or`, which needs a newer Rust than this builds on.
+            let this_is_worse = match worst {
+                Some((_, had)) => fraction > had,
+                None => true,
+            };
+            if this_is_worse {
+                worst = Some((*region, fraction));
+            }
+        }
+    }
+
+    let Some((region, fraction)) = worst else {
+        return Vec::new();
+    };
+    vec![Check::new(
+        Severity::Warning,
+        "legibility",
+        format!("{offenders} addition(s) land on ink that is already there."),
+    )
+    .with_detail(format!(
+        "The worst is at {:.0},{:.0} mm, where {:.0}% of the paper underneath \
+         is already dark. A printer can only add toner, never take it away, so \
+         black on black stays black. Move it onto clear paper, or print the \
+         whole sheet again instead of adding to it.",
+        region.x0_mm,
+        region.y0_mm,
+        fraction * 100.0
+    ))
+    .on_page(diff.index + 1)]
+}
+
 /// A delta covering a lot of the page usually means something reflowed in a way
 /// the ink test did not catch.
 pub fn check_coverage(diff: &PageDiff) -> Vec<Check> {
@@ -421,3 +520,102 @@ fn trim_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod legibility_tests {
+    use super::*;
+    use crate::diff::{Mask, PageDiff, Region};
+    use crate::calibrate::A4;
+
+    /// A page of the given size, all paper, with one dark rectangle on it.
+    fn page_with_a_blot(dpi: f64, blot: (f64, f64, f64, f64)) -> (Vec<u8>, usize) {
+        let (w, h) = A4.px_size(dpi);
+        let (w, h) = (w as usize, h as usize);
+        let mut gray = vec![255u8; w * h];
+        let px = |mm: f64| crate::geometry::mm_to_px(mm, dpi).round() as usize;
+        for y in px(blot.1)..px(blot.3).min(h) {
+            for x in px(blot.0)..px(blot.2).min(w) {
+                gray[y * w + x] = 0;
+            }
+        }
+        (gray, w)
+    }
+
+    /// A diff whose only addition is the given box, in millimetres.
+    fn diff_adding(area: (f64, f64, f64, f64)) -> PageDiff {
+        PageDiff {
+            index: 0,
+            size: A4,
+            dpi: 400.0,
+            added: Mask::blank(1, 1),
+            removed: Mask::blank(1, 1),
+            added_px: 1,
+            removed_px: 0,
+            added_regions: vec![Region {
+                x0_mm: area.0,
+                y0_mm: area.1,
+                x1_mm: area.2,
+                y1_mm: area.3,
+                ink_mm2: 1.0,
+                px_bbox: (0, 0, 1, 1),
+            }],
+            removed_regions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn words_landing_on_a_dark_logo_are_reported_before_the_sheet_is_wasted() {
+        // A printer can only add toner. Black on black stays black, and the
+        // only other way to find that out is to print it.
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (40.0, 100.0, 90.0, 130.0));
+        let diff = diff_adding((50.0, 110.0, 80.0, 120.0));
+        let checks = check_legibility(&diff, &gray, width, BENEATH_DPI, 128);
+        assert_eq!(checks.len(), 1, "{checks:?}");
+        assert_eq!(checks[0].severity, Severity::Warning);
+        assert!(checks[0].detail.contains("already dark"), "{:?}", checks[0]);
+        // And says where, so it can be moved.
+        assert!(checks[0].detail.contains("50,110"), "{:?}", checks[0]);
+    }
+
+    #[test]
+    fn words_on_clear_paper_say_nothing_at_all() {
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (40.0, 100.0, 90.0, 130.0));
+        // Well away from the blot.
+        let diff = diff_adding((120.0, 200.0, 160.0, 210.0));
+        assert!(check_legibility(&diff, &gray, width, BENEATH_DPI, 128).is_empty());
+    }
+
+    #[test]
+    fn a_word_merely_crossing_a_ruled_line_is_not_complained_about() {
+        // The ordinary case of filling in a form: the words sit on the line
+        // they are meant to sit on, and print perfectly well. Warning about
+        // that would make the check noise, and noise gets turned off.
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (40.0, 119.5, 160.0, 120.0));
+        let diff = diff_adding((50.0, 112.0, 120.0, 120.0));
+        assert!(
+            check_legibility(&diff, &gray, width, BENEATH_DPI, 128).is_empty(),
+            "a word on a ruled line was complained about"
+        );
+    }
+
+    #[test]
+    fn nothing_to_check_is_not_an_error() {
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (0.0, 0.0, 10.0, 10.0));
+        let mut diff = diff_adding((50.0, 110.0, 80.0, 120.0));
+        diff.added_regions.clear();
+        assert!(check_legibility(&diff, &gray, width, BENEATH_DPI, 128).is_empty());
+        // And neither is having no page to look at.
+        let diff = diff_adding((50.0, 110.0, 80.0, 120.0));
+        assert!(check_legibility(&diff, &[], 0, BENEATH_DPI, 128).is_empty());
+        assert!(check_legibility(&diff, &gray, width, 0.0, 128).is_empty());
+    }
+
+    #[test]
+    fn a_region_running_off_the_page_is_clipped_rather_than_panicking() {
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (0.0, 0.0, 210.0, 297.0));
+        let diff = diff_adding((190.0, 280.0, 400.0, 500.0));
+        // All dark, so it warns — the point is that it does not panic.
+        let checks = check_legibility(&diff, &gray, width, BENEATH_DPI, 128);
+        assert_eq!(checks.len(), 1, "{checks:?}");
+    }
+}

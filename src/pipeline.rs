@@ -534,6 +534,19 @@ pub(crate) fn compose_onto(
     let mut diffs: Vec<PageDiff> = Vec::new();
     let mut previews: Vec<PathBuf> = Vec::new();
 
+    // The page underneath, small, so the legibility check can ask what is
+    // already inked where the additions land. Kept by source page rather than
+    // by sheet: two hundred certificates all go onto the same blank, and
+    // drawing it two hundred times to ask the same question would be absurd.
+    let mut beneath: std::collections::BTreeMap<usize, (Vec<u8>, usize)> =
+        std::collections::BTreeMap::new();
+    for sheet in sheets {
+        if let std::collections::btree_map::Entry::Vacant(slot) = beneath.entry(sheet.from) {
+            let small = doc.render(sheet.from, safety::BENEATH_DPI)?;
+            slot.insert((small.gray, small.width));
+        }
+    }
+
     for (index, size) in sizes.iter().enumerate() {
         let drawn = composed.render(index, options.dpi)?;
         let added = crate::diff::ink_mask(
@@ -574,6 +587,15 @@ pub(crate) fn compose_onto(
     for diff in &diffs {
         checks.extend(safety::check_margins(diff, options.margin_mm));
         checks.extend(safety::check_coverage(diff));
+        if let Some((gray, width)) = beneath.get(&sheets[diff.index].from) {
+            checks.extend(safety::check_legibility(
+                diff,
+                gray,
+                *width,
+                safety::BENEATH_DPI,
+                options.diff.ink_threshold,
+            ));
+        }
     }
     checks.extend(safety::check_empty(&diffs));
     checks.extend(safety::check_calibration(
