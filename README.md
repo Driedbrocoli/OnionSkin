@@ -837,6 +837,38 @@ say an addition would land on existing ink; it cannot know that two sheets of
 the same letterhead are different copies. It reports what it found and how close
 everything came, and leaves the last word to you.
 
+### Which document is this sheet?
+
+A stack comes back from the scanner named `Scan_0007`, and the documents they
+were printed from are somewhere on a disk. Matching them up is somebody's
+afternoon.
+
+```bash
+onionskin which Scan_0007.pdf --among invoices/*.pdf
+```
+
+```
+This is invoices/march-4471.pdf.
+
+How unlike each one it is, closest first:
+    0.0309  invoices/march-4471.pdf
+    0.9945  invoices/march-4470.pdf
+    1.0000  invoices/february-4402.pdf
+```
+
+It compares where the ink is, not what it says — a coarse map of the page on
+the paper's own grid. That means it needs no font on the machine, survives a
+smudge, and works on a document nobody present can read: a form in an
+unfamiliar script, a page of diagrams, a letterhead in another language. A scan
+at 150 dpi and the original at 400 give the same map, because the map is
+measured in millimetres of paper rather than in pixels. A copy with something
+written on it still matches the form it came from.
+
+It cannot tell two filled-in copies of the same form apart — they *are* the same
+document with different words on them. When two candidates look alike it says
+so rather than picking one, and exits 2 so a script stops and asks instead of
+filing the sheet wrongly.
+
 ### Several deltas, one pass through the printer
 
 A day's work on one document arrives as more than one delta. The paid stamp is a

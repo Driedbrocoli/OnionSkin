@@ -98,6 +98,8 @@ enum Command {
     /// Check the sheet in your hand is the one a delta was made for, before
     /// printing onto it.
     Fits(FitsArgs),
+    /// Work out which of several documents a scanned sheet came from.
+    Which(WhichArgs),
     /// See the sheet with the delta on it, before printing either.
     Proof(ProofArgs),
     /// Put several deltas onto one, so the sheet goes through once.
@@ -482,6 +484,24 @@ struct LearnArgs {
 /// certificates go in the envelopes and the mistake surfaces at the far end.
 ///
 /// So: scan the first one, and be told.
+#[derive(clap::Args)]
+struct WhichArgs {
+    /// The sheet to identify: a scan, a photograph, or a PDF of it.
+    sheet: PathBuf,
+    /// The documents it might be. Give as many as you like.
+    #[arg(long = "among", value_name = "FILE", num_args = 1.., required = true)]
+    among: Vec<PathBuf>,
+    /// The paper it is. Not needed for a PDF, which says what size it is.
+    #[arg(long, default_value_t = default_page())]
+    page: String,
+    /// The scan is already cropped to the sheet.
+    #[arg(long)]
+    cropped: bool,
+    /// The sheet is square in the scan; do not look for skew.
+    #[arg(long)]
+    square: bool,
+}
+
 #[derive(clap::Args)]
 struct FitsArgs {
     /// A scan or photograph of the sheet you are about to feed, or the
@@ -1645,6 +1665,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Compare(args) => cmd_compare(args),
         Command::Verify(args) => cmd_verify(args),
         Command::Fits(args) => cmd_fits(args),
+        Command::Which(args) => cmd_which(args),
         Command::Proof(args) => cmd_proof(args),
         Command::Merge(args) => cmd_merge(args),
         Command::Blanks(args) => cmd_blanks(args),
@@ -3602,6 +3623,14 @@ fn expert_options(
 /// Somebody working in a country that uses Letter should say so once rather
 /// than on every command they ever type. Onionskin's own answer is A4, which
 /// is right for most of the world and wrong for a great many people every day.
+/// What a sheet is straightened to before it is measured against something.
+///
+/// Coarse on purpose: both the questions asked at this resolution — which
+/// document is this, and is anything under that addition — are about
+/// millimetres of paper, and a form at 400 dpi is sixteen times the pixels for
+/// the same answer.
+const LOOKING_AT_DPI: f64 = 150.0;
+
 fn default_page() -> String {
     onionskin::settings::load()
         .defaults
@@ -4694,6 +4723,79 @@ fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> 
 /// marks spread across the page to say it. This one wants to know whether
 /// *this sheet* is right, which one addition can answer — and answers it before
 /// the other fifty-nine go through.
+/// Which of these documents is this sheet?
+///
+/// A stack comes back from the scanner named `Scan_0007`, and the documents
+/// they were printed from are somewhere on a disk. Matching them up by hand is
+/// somebody's afternoon; the pages can be asked instead.
+fn cmd_which(args: WhichArgs) -> Result<ExitCode, String> {
+    let threshold = onionskin::diff::DiffOptions::default().ink_threshold;
+
+    // The sheet, however it arrives.
+    let sheet = if is_document(&args.sheet) {
+        let (gray, registration) = onionskin::recipe::draw_page(&args.sheet, 1)?;
+        let width = gray.width() as usize;
+        onionskin::which::Signature::of(
+            gray.as_raw(),
+            width,
+            registration.px_per_mm * 25.4,
+            registration.page,
+            threshold,
+        )
+    } else {
+        let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+        let image = image::open(&args.sheet)
+            .map_err(|e| format!("could not read '{}': {e}", args.sheet.display()))?;
+        let registration = register(
+            &image,
+            ScanOptions {
+                page,
+                assume_cropped: args.cropped,
+                assume_square: args.square,
+                ..ScanOptions::new(page)
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        println!("{}", registration.describe());
+        // Straightened and cropped to the sheet before anything is measured.
+        // A scan has a border round the paper and may lie at an angle, and a
+        // map taken off the raw image is a map of the scanner's glass — every
+        // cell shifted by however wide the margin happened to be.
+        let flat = registration.flatten(&image.to_luma8(), LOOKING_AT_DPI);
+        let width = flat.width() as usize;
+        onionskin::which::Signature::of(
+            flat.as_raw(),
+            width,
+            LOOKING_AT_DPI,
+            registration.page,
+            threshold,
+        )
+    };
+
+    // Each candidate drawn the same way. A document that will not open is
+    // carried through as a reason rather than dropped, so nobody goes on
+    // believing a file was considered when it never was.
+    let ranking = onionskin::which::among(&sheet, &args.among, |path| {
+        let (gray, registration) = onionskin::recipe::draw_page(path, 1)?;
+        let width = gray.width() as usize;
+        Ok(onionskin::which::Signature::of(
+            gray.as_raw(),
+            width,
+            registration.px_per_mm * 25.4,
+            registration.page,
+            threshold,
+        ))
+    });
+
+    println!("\n{}", ranking.describe());
+    if ranking.confident() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    // Exit 2 rather than 1: nothing went wrong, and the answer is "not sure".
+    // A script filing a stack should stop and ask rather than file it wrongly.
+    Ok(ExitCode::from(2))
+}
+
 /// Hold a delta against the sheet you are about to feed, before you feed it.
 ///
 /// `verify` answers the same family of question one sheet too late: it looks at
@@ -4731,7 +4833,18 @@ fn cmd_fits(args: FitsArgs) -> Result<ExitCode, String> {
         )
         .map_err(|e| e.to_string())?;
         println!("{}", registration.describe());
-        (image.to_luma8(), registration)
+        // Straightened onto the paper's own grid, so a millimetre in the
+        // delta is the same millimetre on the sheet. Measured off the raw
+        // scan instead, every addition would be out by the width of whatever
+        // border the scanner left round the paper.
+        let flat = registration.flatten(&image.to_luma8(), LOOKING_AT_DPI);
+        let squared = onionskin::scan::ScanRegistration {
+            px_per_mm: LOOKING_AT_DPI / 25.4,
+            skew_deg: 0.0,
+            origin_px: (0.0, 0.0),
+            ..registration
+        };
+        (flat, squared)
     };
 
     let dpi = registration.px_per_mm * 25.4;

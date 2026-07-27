@@ -663,3 +663,182 @@ fn a_delta_with_nothing_on_it_is_refused_rather_than_passed() {
     assert!(!said.ok, "{}", said.said());
     assert!(said.said().contains("nothing on it"), "{}", said.said());
 }
+
+// --- which document is this sheet? ------------------------------------------
+
+/// A page of a document, printed to PDF, with the given lines on it.
+fn a_document(home: &Path, dir: &Path, name: &str, lines: &[(f64, &str)]) -> PathBuf {
+    let source = dir
+        .join(format!("{name}.osk"))
+        .to_string_lossy()
+        .into_owned();
+    assert!(run(home, &["new", &source, "--page", "a4"]).ok);
+    for (y_mm, words) in lines {
+        let placed = format!("20,{y_mm}:{words}");
+        assert!(run(home, &["write", &source, "--at", &placed, "--size", "12"]).ok);
+    }
+    let pdf = dir.join(format!("{name}.pdf"));
+    let printed = run(home, &["print", &source, "-o", &pdf.to_string_lossy()]);
+    assert!(printed.ok, "{}", printed.said());
+    pdf
+}
+
+/// The whole point: a sheet is picked out of a pile of documents, and the
+/// answer is one somebody can act on.
+#[test]
+fn a_sheet_is_matched_to_the_document_it_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let invoice = a_document(
+        &home,
+        dir.path(),
+        "invoice",
+        &[
+            (25.0, "ACME LIMITED"),
+            (70.0, "Item   Qty   Price"),
+            (200.0, "Total: 120.00"),
+        ],
+    );
+    let letter = a_document(
+        &home,
+        dir.path(),
+        "letter",
+        &[(60.0, "Dear Sir or Madam,"), (120.0, "Yours faithfully,")],
+    );
+    let memo = a_document(&home, dir.path(), "memo", &[(150.0, "MEMORANDUM")]);
+
+    let said = run(
+        &home,
+        &[
+            "which",
+            &invoice.to_string_lossy(),
+            "--among",
+            &letter.to_string_lossy(),
+            &memo.to_string_lossy(),
+            &invoice.to_string_lossy(),
+        ],
+    );
+    assert!(
+        said.ok,
+        "the right document was not picked: {}",
+        said.said()
+    );
+    assert!(
+        said.said().contains("This is") && said.said().contains("invoice.pdf"),
+        "{}",
+        said.said()
+    );
+}
+
+/// The same document with something written on it is still that document.
+/// Filing a filled-in form under the form it came from is the ordinary use.
+#[test]
+fn a_filled_in_copy_is_still_the_document_it_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let invoice = a_document(
+        &home,
+        dir.path(),
+        "invoice",
+        &[
+            (25.0, "ACME LIMITED"),
+            (70.0, "Item   Qty   Price"),
+            (200.0, "Total: 120.00"),
+        ],
+    );
+    let letter = a_document(
+        &home,
+        dir.path(),
+        "letter",
+        &[(60.0, "Dear Sir or Madam,"), (120.0, "Yours faithfully,")],
+    );
+
+    // The same invoice, stamped.
+    let filled = dir.path().join("filled.osk").to_string_lossy().into_owned();
+    std::fs::copy(dir.path().join("invoice.osk"), &filled).unwrap();
+    assert!(
+        run(
+            &home,
+            &[
+                "write",
+                &filled,
+                "--at",
+                "140,220:PAID 27 July",
+                "--size",
+                "12"
+            ]
+        )
+        .ok
+    );
+    let filled_pdf = dir.path().join("filled.pdf");
+    assert!(
+        run(
+            &home,
+            &["print", &filled, "-o", &filled_pdf.to_string_lossy()]
+        )
+        .ok
+    );
+
+    let said = run(
+        &home,
+        &[
+            "which",
+            &filled_pdf.to_string_lossy(),
+            "--among",
+            &letter.to_string_lossy(),
+            &invoice.to_string_lossy(),
+        ],
+    );
+    assert!(
+        said.ok,
+        "a stamped copy was not recognised as its own form: {}",
+        said.said()
+    );
+    assert!(said.said().contains("invoice.pdf"), "{}", said.said());
+}
+
+/// A pile with nothing like the sheet in it must say so and fail, rather than
+/// crowning whichever candidate happened to be least unlike. Filing a sheet
+/// under the wrong document is worse than not filing it.
+#[test]
+fn a_sheet_that_matches_nothing_offered_is_not_filed_anyway() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let invoice = a_document(
+        &home,
+        dir.path(),
+        "invoice",
+        &[(25.0, "ACME LIMITED"), (70.0, "Item   Qty   Price")],
+    );
+    let letter = a_document(
+        &home,
+        dir.path(),
+        "letter",
+        &[(60.0, "Dear Sir or Madam,"), (120.0, "Yours faithfully,")],
+    );
+    let memo = a_document(&home, dir.path(), "memo", &[(150.0, "MEMORANDUM")]);
+
+    let said = run(
+        &home,
+        &[
+            "which",
+            &invoice.to_string_lossy(),
+            "--among",
+            &letter.to_string_lossy(),
+            &memo.to_string_lossy(),
+        ],
+    );
+    assert!(
+        !said.ok,
+        "a sheet was filed under a document it is not: {}",
+        said.said()
+    );
+    assert!(
+        said.said().contains("None of these looks like"),
+        "{}",
+        said.said()
+    );
+}
