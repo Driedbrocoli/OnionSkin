@@ -18,6 +18,10 @@ pub struct State {
     /// recomputed each frame because looking for LibreOffice means walking a
     /// dozen paths on disk, sixty times a second.
     checks: Option<Vec<Check>>,
+    /// What the last Delete-them did, shown until the screen is left. Kept so
+    /// the button says something happened: the list it was next to goes to
+    /// "none" straight away, which on its own reads like nothing occurred.
+    tidied: Option<String>,
 }
 
 /// One thing that either works or does not.
@@ -72,6 +76,10 @@ pub fn show(state: &mut State, room: &mut Room) {
 
     room.ui.separator();
     room.ui.add_space(6.0);
+    show_what_is_kept(state, room);
+
+    room.ui.separator();
+    room.ui.add_space(6.0);
     widgets::hint(
         room.ui,
         "Onionskin never phones home: no telemetry, no update check, nothing \
@@ -79,6 +87,82 @@ pub fn show(state: &mut State, room: &mut Room) {
          name a printer or a scanner, and when you ask it to find them — and \
          then it asks this network only, and talks to nothing beyond it.",
     );
+}
+
+/// What Onionskin is holding on this machine, and a way to be rid of it.
+///
+/// The same list `onionskin doctor` prints. A program that keeps things in a
+/// hidden folder should say so in the place somebody looks to find out what
+/// it is doing — and the people who never open a terminal are exactly the
+/// ones who cannot go and look for themselves.
+fn show_what_is_kept(state: &mut State, room: &mut Room) {
+    let home = onionskin::calibrate::home_dir();
+    room.ui
+        .label(egui::RichText::new("What Onionskin keeps here").strong());
+    widgets::hint(room.ui, &home.display().to_string());
+    room.ui.add_space(4.0);
+
+    let profiles = onionskin::calibrate::list_profiles().unwrap_or_default();
+    widgets::hint(
+        room.ui,
+        &match profiles.len() {
+            0 => "Calibration profiles: none yet".to_string(),
+            1 => format!("Calibration profiles: 1 — {}", profiles[0].name),
+            n => format!(
+                "Calibration profiles: {n} — {}",
+                profiles
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        },
+    );
+
+    let (count, bytes) = kept_deltas(&home.join("deltas"));
+    if count == 0 {
+        widgets::hint(room.ui, "Deltas: none — they are deleted once printed");
+    } else {
+        room.ui.horizontal(|ui| {
+            widgets::hint(
+                ui,
+                &format!("Deltas: {count} kept back, {}", describe_size(bytes)),
+            );
+            if ui.small_button("Delete them").clicked() {
+                onionskin::delta::tidy_scratch(None);
+                state.tidied = Some(format!("{} freed.", describe_size(bytes)));
+            }
+        });
+    }
+    // After the branch, not inside it: the moment the button works the count
+    // above becomes "none", and a confirmation that only shows while there is
+    // still something to delete is a confirmation nobody ever sees.
+    if let Some(said) = &state.tidied {
+        widgets::hint(room.ui, said);
+    }
+}
+
+/// How many deltas are being held, and how much they come to.
+fn kept_deltas(folder: &std::path::Path) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return (0, 0);
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|meta| meta.is_file())
+        .fold((0, 0), |(count, bytes), meta| (count + 1, bytes + meta.len()))
+}
+
+/// A size somebody reads, rather than a number of bytes.
+fn describe_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} kB", bytes / 1024)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Ask the same questions `onionskin doctor` asks.
@@ -140,4 +224,37 @@ fn look() -> Vec<Check> {
     });
 
     checks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_is_kept_is_counted_and_sized_the_way_the_command_line_says_it() {
+        // The window and `onionskin doctor` are two views of one answer, so
+        // they must not disagree about how much is being held.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(kept_deltas(dir.path()), (0, 0));
+        assert_eq!(kept_deltas(&dir.path().join("never-made")), (0, 0));
+
+        std::fs::write(dir.path().join("a.pdf"), vec![0u8; 3000]).unwrap();
+        std::fs::write(dir.path().join("b.pdf"), vec![0u8; 1000]).unwrap();
+        assert_eq!(kept_deltas(dir.path()), (2, 4000));
+
+        assert_eq!(describe_size(0), "0 bytes");
+        assert_eq!(describe_size(999), "999 bytes");
+        assert_eq!(describe_size(4000), "3 kB");
+        assert_eq!(describe_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn a_folder_of_folders_is_not_counted_as_deltas() {
+        // Only files are held deltas. A directory in there is not one, and
+        // reporting it would offer to delete something this does not delete.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a-folder")).unwrap();
+        std::fs::write(dir.path().join("real.pdf"), vec![0u8; 10]).unwrap();
+        assert_eq!(kept_deltas(dir.path()), (1, 10));
+    }
 }
