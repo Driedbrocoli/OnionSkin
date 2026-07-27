@@ -601,7 +601,15 @@ OpenDocument text, or an Onionskin document — each line pinned at the millimet
 it was found, so what opens looks like the paper rather than a column of
 disconnected phrases.
 
+It reads a PDF as readily as a picture, which matters because every
+multifunction printer in an office scans to PDF by default — so the file you
+actually have is `scan.pdf`, not `scan.png`. A stack through the feeder comes
+back as one PDF, and `--sheet 3` reads the third of them. A document says what
+size it is, so `--page` is not needed for one.
+
 ```bash
+onionskin read scan.pdf --to invoice.docx             # straight off the scanner
+onionskin read stack.pdf --sheet 3 --to third.docx    # one sheet of a stack
 onionskin read scan.png --font-file /path/to/the/font.ttf --to invoice.docx
 onionskin read scan.png --font-file font.ttf --to invoice.odt
 onionskin read scan.png --font-file font.ttf --to invoice.onionskin

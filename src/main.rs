@@ -1181,11 +1181,18 @@ struct PrintArgs {
 
 #[derive(clap::Args)]
 struct ReadArgs {
-    /// The scan: PNG, JPEG, TIFF or BMP.
+    /// The scan: a PDF, or a picture of the page — PNG, JPEG, TIFF or BMP.
     scan: PathBuf,
-    /// Size of the paper that was scanned.
+    /// Size of the paper that was scanned. Not needed for a PDF or a Word
+    /// file, which say what size they are.
     #[arg(long, default_value_t = default_page())]
     page: String,
+    /// Which page of a multi-page document, counted from 1.
+    ///
+    /// A stack through the feeder comes back as one PDF, so which sheet is a
+    /// real question. Ignored for a picture, which is one page by definition.
+    #[arg(long, default_value_t = 1)]
+    sheet: usize,
     /// A font file to read the letters against. Without one, Onionskin reports
     /// where every letter is but not which letter it is.
     #[arg(long)]
@@ -2551,18 +2558,31 @@ fn parse_point(text: &str) -> Result<(f64, f64), String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
-    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
-    let image = image::open(&args.scan)
-        .map_err(|e| format!("could not read '{}': {e}", args.scan.display()))?;
-
-    let options = ScanOptions {
-        page,
-        assume_cropped: args.cropped,
-        assume_square: args.square,
-        ..ScanOptions::new(page)
+    // A document or a photograph of one. Every multifunction printer in an
+    // office scans to PDF by default, so "the scan" arrives as a PDF far more
+    // often than as a PNG — and until this it was refused, with the image
+    // library's own words about an unrecognised file extension.
+    //
+    // A document needs no finding: it says where its own edges are, so the
+    // registration is square and true rather than measured. Everything after
+    // this point is the same either way.
+    let (gray, registration, sheets) = if is_document(&args.scan) {
+        let sheets = onionskin::recipe::pages_in(&args.scan)?;
+        let (gray, registration) = onionskin::recipe::draw_page(&args.scan, args.sheet)?;
+        (gray, registration, Some(sheets))
+    } else {
+        let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+        let image = image::open(&args.scan)
+            .map_err(|e| format!("could not read '{}': {e}", args.scan.display()))?;
+        let options = ScanOptions {
+            page,
+            assume_cropped: args.cropped,
+            assume_square: args.square,
+            ..ScanOptions::new(page)
+        };
+        let registration = register(&image, options).map_err(|e| e.to_string())?;
+        (image.to_luma8(), registration, None)
     };
-    let registration = register(&image, options).map_err(|e| e.to_string())?;
-    let gray = image.to_luma8();
 
     let font = load_font(args.font_file.as_deref(), args.font_index)?;
 
@@ -2582,12 +2602,7 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
             args.letters.as_deref(),
         )
         .map_err(|e| e.to_string())?,
-        None => match onionskin::typeface::read_and_match(
-            &args.scan,
-            &args.page,
-            args.cropped,
-            args.square,
-        ) {
+        None => match onionskin::typeface::read_and_match_in(&gray, &registration) {
             Some((text, found)) => {
                 matched = Some(match found {
                     Some(face) => face.describe(),
@@ -2612,7 +2627,18 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    println!("{}", registration.describe());
+    match sheets {
+        // A document was drawn rather than a photograph found, so there is no
+        // skew or resolution to report — but which sheet of how many is a real
+        // question, and a stack through the feeder is one PDF.
+        Some(sheets) if sheets > 1 => println!(
+            "Page {} of {sheets} in {}. Use --sheet to read another.",
+            args.sheet,
+            args.scan.display()
+        ),
+        Some(_) => {}
+        None => println!("{}", registration.describe()),
+    }
     println!(
         "\n{} letter{} in {} word{} on {} line{}.",
         text.letter_count(),
@@ -2656,7 +2682,16 @@ fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
     }
 
     if let Some(destination) = &args.to {
-        export_page(&text, page, destination, args.flow, letters_were_read)?;
+        // The size the page actually turned out to be, rather than the one
+        // that was assumed. For a picture those are the same; for a PDF the
+        // document said so itself, and `--page` was never consulted.
+        export_page(
+            &text,
+            registration.page,
+            destination,
+            args.flow,
+            letters_were_read,
+        )?;
         open_if_asked(args.open, destination);
     }
     Ok(ExitCode::SUCCESS)

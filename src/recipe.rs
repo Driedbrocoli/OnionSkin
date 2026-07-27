@@ -184,34 +184,7 @@ pub fn lay_out(recipe: &Recipe, document: &Path) -> Result<Laid, String> {
 /// works on every document Onionskin can open — including the ones that are
 /// pictures of paper, which is most of what an office actually has.
 pub fn read_page(path: &Path, page: usize) -> Result<crate::letters::PageText, String> {
-    let engine = crate::render::engine().map_err(|e| e.to_string())?;
-    let workspace = crate::render::Workspace::new(false).map_err(|e| e.to_string())?;
-    let (pdf, _, _) =
-        crate::render::to_pdf_noting(path, &workspace.path, 180).map_err(|e| e.to_string())?;
-    let document = engine.open(&pdf).map_err(|e| e.to_string())?;
-
-    let index = page.saturating_sub(1);
-    if index >= document.len() {
-        return Err(format!(
-            "there is no page {page} in '{}' — it has {} page{}.",
-            path.display(),
-            document.len(),
-            if document.len() == 1 { "" } else { "s" }
-        ));
-    }
-
-    // Enough resolution to read small print, and not so much that a hundred
-    // megapixels are matched against a font for the sake of one anchor.
-    const DPI: f64 = 300.0;
-    let drawn = document.render(index, DPI).map_err(|e| e.to_string())?;
-    let image = image::GrayImage::from_raw(drawn.width as u32, drawn.height as u32, drawn.gray)
-        .ok_or("the page could not be turned into an image")?;
-    let registration = crate::scan::ScanRegistration {
-        page: drawn.size,
-        px_per_mm: DPI / 25.4,
-        skew_deg: 0.0,
-        origin_px: (0.0, 0.0),
-    };
+    let (image, registration) = draw_page(path, page)?;
 
     let reference = crate::font::suggest_system_font()
         .or_else(|| {
@@ -234,6 +207,63 @@ pub fn read_page(path: &Path, page: usize) -> Result<crate::letters::PageText, S
         Some(crate::letters::COMMON_LATIN),
     )
     .map_err(|e| e.to_string())
+}
+
+/// Draw one page of a document, ready to be read.
+///
+/// Anything Onionskin can open — a PDF, a Word file, a spreadsheet — comes back
+/// as grey pixels on the paper's own grid, with a registration that says how
+/// many of them go to the millimetre. Nothing has to be found: a document says
+/// where its own edges are, so the registration is square and true by
+/// construction, where a photograph of paper has to be measured for skew.
+///
+/// That is what lets the same reader work on both.
+pub fn draw_page(
+    path: &Path,
+    page: usize,
+) -> Result<(image::GrayImage, crate::scan::ScanRegistration), String> {
+    let engine = crate::render::engine().map_err(|e| e.to_string())?;
+    let workspace = crate::render::Workspace::new(false).map_err(|e| e.to_string())?;
+    let (pdf, _, _) =
+        crate::render::to_pdf_noting(path, &workspace.path, 180).map_err(|e| e.to_string())?;
+    let document = engine.open(&pdf).map_err(|e| e.to_string())?;
+
+    let index = page.saturating_sub(1);
+    if index >= document.len() {
+        return Err(format!(
+            "there is no page {page} in '{}' — it has {} page{}.",
+            path.display(),
+            document.len(),
+            if document.len() == 1 { "" } else { "s" }
+        ));
+    }
+
+    // Enough resolution to read small print, and not so much that a hundred
+    // megapixels are matched against a font for the sake of one anchor.
+    const DPI: f64 = 300.0;
+    let drawn = document.render(index, DPI).map_err(|e| e.to_string())?;
+    let image = image::GrayImage::from_raw(drawn.width as u32, drawn.height as u32, drawn.gray)
+        .ok_or("the page could not be turned into an image")?;
+    Ok((
+        image,
+        crate::scan::ScanRegistration {
+            page: drawn.size,
+            px_per_mm: DPI / 25.4,
+            skew_deg: 0.0,
+            origin_px: (0.0, 0.0),
+        },
+    ))
+}
+
+/// How many pages a document has, for saying so before reading one of them.
+pub fn pages_in(path: &Path) -> Result<usize, String> {
+    let engine = crate::render::engine().map_err(|e| e.to_string())?;
+    let workspace = crate::render::Workspace::new(false).map_err(|e| e.to_string())?;
+    let (pdf, _, _) =
+        crate::render::to_pdf_noting(path, &workspace.path, 180).map_err(|e| e.to_string())?;
+    let document = engine.open(&pdf).map_err(|e| e.to_string())?;
+    let pages = document.len();
+    Ok(pages)
 }
 
 /// Split `X,Y:the words` into a position in millimetres and the words.

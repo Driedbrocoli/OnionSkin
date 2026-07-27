@@ -178,7 +178,12 @@ pub fn detect(page: &PageText) -> Option<Typeface> {
 /// for. Whichever is actually on the machine gets tried.
 const READING_FACES: &[(&[&str], pdf::Font)] = &[
     (
-        &["Liberation Serif", "Times New Roman", "Nimbus Roman", "DejaVu Serif"],
+        &[
+            "Liberation Serif",
+            "Times New Roman",
+            "Nimbus Roman",
+            "DejaVu Serif",
+        ],
         pdf::Font::TimesRoman,
     ),
     (
@@ -186,7 +191,12 @@ const READING_FACES: &[(&[&str], pdf::Font)] = &[
         pdf::Font::Helvetica,
     ),
     (
-        &["Liberation Mono", "Courier New", "Nimbus Mono", "DejaVu Sans Mono"],
+        &[
+            "Liberation Mono",
+            "Courier New",
+            "Nimbus Mono",
+            "DejaVu Sans Mono",
+        ],
         pdf::Font::Courier,
     ),
 ];
@@ -245,8 +255,19 @@ pub fn read_and_match(
         },
     )
     .ok()?;
-    let gray = image.to_luma8();
+    read_and_match_in(&image.to_luma8(), &registration)
+}
 
+/// The same, on a page already drawn and squared up.
+///
+/// A document does not have to be found on a piece of paper: it says where its
+/// own edges are. Splitting the finding off from the reading is what lets a
+/// scanned PDF — which is what every multifunction printer produces by default
+/// — go through the same matcher as a photograph of the same sheet.
+pub fn read_and_match_in(
+    gray: &image::GrayImage,
+    registration: &crate::scan::ScanRegistration,
+) -> Option<(PageText, Option<Typeface>)> {
     let mut best: Option<(f64, pdf::Font, PageText)> = None;
     for (names, face) in READING_FACES {
         let Some(found) = names.iter().find_map(|name| crate::font::find_font(name)) else {
@@ -261,8 +282,8 @@ pub fn read_and_match(
         // eighty — every near-identical shape in some other script is another
         // chance to be wrong, and it is thirty times the work.
         let Ok(text) = crate::letters::read_with_font(
-            &gray,
-            &registration,
+            gray,
+            registration,
             &crate::letters::ReadOptions::default(),
             &reference,
             Some(crate::letters::COMMON_LATIN),
@@ -279,10 +300,20 @@ pub fn read_and_match(
         }
         let score = letters
             .iter()
-            .map(|letter| if letter.text.is_some() { letter.confidence } else { 0.0 })
+            .map(|letter| {
+                if letter.text.is_some() {
+                    letter.confidence
+                } else {
+                    0.0
+                }
+            })
             .sum::<f64>()
             / letters.len() as f64;
-        if best.as_ref().map(|(seen, _, _)| score > *seen).unwrap_or(true) {
+        if best
+            .as_ref()
+            .map(|(seen, _, _)| score > *seen)
+            .unwrap_or(true)
+        {
             best = Some((score, *face, text));
         }
     }
@@ -337,7 +368,6 @@ fn family_of(font: pdf::Font) -> pdf::Font {
         pdf::Font::Courier | pdf::Font::CourierBold => pdf::Font::Courier,
     }
 }
-
 
 /// Every letter in Courier is exactly this wide, in ems. Not approximately:
 /// that is what makes it a typewriter face.

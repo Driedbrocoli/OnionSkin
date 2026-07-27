@@ -407,3 +407,127 @@ fn a_saved_job_built_on_an_anchor_runs_on_another_document() {
         ran.said()
     );
 }
+
+// --- reading a document, not only a picture of one --------------------------
+
+/// Every multifunction printer in an office scans to PDF by default, so "the
+/// scan" arrives as a PDF far more often than as a PNG. `read` refused it, and
+/// the refusal was the image library's own words about an unrecognised file
+/// extension — for the single most natural thing to type.
+#[test]
+fn a_scanned_pdf_can_be_read_not_only_a_picture() {
+    if !can_read_a_page() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let form = a_printed_form(&home, dir.path(), &[(1, 40.0, "Received:")]);
+
+    let said = run(&home, &["read", &form.to_string_lossy()]).said();
+    assert!(
+        !said.contains("not recognized as an image format"),
+        "a PDF was still refused with the image library's words: {said}"
+    );
+    assert!(
+        said.contains("letter") && said.contains("line"),
+        "nothing was read off the page: {said}"
+    );
+    // What it read, near enough: the reader forgives a smudged letter, so the
+    // test asks for the shape of the answer rather than the exact spelling.
+    assert!(
+        said.to_lowercase().contains("ceived") || said.to_lowercase().contains("recei"),
+        "the label on the page was not read at all: {said}"
+    );
+}
+
+/// A stack through the feeder comes back as one PDF, so which sheet is a real
+/// question — and reading page one of forty silently would be a half-feature.
+///
+/// Checked by where the words are rather than by what they say. The reader
+/// forgives a smudged letter and renders "Gamma" as "GBmmB" often enough that
+/// asserting the spelling would test the reader's accuracy instead of the
+/// sheet selection — but a line 200 mm down the page is on page three and
+/// nowhere else.
+#[test]
+fn a_particular_sheet_of_a_multi_page_document_can_be_read() {
+    if !can_read_a_page() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let form = a_printed_form(
+        &home,
+        dir.path(),
+        &[(1, 40.0, "Alpha"), (2, 120.0, "Beta"), (3, 200.0, "Gamma")],
+    );
+
+    let first = run(&home, &["read", &form.to_string_lossy()]).said();
+    assert!(
+        first.contains("Page 1 of 3"),
+        "a three-page document did not say which sheet was read: {first}"
+    );
+    assert!(
+        first.contains("40.0 mm"),
+        "page one's line is at 40 mm and was not reported there: {first}"
+    );
+
+    let third = run(&home, &["read", &form.to_string_lossy(), "--sheet", "3"]).said();
+    assert!(third.contains("Page 3 of 3"), "{third}");
+    assert!(
+        third.contains("200.0 mm"),
+        "--sheet 3 did not read the third sheet, whose only line is at 200 mm: {third}"
+    );
+    assert!(
+        !third.contains("40.0 mm"),
+        "page one's line came back from a run asking for page three: {third}"
+    );
+}
+
+/// A sheet the document does not have is refused by number, not by whatever
+/// the renderer does when asked for it.
+#[test]
+fn a_sheet_that_is_not_there_is_named_in_the_refusal() {
+    if !can_read_a_page() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let form = a_printed_form(&home, dir.path(), &[(1, 40.0, "Only one")]);
+
+    let refused = run(&home, &["read", &form.to_string_lossy(), "--sheet", "9"]);
+    assert!(!refused.ok, "{}", refused.said());
+    assert!(
+        refused.said().contains("no page 9"),
+        "the refusal did not say which sheet was asked for: {}",
+        refused.said()
+    );
+}
+
+/// Turning a scanned PDF into something editable is the whole point of `read`
+/// for most people, and it has to work from the file they actually have.
+#[test]
+fn a_scanned_pdf_becomes_a_word_document() {
+    if !can_read_a_page() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let form = a_printed_form(&home, dir.path(), &[(1, 40.0, "Received:")]);
+    let out = dir.path().join("read.docx");
+
+    let made = run(
+        &home,
+        &[
+            "read",
+            &form.to_string_lossy(),
+            "--to",
+            &out.to_string_lossy(),
+        ],
+    );
+    assert!(made.ok, "{}", made.said());
+    assert!(out.is_file(), "no Word document came out: {}", made.said());
+    assert!(
+        out.metadata().unwrap().len() > 0,
+        "the Word document is empty"
+    );
+}
