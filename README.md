@@ -369,6 +369,19 @@ have put them. It works on a scan, a PDF, a Word file or an OpenDocument — for
 a document the page is drawn and then read, which is what a person does when
 they look at one.
 
+On Onionskin's own documents the same two flags are on `write`, and there they
+are *exact*: the document already knows where each of its words sits, to the
+millimetre it will print at, so nothing is drawn and nothing is read.
+
+```bash
+onionskin write form.onionskin --after 'Received:27 July 2026'
+onionskin write form.onionskin --below 'Signature:J. Bezzina'
+```
+
+If an anchor cannot be found, nothing is written at all — not even the `--at`
+placements in the same run. Half a page of new words followed by a refusal
+would be the worst of both.
+
 Matching is forgiving, because a scan is never read perfectly: case, spacing
 and punctuation are ignored, and up to a quarter of the letters may be wrong.
 `Received:` really does come back as `Peceived:` off a noisy scan. Exact matches
@@ -800,6 +813,51 @@ In the window there is an Undo button beside the page controls, on both the
 Make a document and Draw on a page screens — the two places where removing
 something is a single click. It is greyed out until there is something to go
 back to.
+
+## Your files are not Onionskin's to destroy
+
+`-o report.pdf` used to write over a `report.pdf` that had nothing to do with
+Onionskin, in silence, and report success. It stops now:
+
+```
+error: 'report.pdf' is already there, and Onionskin did not write it — so it
+has been left alone.
+    Write over it:  add --overwrite
+    Keep it:        choose another name for the PDF
+```
+
+Onionskin stamps everything it writes, so the ordinary loop — make a delta,
+look at it, edit, make it again — asks nothing at all. Only a name it cannot
+claim stops it, and `--overwrite` is always there when you mean it.
+
+`--overwrite` is deliberately not the same flag as the `--force` that `print`
+and `delta` have. That one means "print it anyway, I have read the warning
+about reflow". This one means "yes, that file of mine can go". Two different
+things to be sure about.
+
+## What Onionskin keeps, and getting rid of it
+
+A program that stores things in a hidden folder should be willing to say so
+without being asked twice. `onionskin doctor` ends by listing everything it
+holds and where:
+
+```
+What Onionskin keeps, all under /home/you/.onionskin:
+  settings   your defaults — onionskin config show
+  profiles   2 — office-laser, the-old-inkjet
+  deltas     3 kept back (1.2 MB), from runs that asked to keep them
+             remove them:  onionskin tidy
+```
+
+```bash
+onionskin tidy      # delete the deltas it is holding, and say what went
+```
+
+Deltas are already deleted as new ones are made — this is for anyone who
+wants them gone now rather than at the next run, or who would simply rather
+decide themselves. Nothing outside that folder is ever touched; your own
+files are never in it. The whole folder can be deleted by hand with no harm
+beyond losing exactly what the list says it holds.
 
 ## Tab completion
 

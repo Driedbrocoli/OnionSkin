@@ -230,7 +230,9 @@ pub fn clear_defaults() {
 }
 
 /// Where the file lives.
-fn path() -> PathBuf {
+/// Where the settings file lives. Public so `doctor` can say where it is —
+/// a program keeping a file in a hidden folder ought to be willing to name it.
+pub fn path() -> PathBuf {
     crate::calibrate::home_dir().join("settings.json")
 }
 

@@ -34,6 +34,15 @@ use onionskin::scan::{register, ScanOptions, ScanRegistration};
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Write over a file Onionskin did not make, instead of stopping.
+    ///
+    /// Kept apart from the `--force` that some commands have. That one means
+    /// "print it anyway, I have read the warning"; this one means "yes, that
+    /// file of mine can go". Two different things to be sure about, so two
+    /// different flags to be sure with.
+    #[arg(long, global = true)]
+    overwrite: bool,
 }
 
 #[derive(Subcommand)]
@@ -63,6 +72,8 @@ enum Command {
     Erase(EraseArgs),
     /// Put a document back as it was before the last change.
     Undo(UndoArgs),
+    /// Delete the deltas Onionskin is holding on to.
+    Tidy,
     /// Write a document out as a PDF, whole or as a delta onto the printed sheet.
     Print(PrintArgs),
     /// Read the letters off a scanned page.
@@ -495,6 +506,15 @@ struct WriteArgs {
     /// letters sit. Use \n in the text for a line break.
     #[arg(long = "at", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
     at: Vec<String>,
+    /// Words placed just after something already on the document, so no
+    /// measuring is needed: 'Received:Approved 27 July' puts the words after
+    /// "Received:".
+    #[arg(long = "after", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    after: Vec<String>,
+    /// The same, one line below the anchor and starting where it starts:
+    /// 'Signature:J. Bezzina'.
+    #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    below: Vec<String>,
     /// Which page, counted from 1.
     #[arg(long, default_value_t = 1)]
     page: usize,
@@ -876,6 +896,9 @@ fn same_file_key(path: &Path) -> PathBuf {
 }
 
 /// Make sure a file can actually be written before doing the work.
+/// Whether `--overwrite` was given. See [`Cli::overwrite`].
+static OVERWRITE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn check_writable(path: &Path, label: &str) -> Result<(), String> {
     if path.is_dir() {
         return Err(format!(
@@ -891,8 +914,61 @@ fn check_writable(path: &Path, label: &str) -> Result<(), String> {
             ));
         }
     }
+
+    // Do not write over somebody else's file without being told to.
+    //
+    // Onionskin stamps everything it writes, so the ordinary loop — run a
+    // command, look at the delta, edit, run it again — asks nothing. What is
+    // refused is the case that costs something: an output name that happens
+    // to be a file Onionskin did not make, which until now was destroyed in
+    // silence.
+    if !may_write_over(path, OVERWRITE.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(format!(
+            "'{}' is already there, and Onionskin did not write it — so it has \
+             been left alone.\n    Write over it:  add --overwrite\n    Keep \
+             it:        choose another name for the {label}",
+            path.display()
+        ));
+    }
     Ok(())
 }
+
+/// May this path be written to, given whether `--overwrite` was asked for?
+///
+/// Split out from `check_writable` so it can be tested without reaching for
+/// the process-wide flag, which the tests run in parallel around.
+fn may_write_over(path: &Path, overwrite: bool) -> bool {
+    overwrite || !path.exists() || ours_to_replace(path)
+}
+
+/// Did Onionskin write this file?
+///
+/// Its PDFs carry `/Producer (Onionskin)` and its documents are its own
+/// format, so both are recognisable without keeping a list of what it has
+/// written. Anything it cannot positively claim is treated as somebody
+/// else's, which is the safe way round: the cost of being wrong here is a
+/// question, and the cost of being wrong the other way is their file.
+fn ours_to_replace(path: &Path) -> bool {
+    if Document::is_one(path) {
+        return true;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if !bytes.starts_with(b"%PDF") {
+        return false;
+    }
+    bytes
+        .windows(PRODUCER.len())
+        .any(|window| window == PRODUCER)
+}
+
+/// What `pdf`'s document info writes into every PDF Onionskin produces.
+///
+/// Written without a space after the key, which is how the PDF is serialised
+/// — worth matching exactly rather than on the word "Onionskin" alone, which
+/// could appear in the text of a page Onionskin had nothing to do with.
+const PRODUCER: &[u8] = b"/Producer(Onionskin)";
 
 const PRINT_INSTRUCTIONS: &str = "\
 Printing the delta
@@ -937,7 +1013,12 @@ extern "C" {
 }
 
 fn run() -> Result<ExitCode, String> {
-    let Some(command) = Cli::parse().command else {
+    let cli = Cli::parse();
+    // Read once here and kept where `check_writable` can reach it, rather
+    // than threaded through fourteen call sites that have no other reason to
+    // know about it. It is set before any command runs and never again.
+    OVERWRITE.store(cli.overwrite, std::sync::atomic::Ordering::Relaxed);
+    let Some(command) = cli.command else {
         greet();
         return Ok(ExitCode::SUCCESS);
     };
@@ -954,6 +1035,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Edit(args) => cmd_edit(args),
         Command::Erase(args) => cmd_erase(args),
         Command::Undo(args) => cmd_undo(args),
+        Command::Tidy => cmd_tidy(),
         Command::Print(args) => cmd_print(args),
         Command::Read(args) => cmd_read(args),
         Command::Delta(args) => cmd_delta(args),
@@ -984,6 +1066,13 @@ fn cmd_new(args: NewArgs) -> Result<ExitCode, String> {
     let page = parse_page(&args.page).map_err(|e| e.to_string())?;
     if args.pages == 0 {
         return Err("a document has at least one page".into());
+    }
+    // `new --force` has always meant "start that name again from blank",
+    // which is the same permission `--overwrite` grants. Honour it as both,
+    // so the flag this command documents is not contradicted by the general
+    // one a moment later.
+    if args.force {
+        OVERWRITE.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     check_writable(&args.document, "document")?;
     if args.document.exists() && !args.force {
@@ -1022,10 +1111,13 @@ fn cmd_new(args: NewArgs) -> Result<ExitCode, String> {
 }
 
 fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
-    if args.at.is_empty() {
+    if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() {
         return Err(
-            "nothing to write. Say where the words go, for example:\n    \
-             --at '25,40:Dear Sir'"
+            "nothing to write. Say where the words go — easiest first:\n    \
+             --after 'Received:Approved 27 July'   just after something \
+             already there\n    --below 'Signature:J. Bezzina'        one \
+             line under it\n    --at '25,40:Dear Sir'                 \
+             millimetres measured on the paper"
                 .into(),
         );
     }
@@ -1039,6 +1131,11 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
 
     let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
 
+    // Where the anchored words land, worked out before anything is added so
+    // that a run naming an anchor that is not there changes nothing at all.
+    // Half a page of new words and then a refusal would be the worst of both.
+    let anchored = anchored_places(&document, &args)?;
+
     let mut added = Vec::new();
     for placement in &args.at {
         let ((x_mm, y_mm), text) = parse_placement(placement)?;
@@ -1048,6 +1145,22 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
             x_mm,
             y_mm,
             text: unescape(&text),
+            size_pt: args.size,
+            font: args.font.clone(),
+            width_mm: args.width,
+            rotation_deg: args.rotation,
+            colour: args.colour.clone(),
+            leading: args.leading,
+        };
+        added.push(document.add(item).map_err(|e| e.to_string())?);
+    }
+    for (x_mm, y_mm, text) in anchored {
+        let item = Item {
+            id: 0,
+            page: args.page,
+            x_mm,
+            y_mm,
+            text,
             size_pt: args.size,
             font: args.font.clone(),
             width_mm: args.width,
@@ -1071,6 +1184,69 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
     }
     warn_off_the_page(&document);
     Ok(ExitCode::SUCCESS)
+}
+
+/// Work out where `--after` and `--below` put their words on a document.
+///
+/// The document's own layout is used rather than a rendering of it, so the
+/// answer is exact: it already knows where every word sits, to the millimetre
+/// it will print at. Nothing is added here — the caller does that once every
+/// anchor has been found, so a run that cannot find one leaves the document
+/// exactly as it was.
+fn anchored_places(
+    document: &Document,
+    args: &WriteArgs,
+) -> Result<Vec<(f64, f64, String)>, String> {
+    if args.after.is_empty() && args.below.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pages = document
+        .layout(None)
+        .map_err(|e| format!("could not work out where the words already are: {e}"))?;
+    let lines = pages
+        .get(args.page.saturating_sub(1))
+        .map(|lines| lines.as_slice())
+        .unwrap_or(&[]);
+    let rows = onionskin::anchor::rows_from_lines(lines);
+
+    let gap_mm = onionskin::geometry::pt_to_mm(args.size * 0.3);
+    let step_mm = onionskin::geometry::pt_to_mm(args.size * 1.15);
+
+    let mut out = Vec::new();
+    for (flag, put) in [
+        (&args.after, onionskin::anchor::Where::After),
+        (&args.below, onionskin::anchor::Where::Below),
+    ] {
+        for wanted in flag {
+            let (anchor, text) = split_anchor(wanted)?;
+            let placed = onionskin::anchor::place_in(&rows, &anchor, put, gap_mm, step_mm)
+                .map_err(|e| e.to_string())?;
+            out.push((placed.x_mm, placed.y_mm, unescape(&text)));
+        }
+    }
+    Ok(out)
+}
+
+/// Split `ANCHOR:WORDS` into the two, on the first colon.
+///
+/// The same rule `add` uses, so the same flag means the same thing on both
+/// commands. It also leaves a colon inside the *words* alone, which matters
+/// for the times and ratios people write, and the anchor rarely needs its own
+/// — matching forgives punctuation, so "Received" finds "Received:".
+fn split_anchor(given: &str) -> Result<(String, String), String> {
+    let (anchor, text) = given.split_once(':').ok_or_else(|| {
+        format!(
+            "bad placement '{given}'. Expected 'ANCHOR:the words' — the thing \
+             already on the page, a colon, then what to add."
+        )
+    })?;
+    if anchor.trim().is_empty() {
+        return Err(format!("'{given}' does not say what to look for"));
+    }
+    if text.trim().is_empty() {
+        return Err(format!("'{given}' does not say what to write"));
+    }
+    Ok((anchor.to_string(), text.to_string()))
 }
 
 fn cmd_show(args: ShowArgs) -> Result<ExitCode, String> {
@@ -3777,6 +3953,8 @@ fn cmd_doctor() -> Result<ExitCode, String> {
         Err(e) => println!("  Calibration     unreadable\n      {e}"),
     }
 
+    report_what_is_kept();
+
     // Worth being exact about rather than sweeping: Onionskin does now open a
     // socket, and pretending otherwise would be the kind of half-truth this
     // program is meant not to tell.
@@ -4120,6 +4298,107 @@ fn cmd_fonts(args: FontsArgs) -> Result<ExitCode, String> {
 
 // ---------------------------------------------------------------------------
 // Packaging
+/// Delete every delta Onionskin is holding, and say what went.
+///
+/// It tidies as it goes already — see `delta::tidy_scratch` — so this is for
+/// somebody who wants it gone now rather than at the next run, and for
+/// anybody who would simply rather decide themselves.
+fn cmd_tidy() -> Result<ExitCode, String> {
+    let folder = onionskin::calibrate::home_dir().join("deltas");
+    let (count, bytes) = scratch_deltas(&folder);
+    if count == 0 {
+        println!("Nothing to tidy — Onionskin is holding no deltas.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    onionskin::delta::tidy_scratch(None);
+    let (left, _) = scratch_deltas(&folder);
+    let gone = count - left;
+    println!(
+        "{gone} delta{} deleted, {} freed.",
+        if gone == 1 { "" } else { "s" },
+        describe_size(bytes)
+    );
+    if left > 0 {
+        println!(
+            "{left} could not be deleted. They are in {}, if you want to look.",
+            folder.display()
+        );
+    }
+    println!("\nNothing else was touched — your own files are never in here.");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What Onionskin keeps on this machine, and where.
+///
+/// A program that stores things in a hidden folder should be willing to say
+/// so without being asked twice. Everything here can be deleted by hand with
+/// no harm beyond losing what it says it holds — which is the point of
+/// listing it rather than merely promising to be tidy.
+fn report_what_is_kept() {
+    let home = onionskin::calibrate::home_dir();
+    println!("\nWhat Onionskin keeps, all under {}:", home.display());
+
+    let settings = onionskin::settings::path();
+    println!(
+        "  settings   {}",
+        if settings.is_file() {
+            "your defaults — onionskin config show".to_string()
+        } else {
+            "nothing yet".to_string()
+        }
+    );
+
+    match onionskin::calibrate::list_profiles() {
+        Ok(profiles) if profiles.is_empty() => println!("  profiles   none yet"),
+        Ok(profiles) => println!(
+            "  profiles   {} — {}",
+            profiles.len(),
+            profiles
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(_) => println!("  profiles   none yet"),
+    }
+
+    let (count, bytes) = scratch_deltas(&home.join("deltas"));
+    if count == 0 {
+        println!("  deltas     none — they are deleted once printed");
+    } else {
+        println!(
+            "  deltas     {count} kept back ({}), from runs that asked to keep them",
+            describe_size(bytes)
+        );
+        println!("             remove them:  onionskin tidy");
+    }
+}
+
+/// How many scratch deltas are sitting there, and how much they come to.
+fn scratch_deltas(folder: &Path) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return (0, 0);
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|meta| meta.is_file())
+        .fold((0, 0), |(count, bytes), meta| {
+            (count + 1, bytes + meta.len())
+        })
+}
+
+/// A size somebody can read, rather than a number of bytes.
+fn describe_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} kB", bytes / 1024)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 fn cmd_package(args: PackageArgs) -> Result<ExitCode, String> {
@@ -4422,6 +4701,153 @@ mod naming_tests {
         // because that is all there is to go on.
         assert!(is_document(&dir.path().join("not-yet.pdf")));
         assert!(!is_document(&dir.path().join("not-yet.onion")));
+    }
+
+    /// `onionskin write <doc>` with the given flags, straight through the
+    /// real parser so the test exercises what somebody would actually type.
+    fn write_run(args: &[&str]) -> Result<ExitCode, String> {
+        let mut argv = vec!["onionskin", "write"];
+        argv.extend_from_slice(args);
+        let Some(Command::Write(parsed)) = Cli::parse_from(argv).command else {
+            panic!("write did not parse");
+        };
+        cmd_write(parsed)
+    }
+
+    #[test]
+    fn words_can_be_anchored_to_a_documents_own_words_too() {
+        // "Place words next to what is already on the page" worked on a scan
+        // and on somebody's PDF, but not on Onionskin's own documents — the
+        // one format where their position is known exactly rather than read
+        // off a picture.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("form.onionskin");
+        let name = path.to_str().unwrap();
+        Document::blank(onionskin::calibrate::A4, 1).save(&path).unwrap();
+        write_run(&[name, "--at", "20,40:Received:"]).unwrap();
+
+        write_run(&[name, "--after", "Received:27 July"]).unwrap();
+        let doc = Document::load(&path).unwrap();
+        let added = doc.items.iter().find(|i| i.text == "27 July").unwrap();
+        // On the same line, and past the anchor rather than on top of it.
+        assert!((added.y_mm - 40.0).abs() < 1e-9, "{added:?}");
+        assert!(added.x_mm > 20.0, "{added:?}");
+
+        write_run(&[name, "--below", "Received:next line"]).unwrap();
+        let doc = Document::load(&path).unwrap();
+        let below = doc.items.iter().find(|i| i.text == "next line").unwrap();
+        assert!(below.y_mm > 40.0, "{below:?}");
+        assert!((below.x_mm - 20.0).abs() < 1e-9, "{below:?}");
+    }
+
+    #[test]
+    fn an_anchor_that_is_not_there_leaves_the_document_untouched() {
+        // Half a page of new words and then a refusal would be the worst of
+        // both, so the anchors are all found before anything is added.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("form.onionskin");
+        let name = path.to_str().unwrap();
+        Document::blank(onionskin::calibrate::A4, 1).save(&path).unwrap();
+        write_run(&[name, "--at", "20,40:Received:"]).unwrap();
+
+        let said = write_run(&[
+            name,
+            "--at",
+            "20,90:this should not land",
+            "--after",
+            "Telephone:0123",
+        ])
+        .unwrap_err();
+        assert!(said.contains("Telephone"), "{said}");
+
+        let doc = Document::load(&path).unwrap();
+        assert_eq!(doc.items.len(), 1, "something was written anyway");
+    }
+
+    #[test]
+    fn an_anchor_and_its_words_are_split_the_way_add_splits_them() {
+        // The same flag on two commands must mean the same thing.
+        assert_eq!(
+            split_anchor("Received:27 July").unwrap(),
+            ("Received".to_string(), "27 July".to_string())
+        );
+        // A colon inside the words is left alone — times and ratios have one.
+        assert_eq!(
+            split_anchor("Meeting:12:30 in room 4").unwrap(),
+            ("Meeting".to_string(), "12:30 in room 4".to_string())
+        );
+        // And the halves that say nothing are refused by name.
+        assert!(split_anchor("no colon here").is_err());
+        assert!(split_anchor(":only words").is_err());
+        assert!(split_anchor("only anchor:").is_err());
+    }
+
+    #[test]
+    fn what_is_kept_is_counted_and_sized_in_words_somebody_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(scratch_deltas(dir.path()), (0, 0));
+        // A folder that is not there at all is not an error, it is nothing.
+        assert_eq!(scratch_deltas(&dir.path().join("never-made")), (0, 0));
+
+        std::fs::write(dir.path().join("a.pdf"), vec![0u8; 3000]).unwrap();
+        std::fs::write(dir.path().join("b.pdf"), vec![0u8; 1000]).unwrap();
+        assert_eq!(scratch_deltas(dir.path()), (2, 4000));
+
+        assert_eq!(describe_size(0), "0 bytes");
+        assert_eq!(describe_size(999), "999 bytes");
+        assert_eq!(describe_size(4000), "3 kB");
+        assert_eq!(describe_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn a_file_onionskin_did_not_write_is_not_written_over() {
+        // `onionskin print doc -o report.pdf` used to destroy a report.pdf
+        // that had nothing to do with Onionskin, in silence and with a
+        // cheerful success message.
+        let dir = tempfile::tempdir().unwrap();
+
+        let theirs = dir.path().join("report.pdf");
+        std::fs::write(&theirs, b"%PDF-1.7\n...somebody's own work...").unwrap();
+        assert!(!may_write_over(&theirs, false), "their PDF was not protected");
+        assert!(may_write_over(&theirs, true), "--overwrite was not honoured");
+
+        // Not a PDF at all, and not ours either.
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, b"shopping list").unwrap();
+        assert!(!may_write_over(&notes, false));
+    }
+
+    #[test]
+    fn onionskins_own_output_is_replaced_without_asking() {
+        // Run a command, look at the delta, edit, run it again. That loop is
+        // the ordinary way to use this and must not ask anything.
+        let dir = tempfile::tempdir().unwrap();
+
+        let ours = dir.path().join("delta.pdf");
+        std::fs::write(&ours, b"%PDF-1.4\n<</Title(x)/Producer(Onionskin)>>").unwrap();
+        assert!(may_write_over(&ours, false), "our own delta was protected");
+
+        // A document of ours, likewise — and whatever it is called.
+        let doc = dir.path().join("letter.pdf");
+        Document::blank(onionskin::calibrate::A4, 1).save(&doc).unwrap();
+        assert!(may_write_over(&doc, false));
+
+        // A name with nothing behind it is always free.
+        assert!(may_write_over(&dir.path().join("not-there.pdf"), false));
+    }
+
+    #[test]
+    fn the_producer_line_is_matched_exactly_not_merely_mentioned() {
+        // A PDF of somebody's essay about Onionskin says the word on its
+        // pages. That is not a claim to have been written by it.
+        let dir = tempfile::tempdir().unwrap();
+        let essay = dir.path().join("essay.pdf");
+        std::fs::write(
+            &essay,
+            b"%PDF-1.7\n(Onionskin is a program for adding words to printed pages)",
+        )
+        .unwrap();
+        assert!(!may_write_over(&essay, false), "an essay was claimed as ours");
     }
 
     #[test]
