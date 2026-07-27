@@ -233,6 +233,7 @@ Down the side, in the order somebody meets them:
 | **See it before you print** | The sheet and the delta together, on screen |
 | **Merge deltas** | Several onto one, so the sheet goes through once |
 | **Sheet of labels** | Addresses and files, one per label, from a list |
+| **Saved jobs** | The same stamp on today's document, in two clicks |
 | **Check a sheet** | Did it come out of the printer right? |
 | **What was added** | Have I printed this delta already? |
 | **Printers and scanners** | Print and scan over the network |
@@ -248,6 +249,13 @@ have already been peeled off the sheet in the drawer.
 anything in millimetres. Give it the form — as a PDF, or a photograph of the
 paper — and it lists every empty place with a **Copy** button, which pastes
 straight into the writing screen. No ruler, no image editor, no arithmetic.
+
+**Saved jobs** is the one an office opens every morning. Pick the job, pick
+today's document, fill in whatever changes — the boxes are built from the job
+itself, so a job wanting `{ref}` shows one box labelled `{ref}` and no others —
+and press Run. Today's date is filled in without being asked for, because it is
+the commonest thing anybody stamps on a piece of paper and the easiest to get
+wrong by hand.
 
 `onionskin uninstall` removes exactly what was put there and says what it
 removed. It leaves your calibration profiles alone, and says so.

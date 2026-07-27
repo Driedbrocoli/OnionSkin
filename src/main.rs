@@ -22,6 +22,10 @@ use onionskin::package;
 use onionskin::pdf::{write_delta, Font, LineFont, PlacedImage, PlacedLine};
 use onionskin::pipeline;
 use onionskin::printer;
+// The one spelling of every placement a person can type. In the library
+// because the window has to understand them the same way — a saved job
+// run from a window and from a command line must land in the same place.
+use onionskin::recipe::{parse_placement, placed_images, split_anchor, unescape};
 use onionskin::scan::{register, ScanOptions, ScanRegistration};
 
 #[derive(Parser)]
@@ -2181,127 +2185,6 @@ fn anchored_places(
 /// Giving only a width is the ordinary case. The height then follows the
 /// picture's own shape, because a signature squashed into a box it was not
 /// drawn for is worse than no signature at all.
-fn parse_image(spec: &str) -> Result<ImageSpec, String> {
-    let bad = || {
-        format!(
-            "bad picture '{spec}'. Expected 'FILE:X,Y:WIDTH' — the file, where \
-             its top-left corner goes in millimetres, and how wide it is:\n    \
-             --image 'signature.png:120,240:40'"
-        )
-    };
-    let (rest, size) = spec.rsplit_once(':').ok_or_else(bad)?;
-    let (file, position) = rest.rsplit_once(':').ok_or_else(bad)?;
-    if file.trim().is_empty() {
-        return Err(bad());
-    }
-
-    let (x, y) = position.split_once(',').ok_or_else(bad)?;
-    let x_mm: f64 = x.trim().parse().map_err(|_| bad())?;
-    let y_mm: f64 = y.trim().parse().map_err(|_| bad())?;
-
-    let (width, height) = match size.split_once(['x', 'X']) {
-        Some((w, h)) => (w.trim(), Some(h.trim())),
-        None => (size.trim(), None),
-    };
-    let width_mm: Option<f64> = if width.is_empty() {
-        None
-    } else {
-        Some(width.parse().map_err(|_| bad())?)
-    };
-    let height_mm: Option<f64> = match height {
-        Some(h) if !h.is_empty() => Some(h.parse().map_err(|_| bad())?),
-        _ => None,
-    };
-    if width_mm.is_none() && height_mm.is_none() {
-        return Err(bad());
-    }
-    for measure in [width_mm, height_mm].into_iter().flatten() {
-        if !(measure.is_finite() && measure > 0.0) {
-            return Err(format!(
-                "a picture cannot be {measure} mm across. Give a size greater \
-                 than nothing."
-            ));
-        }
-    }
-    Ok(ImageSpec {
-        path: PathBuf::from(file),
-        x_mm,
-        y_mm,
-        width_mm,
-        height_mm,
-    })
-}
-
-/// A `--image` as it was typed: which file, where its top-left corner goes,
-/// and whichever of the two measurements were given.
-#[derive(Debug, PartialEq)]
-struct ImageSpec {
-    path: PathBuf,
-    x_mm: f64,
-    y_mm: f64,
-    /// `None` when only a height was given, and the width is to follow the
-    /// picture's own shape.
-    width_mm: Option<f64>,
-    /// `None` when only a width was given, which is the ordinary case.
-    height_mm: Option<f64>,
-}
-
-/// Load every `--image` and work out the box each one fills.
-fn placed_images(specs: &[String], page: usize) -> Result<Vec<(usize, PlacedImage)>, String> {
-    let mut out = Vec::new();
-    for spec in specs {
-        let ImageSpec {
-            path,
-            x_mm,
-            y_mm,
-            width_mm,
-            height_mm,
-        } = parse_image(spec)?;
-        let picture = onionskin::picture::load(&path).map_err(|e| e.to_string())?;
-        // Whichever measurement was left out follows the picture's own shape.
-        let (width_mm, height_mm) = match (width_mm, height_mm) {
-            (Some(w), Some(h)) => (w, h),
-            (Some(w), None) => (w, w / picture.aspect()),
-            (None, Some(h)) => (h * picture.aspect(), h),
-            (None, None) => unreachable!("parse_image refuses both missing"),
-        };
-        out.push((
-            page,
-            PlacedImage {
-                picture,
-                x_mm,
-                y_mm,
-                width_mm,
-                height_mm,
-                rotation_deg: 0.0,
-            },
-        ));
-    }
-    Ok(out)
-}
-
-/// Split `ANCHOR:WORDS` into the two, on the first colon.
-///
-/// The same rule `add` uses, so the same flag means the same thing on both
-/// commands. It also leaves a colon inside the *words* alone, which matters
-/// for the times and ratios people write, and the anchor rarely needs its own
-/// — matching forgives punctuation, so "Received" finds "Received:".
-fn split_anchor(given: &str) -> Result<(String, String), String> {
-    let (anchor, text) = given.split_once(':').ok_or_else(|| {
-        format!(
-            "bad placement '{given}'. Expected 'ANCHOR:the words' — the thing \
-             already on the page, a colon, then what to add."
-        )
-    })?;
-    if anchor.trim().is_empty() {
-        return Err(format!("'{given}' does not say what to look for"));
-    }
-    if text.trim().is_empty() {
-        return Err(format!("'{given}' does not say what to write"));
-    }
-    Ok((anchor.to_string(), text.to_string()))
-}
-
 fn cmd_show(args: ShowArgs) -> Result<ExitCode, String> {
     let document = Document::load(&args.document).map_err(|e| e.to_string())?;
 
@@ -2619,11 +2502,6 @@ fn load_font(path: Option<&Path>, index: u32) -> Result<Option<EmbeddedFont>, St
             .map_err(|e| e.to_string()),
         None => Ok(None),
     }
-}
-
-/// `\n` typed at a shell prompt, meant as a line break.
-fn unescape(text: &str) -> String {
-    text.replace("\\n", "\n").replace("\\t", "\t")
 }
 
 fn first_line(text: &str) -> String {
@@ -2979,31 +2857,6 @@ fn cmd_inspect(args: InspectArgs) -> Result<ExitCode, String> {
         );
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// Parse `X,Y:the words` into a position and its text.
-fn parse_placement(spec: &str) -> Result<((f64, f64), String), String> {
-    let (position, text) = spec.split_once(':').ok_or_else(|| {
-        format!("bad placement '{spec}'. Expected 'X,Y:the words', e.g. '60,150:Approved'")
-    })?;
-    if text.trim().is_empty() {
-        return Err(format!("the placement '{spec}' has no words in it"));
-    }
-    let (x, y) = position
-        .split_once(',')
-        .ok_or_else(|| format!("bad position in '{spec}'. Expected 'X,Y'"))?;
-    let x: f64 = x
-        .trim()
-        .parse()
-        .map_err(|_| format!("'{}' is not a number, in '{spec}'", x.trim()))?;
-    let y: f64 = y
-        .trim()
-        .parse()
-        .map_err(|_| format!("'{}' is not a number, in '{spec}'", y.trim()))?;
-    if !(x.is_finite() && y.is_finite()) {
-        return Err(format!("the position in '{spec}' is not a real number"));
-    }
-    Ok(((x, y), text.to_string()))
 }
 
 /// A pair of sizes: `WIDTHxHEIGHT`, or one number meaning both.
@@ -4763,75 +4616,13 @@ fn escape_for_fish(text: &str) -> String {
     text.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// Read the words on the first page of a document, by drawing it and looking.
+/// Read a document's first page, so words can be placed against what is on it.
 ///
-/// A Word file knows where its words are, but only after it has been laid out,
-/// and Onionskin's answer to laying out a document is to render it — which is
-/// what it already does for every delta. So the page is drawn to pixels and
-/// then read exactly as a scan is read. The registration is trivial in this
-/// case, because the image *is* the page: no skew to find, no paper edge to
-/// look for, and the resolution is whatever was asked for.
+/// One line, because the reading itself is in the library: the window asks the
+/// same question, and a second copy here is how the two come to disagree about
+/// where a word is.
 fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> {
-    read_a_page_of(path, 1)
-}
-
-/// The same, for a page other than the first.
-///
-/// `write` takes a `--page`, and words anchored to something on page three have
-/// to be matched against page three: reading page one and placing on page three
-/// would find nothing, or — worse — find the same heading and put the words at
-/// its position on the wrong sheet.
-fn read_a_page_of(path: &Path, page: usize) -> Result<onionskin::letters::PageText, String> {
-    let engine = onionskin::render::engine().map_err(|e| e.to_string())?;
-    let workspace = onionskin::render::Workspace::new(false).map_err(|e| e.to_string())?;
-    let (pdf, _, _) =
-        onionskin::render::to_pdf_noting(path, &workspace.path, 180).map_err(|e| e.to_string())?;
-    let document = engine.open(&pdf).map_err(|e| e.to_string())?;
-
-    let index = page.saturating_sub(1);
-    if index >= document.len() {
-        return Err(format!(
-            "there is no page {page} in '{}' — it has {} page{}.",
-            path.display(),
-            document.len(),
-            if document.len() == 1 { "" } else { "s" }
-        ));
-    }
-
-    // Enough resolution to read small print, and not so much that a hundred
-    // megapixels are matched against a font for the sake of one anchor.
-    const DPI: f64 = 300.0;
-    let drawn = document.render(index, DPI).map_err(|e| e.to_string())?;
-    let image = image::GrayImage::from_raw(drawn.width as u32, drawn.height as u32, drawn.gray)
-        .ok_or("the page could not be turned into an image")?;
-    let registration = onionskin::scan::ScanRegistration {
-        page: drawn.size,
-        px_per_mm: DPI / 25.4,
-        skew_deg: 0.0,
-        origin_px: (0.0, 0.0),
-    };
-
-    let reference = suggest_system_font()
-        .or_else(|| {
-            onionskin::font::installed_fonts()
-                .first()
-                .map(|f| f.path.clone())
-        })
-        .ok_or(
-            "there is no font on this machine to read the document against, so \
-             words cannot be placed by what is already in it. Use --at-mm with \
-             millimetres instead.",
-        )?;
-    let reference = EmbeddedFont::load(&reference).map_err(|e| e.to_string())?;
-
-    letters::read_with_font(
-        &image,
-        &registration,
-        &letters::ReadOptions::default(),
-        &reference,
-        Some(letters::COMMON_LATIN),
-    )
-    .map_err(|e| e.to_string())
+    onionskin::recipe::read_page(path, 1)
 }
 
 /// Check a printed sheet came out the way the delta asked.
@@ -5761,74 +5552,36 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
             .collect()
     };
 
-    let mut items = Vec::new();
-    for placement in &dated(&args.at) {
-        let ((x_mm, y_mm), text) = parse_placement(placement)?;
-        items.push(Item {
-            id: 0,
+    // Where everything goes, worked out by the library rather than here, so
+    // that the window running the same saved job puts it in the same place.
+    let laid = onionskin::recipe::lay_out(
+        &onionskin::recipe::Recipe {
+            at: dated(&args.at),
+            after: dated(&args.after),
+            below: dated(&args.below),
+            images: dated(&args.image),
             page: args.page,
-            x_mm,
-            y_mm,
-            text: unescape(&text),
             size_pt: args.size,
             font: args.font.clone(),
+            colour: args.colour.clone(),
             width_mm: args.width,
             rotation_deg: args.rotation,
-            colour: args.colour.clone(),
             leading: args.leading,
-        });
+        },
+        &args.document,
+    )?;
+    // An anchor is a guess that matched. Saying what it matched, before any
+    // paper is involved, is how somebody notices it found the wrong "Total".
+    for found in &laid.found {
+        println!("{}", found.describe());
     }
 
-    // Words placed against something already on the page. This route used to
-    // drop them without a word — it handed the composer an empty list — so
-    // `onionskin write invoice.pdf --after 'Received:Approved'` wrote a blank
-    // delta and then blamed it on the two documents rendering identically,
-    // which is advice about a different command entirely. `--after` is the
-    // form the help offers first, and a saved job that uses one runs through
-    // here, so this was the quiet failure of the easiest thing to ask for.
-    if !args.after.is_empty() || !args.below.is_empty() {
-        let page_text = read_a_page_of(&args.document, args.page)?;
-        let gap_mm = onionskin::geometry::pt_to_mm(args.size * 0.3);
-        let step_mm = onionskin::geometry::pt_to_mm(args.size * 1.15);
-        for (specs, put) in [
-            (&args.after, onionskin::anchor::Where::After),
-            (&args.below, onionskin::anchor::Where::Below),
-        ] {
-            for spec in &dated(specs) {
-                let (anchor, words) = split_anchor(spec)?;
-                let found = onionskin::anchor::place(&page_text, &anchor, put, gap_mm, step_mm)
-                    .map_err(|e| e.to_string())?;
-                println!(
-                    "Found \"{}\" on the line: {}\n  putting the words at {:.1}, {:.1} mm",
-                    anchor.trim(),
-                    found.line,
-                    found.x_mm,
-                    found.y_mm
-                );
-                items.push(Item {
-                    id: 0,
-                    page: args.page,
-                    x_mm: found.x_mm,
-                    y_mm: found.y_mm,
-                    text: unescape(&words),
-                    size_pt: args.size,
-                    font: args.font.clone(),
-                    width_mm: args.width,
-                    rotation_deg: args.rotation,
-                    colour: args.colour.clone(),
-                    leading: args.leading,
-                });
-            }
-        }
-    }
-
-    let images = placed_images(&dated(&args.image), args.page)?;
     let options = options_from_settings(args.preview.clone(), &args.tuning)?;
     let outcome = pipeline::compose_run_pictures(
         &args.document,
-        &items,
+        &laid.items,
         &[],
-        &images,
+        &laid.images,
         &output,
         None,
         &options,
@@ -7199,77 +6952,6 @@ mod naming_tests {
             let said = options_from_settings(None, &asked).unwrap_err();
             assert!(said.contains("between 50 and 1200"), "{silly}: {said}");
         }
-    }
-
-    #[test]
-    fn a_picture_is_read_from_the_end_so_a_windows_path_still_works() {
-        // The file name comes first and may hold colons of its own, so the
-        // two parts that matter are found from the end.
-        let spec = parse_image("signature.png:120,240:40").unwrap();
-        assert_eq!(spec.path, PathBuf::from("signature.png"));
-        assert_eq!((spec.x_mm, spec.y_mm), (120.0, 240.0));
-        assert_eq!((spec.width_mm, spec.height_mm), (Some(40.0), None));
-
-        let spec = parse_image(r"C:\scans\sign.png:10,20:30").unwrap();
-        assert_eq!(spec.path, PathBuf::from(r"C:\scans\sign.png"));
-
-        // Both measurements, when somebody wants the box exactly.
-        let spec = parse_image("s.png:10,20:40x15").unwrap();
-        assert_eq!((spec.width_mm, spec.height_mm), (Some(40.0), Some(15.0)));
-    }
-
-    #[test]
-    fn a_picture_with_no_size_or_a_silly_one_is_refused_by_name() {
-        for bad in [
-            "signature.png",
-            "signature.png:120,240",
-            ":120,240:40",
-            "s.png:120:40",
-            "s.png:a,b:40",
-            "s.png:10,20:wide",
-        ] {
-            assert!(parse_image(bad).is_err(), "{bad} was accepted");
-        }
-        for silly in ["s.png:10,20:0", "s.png:10,20:-5"] {
-            let said = parse_image(silly).unwrap_err();
-            assert!(said.contains("greater than nothing"), "{said}");
-        }
-    }
-
-    #[test]
-    fn the_measurement_left_out_follows_the_pictures_own_shape() {
-        // A signature squashed into a box it was not drawn for is worse than
-        // no signature at all.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wide.png");
-        // Four across, one down: four times as wide as it is tall.
-        let mut img = image::RgbImage::new(4, 1);
-        for pixel in img.pixels_mut() {
-            *pixel = image::Rgb([0, 0, 0]);
-        }
-        img.save(&path).unwrap();
-
-        let spec = format!("{}:10,20:40", path.to_str().unwrap());
-        let placed = placed_images(&[spec], 1).unwrap();
-        assert_eq!(placed.len(), 1);
-        let image = &placed[0].1;
-        assert!((image.width_mm - 40.0).abs() < 1e-9);
-        assert!((image.height_mm - 10.0).abs() < 1e-9, "{image:?}");
-
-        // And giving only a height works the other way round.
-        let spec = format!("{}:10,20:x10", path.to_str().unwrap());
-        let placed = placed_images(&[spec], 1).unwrap();
-        assert!(
-            (placed[0].1.width_mm - 40.0).abs() < 1e-9,
-            "{:?}",
-            placed[0].1
-        );
-    }
-
-    #[test]
-    fn a_picture_that_is_not_there_says_so_rather_than_writing_a_blank_page() {
-        let said = placed_images(&["nowhere.png:10,20:40".to_string()], 1).unwrap_err();
-        assert!(said.contains("nowhere.png"), "{said}");
     }
 
     #[test]

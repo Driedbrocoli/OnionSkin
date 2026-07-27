@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod document;
 pub mod draw;
 pub mod history;
+pub mod jobs;
 pub mod labels;
 pub mod merge;
 pub mod proof;
@@ -81,6 +82,7 @@ pub enum Screen {
     Proof,
     Merge,
     Labels,
+    Jobs,
     Verify,
     History,
     Devices,
@@ -101,6 +103,7 @@ impl Screen {
         Screen::Proof,
         Screen::Merge,
         Screen::Labels,
+        Screen::Jobs,
         Screen::Verify,
         Screen::History,
         Screen::Devices,
@@ -122,6 +125,7 @@ impl Screen {
             Screen::Proof => "proof",
             Screen::Merge => "merge",
             Screen::Labels => "labels",
+            Screen::Jobs => "jobs",
             Screen::Verify => "verify",
             Screen::History => "history",
             Screen::Devices => "devices",
@@ -149,6 +153,7 @@ impl Screen {
             Screen::Proof => "See it before you print",
             Screen::Merge => "Merge deltas",
             Screen::Labels => "Sheet of labels",
+            Screen::Jobs => "Saved jobs",
             Screen::Verify => "Check a sheet",
             Screen::History => "What was added",
             Screen::Devices => "Printers and scanners",
@@ -170,6 +175,7 @@ impl Screen {
             Screen::Proof => "The sheet and the delta together, on screen",
             Screen::Merge => "Several onto one, so the sheet goes through once",
             Screen::Labels => "Addresses and files, one per label, from a list",
+            Screen::Jobs => "The same stamp on today's document, in two clicks",
             Screen::Verify => "Did it come out of the printer right?",
             Screen::History => "Have I printed this delta already?",
             Screen::Devices => "Print and scan over the network",

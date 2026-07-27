@@ -22,6 +22,7 @@ pub mod picture;
 pub mod pipeline;
 pub mod printer;
 pub mod proof;
+pub mod recipe;
 pub mod render;
 pub mod rows;
 pub mod safety;

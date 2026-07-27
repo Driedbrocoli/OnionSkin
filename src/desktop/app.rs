@@ -30,6 +30,7 @@ pub struct Onionskin {
     proof: screens::proof::State,
     merge: screens::merge::State,
     labels: screens::labels::State,
+    jobs_screen: screens::jobs::State,
     history: screens::history::State,
     devices: screens::devices::State,
     calibrate: screens::calibrate::State,
@@ -63,6 +64,7 @@ impl Onionskin {
             proof: Default::default(),
             merge: Default::default(),
             labels: Default::default(),
+            jobs_screen: Default::default(),
             history: Default::default(),
             devices: Default::default(),
             calibrate: Default::default(),
@@ -111,6 +113,7 @@ impl eframe::App for Onionskin {
                         Screen::Proof => screens::proof::show(&mut self.proof, &mut room),
                         Screen::Merge => screens::merge::show(&mut self.merge, &mut room),
                         Screen::Labels => screens::labels::show(&mut self.labels, &mut room),
+                        Screen::Jobs => screens::jobs::show(&mut self.jobs_screen, &mut room),
                         Screen::History => screens::history::show(&mut self.history, &mut room),
                         Screen::Devices => screens::devices::show(&mut self.devices, &mut room),
                         Screen::Calibrate => {
