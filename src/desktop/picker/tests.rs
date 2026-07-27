@@ -37,6 +37,13 @@ fn browsing_at(at: &Path) -> Browsing {
         path_problem: Some("an old complaint".to_string()),
         type_ahead: "ab".to_string(),
         type_ahead_at: 123.0,
+        // A listing of a folder that is not the one being browsed, so a test
+        // that checks navigating re-read it cannot pass because it was empty.
+        listing: vec![Row {
+            name: "stale".to_string(),
+            path: PathBuf::from("/somewhere/else/stale"),
+            is_dir: false,
+        }],
         focus_name: false,
     }
 }
@@ -339,7 +346,7 @@ fn unresolved_parent_segments_are_kept() {
 fn a_new_name_is_answered_immediately() {
     let at = tempfile::tempdir().unwrap();
     assert_eq!(
-        decide_save(at.path(), "new.onionskin", false),
+        decide_save(at.path(), "new.onionskin", &kinds(), false),
         SaveOutcome::Answer(at.path().join("new.onionskin"))
     );
 }
@@ -349,7 +356,7 @@ fn an_existing_name_asks_to_be_confirmed_first() {
     let at = tempfile::tempdir().unwrap();
     std::fs::write(at.path().join("existing.onionskin"), b"pretend").unwrap();
     assert_eq!(
-        decide_save(at.path(), "existing.onionskin", false),
+        decide_save(at.path(), "existing.onionskin", &kinds(), false),
         SaveOutcome::NeedsConfirmation
     );
 }
@@ -359,7 +366,7 @@ fn confirming_answers_even_though_it_still_exists() {
     let at = tempfile::tempdir().unwrap();
     std::fs::write(at.path().join("existing.onionskin"), b"pretend").unwrap();
     assert_eq!(
-        decide_save(at.path(), "existing.onionskin", true),
+        decide_save(at.path(), "existing.onionskin", &kinds(), true),
         SaveOutcome::Answer(at.path().join("existing.onionskin"))
     );
 }
@@ -368,7 +375,7 @@ fn confirming_answers_even_though_it_still_exists() {
 fn the_name_is_trimmed_before_joining() {
     let at = tempfile::tempdir().unwrap();
     assert_eq!(
-        decide_save(at.path(), "  spaced.onionskin  ", false),
+        decide_save(at.path(), "  spaced.onionskin  ", &kinds(), false),
         SaveOutcome::Answer(at.path().join("spaced.onionskin"))
     );
 }
@@ -411,6 +418,7 @@ fn answering_hands_back_the_path_without_asking_for_the_keyboard() {
 fn moving_to_a_folder_resets_what_belonged_to_the_old_one() {
     let old = tempfile::tempdir().unwrap();
     let new = tempfile::tempdir().unwrap();
+    std::fs::write(new.path().join("here.txt"), b"").unwrap();
     let mut browsing = browsing_at(old.path());
 
     browsing.navigate_to(new.path().to_path_buf());
@@ -421,4 +429,82 @@ fn moving_to_a_folder_resets_what_belonged_to_the_old_one() {
     assert!(!browsing.confirm_overwrite);
     assert_eq!(browsing.path_problem, None);
     assert!(browsing.type_ahead.is_empty());
+    // The listing is read here rather than every frame, so arriving is the
+    // moment it has to be right.
+    let shown: Vec<&str> = browsing.listing.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(shown, vec!["here.txt"]);
+}
+
+/// The kinds a document dialog asks for, for the tests above.
+fn kinds() -> Vec<String> {
+    vec!["onionskin".to_string()]
+}
+
+#[test]
+fn a_typed_name_is_finished_with_the_extension_that_was_asked_for() {
+    // Typing "letter" and getting "letter.onionskin" is what every save
+    // dialog on every system does.
+    let want = kinds();
+    assert_eq!(finish_name("letter", &want), "letter.onionskin");
+    assert_eq!(finish_name("  letter  ", &want), "letter.onionskin");
+    // Already right, and right in the wrong case, are both left alone.
+    assert_eq!(finish_name("letter.onionskin", &want), "letter.onionskin");
+    assert_eq!(finish_name("letter.ONIONSKIN", &want), "letter.ONIONSKIN");
+    // A name promising another kind of file keeps what was typed and gains
+    // the truth, rather than quietly becoming a file nothing else can open.
+    assert_eq!(finish_name("letter.pdf", &want), "letter.pdf.onionskin");
+    // With a choice of kinds there is no telling which was meant, so nothing
+    // is added.
+    let several = vec!["pdf".to_string(), "docx".to_string()];
+    assert_eq!(finish_name("letter", &several), "letter");
+    assert_eq!(finish_name("letter", &[]), "letter");
+}
+
+#[test]
+fn saving_lands_on_the_finished_name() {
+    let at = tempfile::tempdir().unwrap();
+    assert_eq!(
+        decide_save(at.path(), "letter", &kinds(), false),
+        SaveOutcome::Answer(at.path().join("letter.onionskin"))
+    );
+    // And the overwrite question is asked about the name that will really be
+    // written, not the one that was typed.
+    std::fs::write(at.path().join("letter.onionskin"), b"{}").unwrap();
+    assert_eq!(
+        decide_save(at.path(), "letter", &kinds(), false),
+        SaveOutcome::NeedsConfirmation
+    );
+}
+
+#[test]
+fn a_document_shows_in_the_list_whatever_it_was_called() {
+    let at = tempfile::tempdir().unwrap();
+    let document = br#"{"page":{"width_mm":210.0,"height_mm":297.0},"pages":1,"items":[],"next_id":1}"#;
+    std::fs::write(at.path().join("proper.onionskin"), document).unwrap();
+    std::fs::write(at.path().join("misnamed.pdf"), document).unwrap();
+    std::fs::write(at.path().join("theirs.pdf"), b"%PDF-1.7\n").unwrap();
+    std::fs::write(at.path().join("proper.onionskin.before"), document).unwrap();
+
+    let shown: Vec<String> = read_folder(at.path(), &kinds())
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    assert!(shown.contains(&"proper.onionskin".to_string()), "{shown:?}");
+    assert!(shown.contains(&"misnamed.pdf".to_string()), "{shown:?}");
+    // Somebody else's real PDF is not a document and stays out of a list
+    // asking for documents.
+    assert!(!shown.contains(&"theirs.pdf".to_string()), "{shown:?}");
+    // And nor does the copy Undo keeps, which is a document by content but
+    // is Onionskin's own bookkeeping.
+    assert!(
+        !shown.contains(&"proper.onionskin.before".to_string()),
+        "{shown:?}"
+    );
+
+    // A dialog asking for PDFs is unaffected: it wants what the name says.
+    let pdfs: Vec<String> = read_folder(at.path(), &["pdf".to_string()])
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(pdfs, vec!["misnamed.pdf", "theirs.pdf"]);
 }

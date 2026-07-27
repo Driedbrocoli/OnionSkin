@@ -73,6 +73,14 @@ struct Browsing {
     /// `type_ahead`, so a pause of about a second can start the next search
     /// fresh. See `prefix_expired`.
     type_ahead_at: f64,
+    /// What is in `at`, read once when the folder changed rather than on
+    /// every frame.
+    ///
+    /// The dialog redraws sixty times a second and the folder does not
+    /// change sixty times a second. Reading it once per folder also makes it
+    /// affordable to look *inside* candidate files — see `has_kind` — which
+    /// at a `read_dir` per frame it would not be.
+    listing: Vec<Row>,
     /// Whether the name field still owes itself the keyboard this time the
     /// dialog is open.
     ///
@@ -84,6 +92,7 @@ struct Browsing {
 }
 
 /// One row in the list.
+#[derive(Clone)]
 struct Row {
     name: String,
     path: PathBuf,
@@ -170,13 +179,15 @@ impl Picker {
             .filter(|p| p.is_dir())
             .unwrap_or_else(somewhere_sensible);
 
+        let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
         self.open = Some(Browsing {
             who,
             purpose,
             title: title.to_string(),
             path_box: at.to_string_lossy().into_owned(),
+            listing: read_folder(&at, &kinds),
             at,
-            kinds: kinds.iter().map(|k| k.to_string()).collect(),
+            kinds,
             name: suggested.to_string(),
             chosen: None,
             confirm_overwrite: false,
@@ -287,7 +298,11 @@ impl Picker {
             });
             ui.separator();
 
-            let rows = read_folder(&browsing.at, &browsing.kinds);
+            // Borrowed out of `browsing` for the frame, because everything
+            // below wants `&mut browsing` as well, and handed back at the
+            // bottom of this function.
+            let listed_at = browsing.at.clone();
+            let rows = std::mem::take(&mut browsing.listing);
 
             // The path box asked to land on a particular file; now that the
             // folder it lives in has actually been read, find it in the same
@@ -514,6 +529,7 @@ impl Picker {
                             let outcome = decide_save(
                                 &browsing.at,
                                 &browsing.name,
+                                &browsing.kinds,
                                 browsing.confirm_overwrite,
                             );
                             if let Some(path) = apply_save_outcome(browsing, outcome) {
@@ -567,6 +583,7 @@ impl Picker {
                             let outcome = decide_save(
                                 &browsing.at,
                                 &browsing.name,
+                                &browsing.kinds,
                                 browsing.confirm_overwrite,
                             );
                             if let Some(path) = apply_save_outcome(browsing, outcome) {
@@ -579,6 +596,14 @@ impl Picker {
                     close = true;
                 }
             });
+
+            // Handed back now everything above has finished reading it, so
+            // the next frame does not have to read the folder again. Unless
+            // something above walked into another folder, in which case the
+            // listing it left behind is the right one and this is stale.
+            if browsing.at == listed_at {
+                browsing.listing = rows;
+            }
         });
 
         // The modal already knows how to close itself on a click outside it
@@ -605,6 +630,7 @@ impl Browsing {
     /// before.
     fn navigate_to(&mut self, at: PathBuf) {
         self.path_box = at.to_string_lossy().into_owned();
+        self.listing = read_folder(&at, &self.kinds);
         self.at = at;
         self.chosen = None;
         self.confirm_overwrite = false;
@@ -692,13 +718,33 @@ fn read_folder(at: &Path, kinds: &[String]) -> Vec<Row> {
 }
 
 fn has_kind(path: &Path, kinds: &[String]) -> bool {
-    let Some(extension) = path.extension().and_then(|e| e.to_str()) else {
-        return false;
-    };
-    let extension = extension.to_ascii_lowercase();
-    kinds
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if kinds
         .iter()
         .any(|kind| kind.eq_ignore_ascii_case(&extension))
+    {
+        return true;
+    }
+    // A dialog asking for a document should show every document in the
+    // folder, including one somebody called `letter.pdf`. The name is theirs
+    // to choose; being unable to find their own file afterwards is not a
+    // consequence they signed up for.
+    //
+    // Affordable only because the folder is read once when it changes rather
+    // than once a frame. See `Browsing::listing`.
+    // Except the copy Undo keeps. It is a document by every test here, but it
+    // is Onionskin's own bookkeeping rather than a file anybody chose to make,
+    // and offering it invites somebody to open it and carry on working in the
+    // wrong one.
+    if path.extension().is_some_and(|e| e == "before") {
+        return false;
+    }
+    kinds.iter().any(|kind| kind == "onionskin")
+        && onionskin::document::Document::is_one(path)
 }
 
 /// Work out what somebody meant by typing, or pasting, `input` into the path
@@ -845,12 +891,35 @@ fn enter_row(rows: &[Row], chosen: Option<usize>) -> Option<Entered> {
 /// should do: answer with the path, unless it already exists and
 /// `already_confirmed` is not yet true, in which case the caller should arm
 /// the confirmation and wait to be asked again before writing over it.
-fn decide_save(at: &Path, name: &str, already_confirmed: bool) -> SaveOutcome {
-    let path = at.join(name.trim());
+fn decide_save(at: &Path, name: &str, kinds: &[String], already_confirmed: bool) -> SaveOutcome {
+    let path = at.join(finish_name(name, kinds));
     if path.exists() && !already_confirmed {
-        SaveOutcome::NeedsConfirmation
+        return SaveOutcome::NeedsConfirmation;
+    }
+    SaveOutcome::Answer(path)
+}
+
+/// Finish a typed name with the extension the dialog is asking for.
+///
+/// Typing `letter` and getting `letter.onionskin` is what every save dialog
+/// on every system does, and typing `letter.pdf` when a document was wanted
+/// gets `letter.pdf.onionskin` — an odd name, but one that still opens, still
+/// appears in this list, and cannot be mistaken by anything else for a PDF it
+/// is not. Only done when exactly one kind is wanted, because with a choice
+/// of several there is no telling which was meant.
+fn finish_name(name: &str, kinds: &[String]) -> String {
+    let name = name.trim();
+    let [kind] = kinds else {
+        return name.to_string();
+    };
+    let already = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(kind));
+    if already || name.is_empty() {
+        name.to_string()
     } else {
-        SaveOutcome::Answer(path)
+        format!("{name}.{kind}")
     }
 }
 
@@ -868,6 +937,11 @@ fn apply_save_outcome(browsing: &mut Browsing, outcome: SaveOutcome) -> Option<P
     match outcome {
         SaveOutcome::Answer(path) => Some(path),
         SaveOutcome::NeedsConfirmation => {
+            // Show the name that is really about to be written over, not the
+            // one that was typed. "There is already a file of that name" is a
+            // confusing thing to read next to a box holding a name that is
+            // not in the list.
+            browsing.name = finish_name(&browsing.name, &browsing.kinds);
             browsing.confirm_overwrite = true;
             browsing.focus_name = true;
             None

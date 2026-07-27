@@ -1328,3 +1328,50 @@ fn the_kept_copy_sits_beside_the_document_it_belongs_to() {
     let beside = dir.path().join("d.onionskin.before");
     assert!(beside.is_file(), "{:?}", std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>());
 }
+
+#[test]
+fn a_document_is_known_by_what_is_in_it_not_what_it_is_called() {
+    // Somebody who calls their document letter.pdf has made a document called
+    // letter.pdf. Every command that decided by the extension used to open it
+    // expecting a PDF and report it damaged — a file Onionskin wrote itself,
+    // one command earlier.
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["letter.pdf", "letter.docx", "letter.odt", "letter", "l.onion"] {
+        let path = dir.path().join(name);
+        Document::blank(A4, 1).save(&path).unwrap();
+        assert!(Document::is_one(&path), "{name} was not recognised");
+        assert!(Document::load(&path).is_ok(), "{name} would not load");
+    }
+}
+
+#[test]
+fn a_real_pdf_or_word_file_is_never_mistaken_for_a_document() {
+    // The other direction matters more: mistaking somebody's Word file for an
+    // Onionskin document would edit it in place, and their file is theirs.
+    let dir = tempfile::tempdir().unwrap();
+    for (name, magic) in [
+        ("real.pdf", &b"%PDF-1.7\n"[..]),
+        ("real.docx", &b"PK\x03\x04"[..]),
+        ("real.png", &b"\x89PNG\r\n\x1a\n"[..]),
+        ("empty.onion", &b""[..]),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, magic).unwrap();
+        assert!(!Document::is_one(&path), "{name} was wrongly claimed");
+    }
+    assert!(!Document::is_one(&dir.path().join("not-there-at-all")));
+}
+
+#[test]
+fn a_broken_document_is_still_a_document() {
+    // So the complaint is that the document is broken, which is true and
+    // fixable, rather than that the PDF is — which is neither.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("half-written.pdf");
+    std::fs::write(&path, b"\n  {\"page\": {\"width_mm\": 210.0,").unwrap();
+    assert!(Document::is_one(&path));
+    assert!(matches!(
+        Document::load(&path),
+        Err(DocumentError::Malformed { .. })
+    ));
+}

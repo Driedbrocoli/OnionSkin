@@ -304,6 +304,11 @@ onionskin write order.onionskin --at '25,150:Approved — J. Bezzina, 26 July'
 onionskin print order.onionskin -o delta.pdf --delta
 ```
 
+Call the document whatever you like. Onionskin knows its own documents by what
+is in them, not by what they are named, so `order.pdf` works exactly as well —
+`new` will just mention that nothing *else* will open a file by that name, and
+tell you the one command that turns it into a real PDF.
+
 ### Draw on it
 
 Lines, boxes, circles and paths, anywhere on the page, in any colour. Drawings
@@ -790,6 +795,11 @@ work by hand.
 One version, not a hundred. Somebody who has just done the wrong thing wants
 the last thing undone; a program that quietly filled their folder with versions
 would be solving a different problem badly.
+
+In the window there is an Undo button beside the page controls, on both the
+Make a document and Draw on a page screens — the two places where removing
+something is a single click. It is greyed out until there is something to go
+back to.
 
 ## Tab completion
 

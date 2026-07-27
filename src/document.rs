@@ -293,6 +293,35 @@ impl Document {
         }
     }
 
+    /// Is this file one of Onionskin's own documents?
+    ///
+    /// By what is in it, not by what it is called. Somebody who names their
+    /// document `letter.pdf` has made a document called `letter.pdf`, and
+    /// every command that decides by the extension would otherwise open it
+    /// expecting a PDF, fail, and report that the file is damaged — about a
+    /// file Onionskin wrote itself, one command earlier.
+    ///
+    /// A document is JSON, so it opens with `{`. A PDF opens with `%PDF`, a
+    /// Word or OpenDocument file with `PK`, and every image with a magic
+    /// number of its own. None of them can collide with this. The file is not
+    /// parsed: one that starts with `{` is *meant* to be a document, and if it
+    /// is broken the right complaint is that the document is broken, not that
+    /// the PDF is.
+    pub fn is_one(path: &Path) -> bool {
+        use std::io::Read;
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return false;
+        };
+        let mut start = [0u8; 64];
+        let Ok(read) = file.read(&mut start) else {
+            return false;
+        };
+        start[..read]
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .is_some_and(|byte| *byte == b'{')
+    }
+
     pub fn load(path: &Path) -> Result<Document, DocumentError> {
         if !path.is_file() {
             return Err(DocumentError::Missing(path.to_path_buf()));

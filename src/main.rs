@@ -1004,6 +1004,16 @@ fn cmd_new(args: NewArgs) -> Result<ExitCode, String> {
         args.pages,
         if args.pages == 1 { "" } else { "s" }
     );
+    if let Some(kind) = misleading_name(&args.document) {
+        println!(
+            "\nNote: the name ends as though it were {kind}, and this is an \
+             Onionskin document —\nOnionskin opens it whatever it is called, \
+             but other programs will not. When you want a PDF:\n  onionskin \
+             print {} -o {}",
+            args.document.display(),
+            beside(&args.document, "-printed", "pdf").display()
+        );
+    }
     println!(
         "\nPut words on it:\n  onionskin write {} --at '25,40:Dear Sir'",
         args.document.display()
@@ -1558,8 +1568,13 @@ fn export_page(
 fn cmd_scanners() -> Result<ExitCode, String> {
     // Anything attached to this machine, through SANE. An error here means no
     // scanning tool is installed, which is worth saying once at the end rather
-    // than instead of the network scanners that may well be there.
-    let attached = list_devices().unwrap_or_default();
+    // than instead of the network scanners that may well be there — but it
+    // must still be said. Dropping it left a machine with no SANE on it being
+    // told to check the scanner was switched on.
+    let (attached, no_tool) = match list_devices() {
+        Ok(devices) => (devices, None),
+        Err(why) => (Vec::new(), Some(why.to_string())),
+    };
     if !attached.is_empty() {
         println!("Attached to this machine:");
         for device in &attached {
@@ -1584,12 +1599,19 @@ fn cmd_scanners() -> Result<ExitCode, String> {
     }
 
     if attached.is_empty() && network.is_empty() {
-        println!(
-            "No scanners found.\n\n\
-             Check it is switched on, and plugged in or on this network. Onionskin\n\
-             drives an attached scanner through SANE's 'scanimage' — install it with\n\
-             your package manager, for example:  sudo apt install sane-utils"
-        );
+        println!("No scanners found.");
+        match &no_tool {
+            // The tool is missing, so nothing attached could have been found
+            // whatever is plugged in. Say that, rather than sending somebody
+            // to check a cable that is fine.
+            Some(why) => println!("\n{why}"),
+            None => println!(
+                "\nCheck it is switched on, and plugged in or on this network. Onionskin\n\
+                 found SANE's 'scanimage' but it reported no scanner attached.\n\
+                 You can also scan with any program you like and pass the image file\n\
+                 instead."
+            ),
+        }
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
@@ -1915,6 +1937,21 @@ fn warn_drawings_off_the_page(document: &Document) {
 }
 
 fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
+    // Onionskin's own document is neither a scan nor a file to print onto, so
+    // it belongs on neither path below. Falling through to the scan one told
+    // people their document "was not recognized as an image format", which is
+    // true and no help at all.
+    if Document::is_one(&args.scan) {
+        return Err(format!(
+            "{} is an Onionskin document, so there is a better way than a \
+             delta measured off a scan.\n    Add the words:  onionskin write \
+             {} --at '25,40:the words'\n    Then print only those:  onionskin \
+             print {} -o delta.pdf --delta",
+            args.scan.display(),
+            args.scan.display(),
+            args.scan.display()
+        ));
+    }
     // A PDF or a Word file is a document, not a photograph of one: it already
     // knows its own page size and needs no registering. Only the scanned-image
     // path has a sheet to find.
@@ -2626,13 +2663,42 @@ fn cmd_compare(args: CompareArgs) -> Result<ExitCode, String> {
 /// A PDF or a Word file already knows its own page size. An image is a
 /// photograph of a sheet, and has to be measured before anything can be placed
 /// on it — a different job, with different ways to go wrong.
+///
+/// What the file *is* beats what it is called. One of Onionskin's own
+/// documents is edited in place whatever somebody named it: calling it
+/// `letter.pdf` is a naming choice, not a request to be told the file is a
+/// damaged PDF.
 fn is_document(path: &Path) -> bool {
+    if Document::is_one(path) {
+        return false;
+    }
     let suffix = path
         .extension()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     onionskin::render::CONVERTIBLE.contains(&suffix.as_str())
         || onionskin::render::PASSTHROUGH.contains(&suffix.as_str())
+}
+
+/// Names that promise a file of a kind this is not.
+///
+/// Not refused — the name is the user's to choose, and Onionskin opens it
+/// again perfectly well. But a document called `letter.pdf` will not open in
+/// anything else, and finding that out from a PDF viewer's error message is a
+/// worse way to learn it than being told here.
+fn misleading_name(path: &Path) -> Option<String> {
+    let suffix = path
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let kind = match suffix.as_str() {
+        "pdf" => "a PDF",
+        "docx" | "doc" => "a Word file",
+        "odt" => "an OpenDocument file",
+        "png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" => "an image",
+        _ => return None,
+    };
+    Some(kind.to_string())
 }
 
 /// Type words onto a document at millimetres measured on the paper.
@@ -4317,5 +4383,90 @@ mod tests {
             beside(Path::new("minutes.2026.03.docx"), "-delta", "pdf"),
             PathBuf::from("minutes.2026.03-delta.pdf")
         );
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+
+    #[test]
+    fn onionskins_own_document_is_edited_in_place_whatever_it_is_called() {
+        // The trap this closes: `onionskin new letter.pdf` printed the very
+        // command to run next, and that command then said the file was a
+        // damaged PDF. Onionskin had written it itself, one line earlier.
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["letter.pdf", "letter.docx", "letter.odt", "letter.png"] {
+            let path = dir.path().join(name);
+            Document::blank(onionskin::calibrate::A4, 1)
+                .save(&path)
+                .unwrap();
+            assert!(!is_document(&path), "{name} was sent down the delta path");
+        }
+    }
+
+    #[test]
+    fn a_real_pdf_or_word_file_still_gets_a_delta() {
+        // And the direction that matters more: somebody's own file is theirs,
+        // and must never be edited in place.
+        let dir = tempfile::tempdir().unwrap();
+        for (name, magic) in [
+            ("theirs.pdf", &b"%PDF-1.7\n"[..]),
+            ("theirs.docx", &b"PK\x03\x04"[..]),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, magic).unwrap();
+            assert!(is_document(&path), "{name} would have been edited");
+        }
+        // A name with no file behind it keeps deciding by the extension,
+        // because that is all there is to go on.
+        assert!(is_document(&dir.path().join("not-yet.pdf")));
+        assert!(!is_document(&dir.path().join("not-yet.onion")));
+    }
+
+    #[test]
+    fn add_points_at_write_rather_than_calling_a_document_a_bad_image() {
+        // `add` measures a delta off a scan. Handed one of Onionskin's own
+        // documents it used to fall through to the image path and report that
+        // the file "was not recognized as an image format" — true, and no
+        // help at all when there is a command that does exactly what was
+        // wanted.
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["letter.onionskin", "letter.pdf"] {
+            let path = dir.path().join(name);
+            Document::blank(onionskin::calibrate::A4, 1)
+                .save(&path)
+                .unwrap();
+            let cli = Cli::parse_from([
+                "onionskin",
+                "add",
+                path.to_str().unwrap(),
+                "--at-mm",
+                "20,80:Approved",
+            ]);
+            let Some(Command::Add(args)) = cli.command else {
+                panic!("add did not parse");
+            };
+            let said = cmd_add(args).unwrap_err();
+            assert!(said.contains("Onionskin document"), "{said}");
+            assert!(said.contains("onionskin write"), "{said}");
+            assert!(!said.contains("image format"), "{said}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_promises_another_kind_of_file_is_mentioned_once() {
+        assert_eq!(misleading_name(Path::new("a.pdf")).as_deref(), Some("a PDF"));
+        assert_eq!(
+            misleading_name(Path::new("a.DOCX")).as_deref(),
+            Some("a Word file")
+        );
+        assert_eq!(
+            misleading_name(Path::new("a.jpeg")).as_deref(),
+            Some("an image")
+        );
+        // The names that promise nothing say nothing.
+        assert_eq!(misleading_name(Path::new("letter.onion")), None);
+        assert_eq!(misleading_name(Path::new("letter")), None);
     }
 }

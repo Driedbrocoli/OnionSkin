@@ -220,6 +220,21 @@ pub fn to_pdf_noting(
             source.display()
         )));
     }
+    // One of Onionskin's own documents, whatever it has been named. Opening it
+    // as though the extension were the truth ends in "this PDF is damaged",
+    // which is both wrong and unhelpful: the file is fine, and there is a
+    // command that does what was wanted.
+    if crate::document::Document::is_one(source) {
+        return Err(RenderError::Document(format!(
+            "{} is an Onionskin document, not a file to print onto.\n    \
+             To make a PDF of it:      onionskin print {} -o out.pdf\n    \
+             To put words on it:       onionskin write {} --at '25,40:words'",
+            source.display(),
+            source.display(),
+            source.display()
+        )));
+    }
+
     let suffix = source
         .extension()
         .map(|s| s.to_string_lossy().to_lowercase())
