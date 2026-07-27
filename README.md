@@ -869,6 +869,36 @@ document with different words on them. When two candidates look alike it says
 so rather than picking one, and exits 2 so a script stops and asks instead of
 filing the sheet wrongly.
 
+### A whole stack through the feeder
+
+Forty sheets go through the document feeder and come back as one PDF called
+`Scan_0007`. Each one belongs with a document somewhere on a disk.
+
+```bash
+onionskin stack Scan_0007.pdf --among documents/*.pdf --to sorted/
+```
+
+```
+Scan_0007.pdf: 4 sheets, against 3 documents.
+
+  sheet   1  invoice.pdf  → sorted/invoice-sheet-001.pdf
+  sheet   2  memo.pdf     → sorted/memo-sheet-002.pdf
+  sheet   3  ?  closest is letter.pdf at 0.6120
+          → sorted/sheet-003.pdf
+  sheet   4  invoice.pdf  → sorted/invoice-sheet-004.pdf
+
+1 of the 4 sheets could not be placed — sheet 3.
+```
+
+Each sheet is written out under the name of the document it turned out to be,
+numbered by its place in the stack so two sheets of one document cannot
+overwrite each other. A sheet that cannot be placed keeps its number instead of
+being given a name it might not deserve, and the run exits 2 — a sheet filed
+under the wrong document is worse than one left in the pile, so a script sorting
+a stack stops and asks.
+
+Without `--to` nothing is written and the stack is only reported on.
+
 ### Several deltas, one pass through the printer
 
 A day's work on one document arrives as more than one delta. The paid stamp is a

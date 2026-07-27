@@ -100,6 +100,9 @@ enum Command {
     Fits(FitsArgs),
     /// Work out which of several documents a scanned sheet came from.
     Which(WhichArgs),
+    /// A whole stack from the feeder: say which document each sheet is, and
+    /// split them into one file each.
+    Stack(StackArgs),
     /// See the sheet with the delta on it, before printing either.
     Proof(ProofArgs),
     /// Put several deltas onto one, so the sheet goes through once.
@@ -484,6 +487,19 @@ struct LearnArgs {
 /// certificates go in the envelopes and the mistake surfaces at the far end.
 ///
 /// So: scan the first one, and be told.
+#[derive(clap::Args)]
+struct StackArgs {
+    /// The stack as the feeder produced it: one PDF, many sheets.
+    scan: PathBuf,
+    /// The documents the sheets might be. Give as many as you like.
+    #[arg(long = "among", value_name = "FILE", num_args = 1.., required = true)]
+    among: Vec<PathBuf>,
+    /// Where to write one file per sheet. Without it, nothing is written and
+    /// the stack is only reported on.
+    #[arg(long = "to", value_name = "FOLDER")]
+    to: Option<PathBuf>,
+}
+
 #[derive(clap::Args)]
 struct WhichArgs {
     /// The sheet to identify: a scan, a photograph, or a PDF of it.
@@ -1666,6 +1682,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Verify(args) => cmd_verify(args),
         Command::Fits(args) => cmd_fits(args),
         Command::Which(args) => cmd_which(args),
+        Command::Stack(args) => cmd_stack(args),
         Command::Proof(args) => cmd_proof(args),
         Command::Merge(args) => cmd_merge(args),
         Command::Blanks(args) => cmd_blanks(args),
@@ -4723,6 +4740,140 @@ fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> 
 /// marks spread across the page to say it. This one wants to know whether
 /// *this sheet* is right, which one addition can answer — and answers it before
 /// the other fifty-nine go through.
+/// A whole stack through the feeder, sorted.
+///
+/// Forty sheets go through the document feeder and come back as one PDF called
+/// `Scan_0007`. Every one of them belongs with a document somewhere on a disk,
+/// and putting them together is an afternoon of opening files and squinting.
+///
+/// Each sheet is asked which document it is, and — where a folder is given —
+/// written out under that document's name. Sheets that cannot be placed keep
+/// their number and are listed at the end, because a sheet filed under the
+/// wrong document is worse than one left in the pile.
+fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
+    let threshold = onionskin::diff::DiffOptions::default().ink_threshold;
+    let sheets = onionskin::recipe::pages_in(&args.scan)?;
+    if sheets == 0 {
+        return Err(format!("there are no pages in '{}'.", args.scan.display()));
+    }
+
+    if let Some(folder) = &args.to {
+        std::fs::create_dir_all(folder)
+            .map_err(|e| format!("could not make '{}': {e}", folder.display()))?;
+    }
+
+    println!(
+        "{}: {sheets} sheet{}, against {} document{}.\n",
+        args.scan.display(),
+        if sheets == 1 { "" } else { "s" },
+        args.among.len(),
+        if args.among.len() == 1 { "" } else { "s" }
+    );
+
+    // The candidates are drawn once, not once a sheet. Forty sheets against ten
+    // documents would otherwise open and render the same ten files forty times.
+    let mut drawn: Vec<(PathBuf, Result<onionskin::which::Signature, String>)> = Vec::new();
+    for path in &args.among {
+        let signature = onionskin::recipe::draw_page(path, 1).map(|(gray, registration)| {
+            let width = gray.width() as usize;
+            onionskin::which::Signature::of(
+                gray.as_raw(),
+                width,
+                registration.px_per_mm * 25.4,
+                registration.page,
+                threshold,
+            )
+        });
+        drawn.push((path.clone(), signature));
+    }
+
+    let mut unplaced: Vec<usize> = Vec::new();
+    for sheet in 1..=sheets {
+        let (gray, registration) = onionskin::recipe::draw_page(&args.scan, sheet)?;
+        let width = gray.width() as usize;
+        let signature = onionskin::which::Signature::of(
+            gray.as_raw(),
+            width,
+            registration.px_per_mm * 25.4,
+            registration.page,
+            threshold,
+        );
+        let ranking = onionskin::which::among(&signature, &args.among, |path| {
+            drawn
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .map(|(_, signature)| signature.clone())
+                .unwrap_or_else(|| Err("it was not drawn".to_string()))
+        });
+
+        match (ranking.confident(), ranking.best()) {
+            (true, Some(best)) => {
+                print!("  sheet {sheet:>3}  {}", best.path.display());
+                if let Some(folder) = &args.to {
+                    let out = folder.join(sheet_named(&best.path, sheet));
+                    match onionskin::split::keep_only(&args.scan, &[sheet], &out) {
+                        Ok(()) => print!("  → {}", out.display()),
+                        Err(e) => print!("  (could not write it: {e})"),
+                    }
+                }
+                println!();
+            }
+            _ => {
+                unplaced.push(sheet);
+                println!(
+                    "  sheet {sheet:>3}  ?  {}",
+                    ranking
+                        .best()
+                        .map(|best| format!(
+                            "closest is {} at {:.4}",
+                            best.path.display(),
+                            best.distance
+                        ))
+                        .unwrap_or_else(|| "nothing to compare it with".to_string())
+                );
+                if let Some(folder) = &args.to {
+                    let out = folder.join(format!("sheet-{sheet:03}.pdf"));
+                    if let Err(e) = onionskin::split::keep_only(&args.scan, &[sheet], &out) {
+                        println!("          (could not write it: {e})");
+                    } else {
+                        println!("          → {}", out.display());
+                    }
+                }
+            }
+        }
+    }
+
+    if unplaced.is_empty() {
+        println!("\nEvery sheet was placed.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!(
+        "\n{} of the {sheets} sheet{} could not be placed — {} {}.",
+        unplaced.len(),
+        if sheets == 1 { "" } else { "s" },
+        if unplaced.len() == 1 {
+            "sheet"
+        } else {
+            "sheets"
+        },
+        onionskin::split::sheets(&unplaced)
+    );
+    println!("  Look at those yourself — a sheet filed under the wrong document is");
+    println!("  worse than one left in the pile.");
+    // Exit 2, so a script sorting a stack stops on the ones that need a person.
+    Ok(ExitCode::from(2))
+}
+
+/// What to call a sheet that matched a document, keeping its place in the
+/// stack so two sheets of the same document do not write over one another.
+fn sheet_named(document: &Path, sheet: usize) -> String {
+    let stem = document
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sheet".to_string());
+    format!("{stem}-sheet-{sheet:03}.pdf")
+}
+
 /// Which of these documents is this sheet?
 ///
 /// A stack comes back from the scanner named `Scan_0007`, and the documents

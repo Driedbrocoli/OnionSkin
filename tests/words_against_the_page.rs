@@ -842,3 +842,155 @@ fn a_sheet_that_matches_nothing_offered_is_not_filed_anyway() {
         said.said()
     );
 }
+
+/// The same lines, laid on a chosen page of a document.
+///
+/// Used to build both a one-page candidate and a many-page stack out of the
+/// same content, so the sheets in the stack really are the documents offered.
+fn lay_on_page(home: &Path, document: &str, page: usize, lines: &[(f64, &str)]) {
+    for (y_mm, words) in lines {
+        let placed = format!("20,{y_mm}:{words}");
+        let written = run(
+            home,
+            &[
+                "write",
+                document,
+                "--at",
+                &placed,
+                "--size",
+                "12",
+                "--page",
+                &page.to_string(),
+            ],
+        );
+        assert!(written.ok, "{}", written.said());
+    }
+}
+
+const AN_INVOICE: &[(f64, &str)] = &[(25.0, "ACME LIMITED"), (70.0, "Item   Qty   Price")];
+const A_LETTER: &[(f64, &str)] = &[(60.0, "Dear Sir or Madam,"), (120.0, "Yours faithfully,")];
+const A_MEMO: &[(f64, &str)] = &[(150.0, "MEMORANDUM")];
+
+/// A stack of sheets as the feeder produces it: one PDF, one sheet a page.
+fn a_stack(home: &Path, dir: &Path, sheets: &[&[(f64, &str)]]) -> PathBuf {
+    let source = dir.join("stack.osk").to_string_lossy().into_owned();
+    assert!(run(home, &["new", &source, "--page", "a4"]).ok);
+    for (index, lines) in sheets.iter().enumerate() {
+        lay_on_page(home, &source, index + 1, lines);
+    }
+    let pdf = dir.join("stack.pdf");
+    let printed = run(home, &["print", &source, "-o", &pdf.to_string_lossy()]);
+    assert!(printed.ok, "{}", printed.said());
+    pdf
+}
+
+/// A stack from the feeder comes back as one PDF. Every sheet in it belongs
+/// with a document somewhere, and putting them together by hand is an
+/// afternoon of opening files.
+#[test]
+fn a_stack_from_the_feeder_is_sorted_and_split() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let invoice = a_document(&home, dir.path(), "invoice", AN_INVOICE);
+    let letter = a_document(&home, dir.path(), "letter", A_LETTER);
+    let stack = a_stack(&home, dir.path(), &[AN_INVOICE, A_LETTER]);
+
+    let into = dir.path().join("sorted");
+    let sorted = run(
+        &home,
+        &[
+            "stack",
+            &stack.to_string_lossy(),
+            "--among",
+            &invoice.to_string_lossy(),
+            &letter.to_string_lossy(),
+            "--to",
+            &into.to_string_lossy(),
+        ],
+    );
+    assert!(
+        sorted.ok,
+        "a stack of two known documents was not sorted: {}",
+        sorted.said()
+    );
+    assert!(
+        sorted.said().contains("Every sheet was placed"),
+        "{}",
+        sorted.said()
+    );
+
+    // One file per sheet, named for the document it turned out to be, and
+    // numbered so two sheets of one document cannot overwrite each other.
+    let written: Vec<String> = std::fs::read_dir(&into)
+        .expect("the folder was made")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(written.len(), 2, "{written:?}");
+    assert!(
+        written
+            .iter()
+            .any(|name| name.starts_with("invoice-sheet-001")),
+        "{written:?}"
+    );
+    assert!(
+        written
+            .iter()
+            .any(|name| name.starts_with("letter-sheet-002")),
+        "{written:?}"
+    );
+}
+
+/// A sheet that matches nothing offered keeps its number and is listed, and
+/// the whole run fails — a sheet filed under the wrong document is worse than
+/// one left in the pile, so a script sorting a stack has to stop and ask.
+#[test]
+fn a_sheet_that_belongs_to_none_of_them_is_left_for_a_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let invoice = a_document(&home, dir.path(), "invoice", AN_INVOICE);
+    // The memo is in the stack and deliberately not among the candidates.
+    let stack = a_stack(&home, dir.path(), &[AN_INVOICE, A_MEMO]);
+
+    let into = dir.path().join("sorted");
+    let sorted = run(
+        &home,
+        &[
+            "stack",
+            &stack.to_string_lossy(),
+            "--among",
+            &invoice.to_string_lossy(),
+            "--to",
+            &into.to_string_lossy(),
+        ],
+    );
+    assert!(
+        !sorted.ok,
+        "a sheet belonging to nothing offered was filed anyway: {}",
+        sorted.said()
+    );
+    assert!(
+        sorted.said().contains("could not be placed"),
+        "{}",
+        sorted.said()
+    );
+
+    // It is still written out, under its own number rather than a wrong name.
+    let written: Vec<String> = std::fs::read_dir(&into)
+        .expect("the folder was made")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        written.iter().any(|name| name == "sheet-002.pdf"),
+        "the unplaced sheet was not kept by its number: {written:?}"
+    );
+    assert!(
+        !written
+            .iter()
+            .any(|name| name.starts_with("invoice-sheet-002")),
+        "the unplaced sheet was filed under a document it is not: {written:?}"
+    );
+}
