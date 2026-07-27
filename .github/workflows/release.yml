@@ -21,9 +21,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build, without the v"
-        required: true
-        default: "0.1.0"
+        # Left blank on purpose, and not required. A version box that arrives
+        # pre-filled with a number is a trap: dispatching without touching it
+        # — which is what the API does when it is not passed a version —
+        # silently builds that release instead of this one, and replaces its
+        # archives with the wrong binaries. Blank means "the version in
+        # Cargo.toml", which is the only answer that cannot be stale.
+        description: "Version to build, without the v. Blank uses Cargo.toml."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -44,8 +50,18 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
+            if [ -z "$version" ]; then
+              # The version this checkout actually is, rather than one
+              # somebody has to remember to type.
+              version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+              echo "No version given; building $version from Cargo.toml."
+            fi
           else
             version="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$version" ]; then
+            echo "Could not work out a version to build." >&2
+            exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
