@@ -4772,16 +4772,36 @@ fn escape_for_fish(text: &str) -> String {
 /// case, because the image *is* the page: no skew to find, no paper edge to
 /// look for, and the resolution is whatever was asked for.
 fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> {
+    read_a_page_of(path, 1)
+}
+
+/// The same, for a page other than the first.
+///
+/// `write` takes a `--page`, and words anchored to something on page three have
+/// to be matched against page three: reading page one and placing on page three
+/// would find nothing, or — worse — find the same heading and put the words at
+/// its position on the wrong sheet.
+fn read_a_page_of(path: &Path, page: usize) -> Result<onionskin::letters::PageText, String> {
     let engine = onionskin::render::engine().map_err(|e| e.to_string())?;
     let workspace = onionskin::render::Workspace::new(false).map_err(|e| e.to_string())?;
     let (pdf, _, _) =
         onionskin::render::to_pdf_noting(path, &workspace.path, 180).map_err(|e| e.to_string())?;
     let document = engine.open(&pdf).map_err(|e| e.to_string())?;
 
+    let index = page.saturating_sub(1);
+    if index >= document.len() {
+        return Err(format!(
+            "there is no page {page} in '{}' — it has {} page{}.",
+            path.display(),
+            document.len(),
+            if document.len() == 1 { "" } else { "s" }
+        ));
+    }
+
     // Enough resolution to read small print, and not so much that a hundred
     // megapixels are matched against a font for the sake of one anchor.
     const DPI: f64 = 300.0;
-    let drawn = document.render(0, DPI).map_err(|e| e.to_string())?;
+    let drawn = document.render(index, DPI).map_err(|e| e.to_string())?;
     let image = image::GrayImage::from_raw(drawn.width as u32, drawn.height as u32, drawn.gray)
         .ok_or("the page could not be turned into an image")?;
     let registration = onionskin::scan::ScanRegistration {
@@ -5757,6 +5777,49 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
             colour: args.colour.clone(),
             leading: args.leading,
         });
+    }
+
+    // Words placed against something already on the page. This route used to
+    // drop them without a word — it handed the composer an empty list — so
+    // `onionskin write invoice.pdf --after 'Received:Approved'` wrote a blank
+    // delta and then blamed it on the two documents rendering identically,
+    // which is advice about a different command entirely. `--after` is the
+    // form the help offers first, and a saved job that uses one runs through
+    // here, so this was the quiet failure of the easiest thing to ask for.
+    if !args.after.is_empty() || !args.below.is_empty() {
+        let page_text = read_a_page_of(&args.document, args.page)?;
+        let gap_mm = onionskin::geometry::pt_to_mm(args.size * 0.3);
+        let step_mm = onionskin::geometry::pt_to_mm(args.size * 1.15);
+        for (specs, put) in [
+            (&args.after, onionskin::anchor::Where::After),
+            (&args.below, onionskin::anchor::Where::Below),
+        ] {
+            for spec in &dated(specs) {
+                let (anchor, words) = split_anchor(spec)?;
+                let found = onionskin::anchor::place(&page_text, &anchor, put, gap_mm, step_mm)
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "Found \"{}\" on the line: {}\n  putting the words at {:.1}, {:.1} mm",
+                    anchor.trim(),
+                    found.line,
+                    found.x_mm,
+                    found.y_mm
+                );
+                items.push(Item {
+                    id: 0,
+                    page: args.page,
+                    x_mm: found.x_mm,
+                    y_mm: found.y_mm,
+                    text: unescape(&words),
+                    size_pt: args.size,
+                    font: args.font.clone(),
+                    width_mm: args.width,
+                    rotation_deg: args.rotation,
+                    colour: args.colour.clone(),
+                    leading: args.leading,
+                });
+            }
+        }
     }
 
     let images = placed_images(&dated(&args.image), args.page)?;
