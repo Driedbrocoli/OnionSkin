@@ -228,3 +228,146 @@ fn the_record_can_be_forgotten() {
         "the record survived being forgotten: {said}"
     );
 }
+
+/// A batch is a delta too, and the expensive one to print twice: two hundred
+/// certificates is two hundred sheets of stock that cannot be un-printed. It
+/// was not recorded either, so the warning that exists for exactly this never
+/// fired for the case it matters most in.
+#[test]
+fn a_batch_is_recorded_and_a_repeat_of_it_is_recognised() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let sheet = a_sheet_with_a_salary_on_it(&home, dir.path());
+    let list = dir.path().join("people.csv");
+    std::fs::write(&list, "name\nAlice\nBob\n").unwrap();
+
+    let once = |out: &Path| {
+        run(
+            &home,
+            &[
+                "batch",
+                &sheet.to_string_lossy(),
+                "--from",
+                &list.to_string_lossy(),
+                "--at",
+                "120,40:{name}",
+                "-o",
+                &out.to_string_lossy(),
+            ],
+        )
+    };
+
+    let first = once(&dir.path().join("stack.pdf"));
+    assert!(first.ok, "{}", first.said());
+    let said = run(&home, &["history"]).said();
+    assert!(
+        said.contains("stack.pdf"),
+        "a stack of two hundred certificates left no record: {said}"
+    );
+
+    let again = once(&dir.path().join("stack-again.pdf"));
+    assert!(again.ok, "{}", again.said());
+    assert!(
+        again.said().contains("same delta"),
+        "printing the same stack twice was not recognised: {}",
+        again.said()
+    );
+}
+
+/// The instructions must not say "blank sheets". The delta carries only the
+/// additions, so somebody who reads that literally puts plain paper in the tray
+/// and gets two hundred sheets of floating names and no certificate.
+#[test]
+fn the_stack_instructions_do_not_send_plain_paper_through_the_printer() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let sheet = a_sheet_with_a_salary_on_it(&home, dir.path());
+    let list = dir.path().join("people.csv");
+    std::fs::write(&list, "name\nAlice\nBob\n").unwrap();
+
+    let made = run(
+        &home,
+        &[
+            "batch",
+            &sheet.to_string_lossy(),
+            "--from",
+            &list.to_string_lossy(),
+            "--at",
+            "120,40:{name}",
+            "-o",
+            &dir.path().join("stack.pdf").to_string_lossy(),
+        ],
+    );
+    assert!(made.ok, "{}", made.said());
+    let said = made.said();
+    assert!(
+        said.contains("2 printed copies of"),
+        "the stack was not described as printed copies of the sheet: {said}"
+    );
+    assert!(
+        said.contains("staff.pdf"),
+        "the instructions do not name the document to put in the tray: {said}"
+    );
+    assert!(
+        said.contains("Not plain paper"),
+        "nothing warns against feeding plain paper: {said}"
+    );
+}
+
+/// `print --delta` writes a delta too — the one for Onionskin's own documents,
+/// where the sheet was printed last week and only what was added since goes
+/// back through the printer. It was the third place the promise was not kept.
+#[test]
+fn printing_only_what_was_added_is_recorded_but_printing_the_whole_thing_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let document = dir.path().join("notes.osk").to_string_lossy().into_owned();
+    assert!(run(&home, &["new", &document, "--page", "a4"]).ok);
+    assert!(run(&home, &["write", &document, "--at", "20,40:First draft"]).ok);
+
+    // Printed whole and noted as on paper. A whole sheet is not an addition to
+    // anything, so it must stay out of a record of what was added to sheets.
+    let whole = dir.path().join("whole.pdf");
+    let printed = run(
+        &home,
+        &[
+            "print",
+            &document,
+            "-o",
+            &whole.to_string_lossy(),
+            "--printed",
+        ],
+    );
+    assert!(printed.ok, "{}", printed.said());
+    assert!(
+        run(&home, &["history"])
+            .said()
+            .contains("Nothing written yet"),
+        "printing the whole document was filed as an addition to a sheet"
+    );
+
+    // Then something is added, and only that goes back through the printer.
+    assert!(run(&home, &["write", &document, "--at", "20,60:Added after"]).ok);
+    let delta = dir.path().join("since.pdf");
+    let only = run(
+        &home,
+        &[
+            "print",
+            &document,
+            "--delta",
+            "-o",
+            &delta.to_string_lossy(),
+        ],
+    );
+    assert!(only.ok, "{}", only.said());
+
+    let said = run(&home, &["history"]).said();
+    assert!(
+        said.contains("since.pdf"),
+        "the delta left no record: {said}"
+    );
+    assert!(
+        said.contains("notes.osk"),
+        "the record does not name the document it came from: {said}"
+    );
+}

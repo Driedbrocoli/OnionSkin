@@ -2064,14 +2064,21 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
+    // Recorded like any other delta. A batch is the expensive one to print
+    // twice — two hundred certificates is two hundred sheets of stock — so it
+    // is the one where "you have printed this already" is worth most.
+    note_the_delta(&args.document, &output, outcome.total_regions(), wanted);
     println!(
         "\nPrinting a stack\n  \
-         1. Put {wanted} blank sheet{} in the tray, the same way up as the \
-         first one\n     you printed.\n  \
+         1. Put {wanted} printed cop{} of {} in the tray, the same way up and \
+         the same\n     way round as when you printed them. Not plain paper: \
+         this file carries only\n     the additions, and on blank sheets that \
+         is all you get.\n  \
          2. Print at 100% / \"Actual size\", with \"Fit to page\" off.\n  \
          3. Try --first 2 and hold them against a real sheet before \
          committing the stack.",
-        if wanted == 1 { "" } else { "s" }
+        if wanted == 1 { "y" } else { "ies" },
+        args.document.display()
     );
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
@@ -2449,6 +2456,11 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
         );
     }
     if args.delta {
+        // A delta, and so in the record with all the others. Only when it is
+        // one: printing the whole document is a fresh sheet, and putting that
+        // in a list of "what was added to which sheet" would make the list
+        // mean two different things.
+        note_the_delta(&args.document, &output, written, document.pages);
         println!("\n{PRINT_INSTRUCTIONS}");
     }
     open_if_asked(args.open, &output);
