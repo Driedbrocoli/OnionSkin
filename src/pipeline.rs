@@ -288,6 +288,27 @@ pub fn compose_run(
     font: Option<&crate::font::EmbeddedFont>,
     options: &Options,
 ) -> Result<Outcome, PipelineError> {
+    compose_run_drawing(source, items, &[], output, font, options)
+}
+
+/// The same, with shapes as well as words.
+///
+/// Anything Onionskin can open can be drawn on — a Word file, an OpenDocument,
+/// a PDF, a scan — and not only its own documents. Somebody ringing a figure on
+/// a statement or ruling a line under a total should not first have to convert
+/// their file into a format they have never heard of.
+///
+/// What comes out is a delta, as everywhere else: the shapes on an otherwise
+/// blank page, ready to print onto the sheet that already has the document on
+/// it. The source is never altered — it is opened, measured, and left alone.
+pub fn compose_run_drawing(
+    source: &Path,
+    items: &[crate::document::Item],
+    shapes: &[(usize, crate::pdf::PlacedShape)],
+    output: &Path,
+    font: Option<&crate::font::EmbeddedFont>,
+    options: &Options,
+) -> Result<Outcome, PipelineError> {
     options.validate()?;
     guard_output(output, &[source])?;
 
@@ -327,9 +348,30 @@ pub fn compose_run(
         );
     }
 
+    // Shapes are placed by page the same way the words are, and a shape aimed
+    // at a page that is not there is the same mistake as a word aimed at one.
+    let mut drawings_per_page: Vec<Vec<crate::pdf::PlacedShape>> = vec![Vec::new(); sizes.len()];
+    for (page, shape) in shapes {
+        let index = page.saturating_sub(1);
+        if index >= drawings_per_page.len() {
+            return Err(PipelineError::Invalid(format!(
+                "there is no page {page} — the document has {}",
+                sizes.len()
+            )));
+        }
+        drawings_per_page[index].push(shape.clone());
+    }
+
     let staged = work.join("delta-raw.pdf");
-    crate::pdf::write_delta(&staged, &sizes, &per_page, "Onionskin delta", font)
-        .map_err(|e| PipelineError::Invalid(e.to_string()))?;
+    crate::pdf::write_page_content(
+        &staged,
+        &sizes,
+        &per_page,
+        &drawings_per_page,
+        "Onionskin delta",
+        font,
+    )
+    .map_err(|e| PipelineError::Invalid(e.to_string()))?;
 
     // Read back what was actually drawn, so the checks and the proof see the
     // ink rather than the intent. A line that runs off the paper, or lands in

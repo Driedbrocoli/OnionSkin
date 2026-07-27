@@ -395,6 +395,20 @@ struct WriteArgs {
     /// Space between wrapped lines, as a multiple of the type size.
     #[arg(long, default_value_t = 1.2)]
     leading: f64,
+
+    // The three below apply only when writing on a document Onionskin did not
+    // make. Writing on one of its own changes that document, so there is
+    // nothing to name and nothing to open.
+    /// Delta PDF to write, when writing on a Word file, PDF or scan. Without
+    /// it, beside the document as NAME-delta.pdf.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Write proof images here, showing where the words land.
+    #[arg(long)]
+    preview: Option<PathBuf>,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
 }
 
 #[derive(clap::Args)]
@@ -438,6 +452,20 @@ struct DrawArgs {
     /// Round a box's corners by this many millimetres.
     #[arg(long, default_value_t = 0.0)]
     radius: f64,
+
+    // The three below apply only when drawing on a document Onionskin did not
+    // make — a Word file, a PDF, a scan. Drawing on one of its own documents
+    // changes that document, so there is nothing to name and nothing to open.
+    /// Delta PDF to write, when drawing on a Word file, PDF or scan. Without
+    /// it, beside the document as NAME-delta.pdf.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Write proof images here, showing where the drawing lands.
+    #[arg(long)]
+    preview: Option<PathBuf>,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
 }
 
 #[derive(clap::Args)]
@@ -847,6 +875,14 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
                 .into(),
         );
     }
+    // Anything Onionskin can open can be written on, not only its own
+    // documents. What comes out then is a delta rather than an altered file:
+    // somebody's Word document is theirs, and putting words on the printed
+    // sheet is a different thing from editing what made it.
+    if is_document(&args.document) {
+        return write_on_document(&args);
+    }
+
     let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
 
     let mut added = Vec::new();
@@ -1663,6 +1699,25 @@ fn cmd_draw(args: DrawArgs) -> Result<ExitCode, String> {
         });
     }
 
+    // Anything Onionskin can open can be drawn on, not only its own documents.
+    // Somebody ringing a figure on a statement should not first have to convert
+    // their file into a format they have never heard of.
+    if is_document(&args.document) {
+        let shapes: Vec<Shape> = kinds
+            .into_iter()
+            .map(|kind| Shape {
+                id: 0,
+                page: args.page,
+                kind,
+                stroke: stroke.clone(),
+                fill: args.fill.clone(),
+                width_mm: args.width,
+                dash_mm: dash,
+            })
+            .collect();
+        return draw_on_document(&args, &shapes);
+    }
+
     let mut document = Document::load(&args.document).map_err(|e| e.to_string())?;
     let mut drawn = Vec::new();
     for kind in kinds {
@@ -2347,6 +2402,107 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
         } else {
             "s"
         }
+    );
+    for path in &outcome.previews {
+        println!("proof: {}", path.display());
+    }
+    println!("\n{PRINT_INSTRUCTIONS}");
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Write words on a document Onionskin did not make: a Word file, a PDF, a scan.
+///
+/// The source is opened and measured, never altered. What comes out is a delta
+/// — the words on an otherwise blank page of the same size — ready to print
+/// onto the sheet that already carries the document.
+fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-delta", "pdf"));
+    check_writable(&output, "delta")?;
+    refuse_to_clobber(&output, "delta", &[(&args.document, "document")])?;
+
+    let mut items = Vec::new();
+    for placement in &args.at {
+        let ((x_mm, y_mm), text) = parse_placement(placement)?;
+        items.push(Item {
+            id: 0,
+            page: args.page,
+            x_mm,
+            y_mm,
+            text: unescape(&text),
+            size_pt: args.size,
+            font: args.font.clone(),
+            width_mm: args.width,
+            rotation_deg: args.rotation,
+            colour: args.colour.clone(),
+            leading: args.leading,
+        });
+    }
+
+    let options = pipeline::Options {
+        preview_dir: args.preview.clone(),
+        ..Default::default()
+    };
+    let outcome = pipeline::compose_run(&args.document, &items, &output, None, &options)
+        .map_err(|e| e.to_string())?;
+
+    report_checks(&outcome.checks);
+    if outcome.blocked() {
+        eprintln!("\nBlocked — see above. Nothing worth printing was produced.");
+        return Ok(ExitCode::from(2));
+    }
+    println!(
+        "\n{}: {} addition{}.",
+        output.display(),
+        outcome.total_regions(),
+        if outcome.total_regions() == 1 { "" } else { "s" }
+    );
+    for path in &outcome.previews {
+        println!("proof: {}", path.display());
+    }
+    println!("\n{PRINT_INSTRUCTIONS}");
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Draw on a document Onionskin did not make: a Word file, a PDF, a scan.
+///
+/// The source is opened and measured, never altered. What comes out is a delta
+/// — the shapes on an otherwise blank page of the same size — ready to print
+/// onto the sheet that already carries the document, which is the same bargain
+/// every other part of the program offers.
+fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> Result<ExitCode, String> {
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-delta", "pdf"));
+    check_writable(&output, "delta")?;
+    refuse_to_clobber(&output, "delta", &[(&args.document, "document")])?;
+
+    let placed: Vec<(usize, onionskin::pdf::PlacedShape)> =
+        shapes.iter().map(|shape| (shape.page, shape.placed())).collect();
+
+    let options = pipeline::Options {
+        preview_dir: args.preview.clone(),
+        ..Default::default()
+    };
+    let outcome =
+        pipeline::compose_run_drawing(&args.document, &[], &placed, &output, None, &options)
+            .map_err(|e| e.to_string())?;
+
+    report_checks(&outcome.checks);
+    if outcome.blocked() {
+        eprintln!("\nBlocked — see above. Nothing worth printing was produced.");
+        return Ok(ExitCode::from(2));
+    }
+    println!(
+        "\n{}: {} drawing{}.",
+        output.display(),
+        outcome.total_regions(),
+        if outcome.total_regions() == 1 { "" } else { "s" }
     );
     for path in &outcome.previews {
         println!("proof: {}", path.display());
