@@ -33,7 +33,7 @@ use onionskin::scan::{register, ScanOptions, ScanRegistration};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -903,7 +903,11 @@ extern "C" {
 }
 
 fn run() -> Result<ExitCode, String> {
-    match Cli::parse().command {
+    let Some(command) = Cli::parse().command else {
+        greet();
+        return Ok(ExitCode::SUCCESS);
+    };
+    match command {
         Command::Fonts(args) => cmd_fonts(args),
         Command::Inspect(args) => cmd_inspect(args),
         Command::Add(args) => cmd_add(args),
@@ -2329,10 +2333,38 @@ fn parse_colour(text: &str) -> Result<(f64, f64, f64), String> {
 /// Print the checks. Anything worse than a note goes to stderr, so a script
 /// piping stdout to a file still sees the warnings on the terminal.
 fn report_checks(checks: &[onionskin::safety::Check]) {
+    let out = Pen::for_stdout();
+    let err = Pen::for_stderr();
     for check in checks {
+        use onionskin::safety::Severity;
+        // The first line carries the severity, so that is what is coloured.
+        // The detail under it is prose and stays plain — a paragraph in red is
+        // harder to read, not easier, and the point is to be found quickly and
+        // then read.
+        let text = check.format();
+        let (first, rest) = match text.split_once('\n') {
+            Some((first, rest)) => (first, Some(rest)),
+            None => (text.as_str(), None),
+        };
         match check.severity {
-            onionskin::safety::Severity::Note => println!("{}", check.format()),
-            _ => eprintln!("{}", check.format()),
+            Severity::Note => {
+                println!("{}", out.dim(first));
+                if let Some(rest) = rest {
+                    println!("{}", out.dim(rest));
+                }
+            }
+            Severity::Warning => {
+                eprintln!("{}", err.caution(first));
+                if let Some(rest) = rest {
+                    eprintln!("{rest}");
+                }
+            }
+            _ => {
+                eprintln!("{}", err.alarm(first));
+                if let Some(rest) = rest {
+                    eprintln!("{rest}");
+                }
+            }
         }
     }
 }
@@ -2707,6 +2739,99 @@ fn cmd_apt_repo(args: AptRepoArgs) -> Result<ExitCode, String> {
     println!("  index:   {}", built.release.display());
     println!("\n{}", onionskin::apt::instructions(&options, &args.url));
     Ok(ExitCode::SUCCESS)
+}
+
+/// What to say to somebody who typed `onionskin` and nothing else.
+///
+/// The full help lists twenty-eight commands, which is the right answer to
+/// "what can this do" and a wall to somebody meeting the program for the first
+/// time. Almost everybody arriving here wants one of three things, so those go
+/// first, spelled out as commands that can be copied. The other twenty-five are
+/// one line away and said to be there.
+fn greet() {
+    let pen = Pen::for_stdout();
+    println!("{}", pen.strong("Onionskin — add words to a page that is already printed."));
+    println!();
+    println!("You have a printed sheet and want to add something to it without");
+    println!("reprinting the whole page. Onionskin writes the additions on their own.");
+    println!();
+    println!("{}", pen.strong("The three things people do"));
+    println!();
+    println!("  Print only what changed between two versions of a document");
+    println!("      {}", pen.command("onionskin delta before.docx after.docx -o delta.pdf"));
+    println!();
+    println!("  Type onto a form you only have as a scan");
+    println!(
+        "      {}",
+        pen.command("onionskin add scan.png --after 'Received:Approved 27 July'")
+    );
+    println!();
+    println!("  Use the window instead of the terminal");
+    println!("      {}", pen.command("onionskin-desktop"));
+    println!();
+    println!("{}", pen.dim("  onionskin doctor      what works on this machine, and what is missing"));
+    println!("{}", pen.dim("  onionskin --help      all of it — there are twenty-five more commands"));
+}
+
+/// Colour, when there is a terminal to put it on.
+///
+/// Piped into a file or another program, every one of these is the empty
+/// string, so a script sees exactly the bytes it saw before colour existed and
+/// a log file has no escape sequences in it. `NO_COLOR` is honoured because it
+/// is the one thing everybody agrees on, and some terminals genuinely cannot
+/// show it.
+struct Pen {
+    colour: bool,
+}
+
+impl Pen {
+    fn for_stdout() -> Pen {
+        use std::io::IsTerminal;
+        Pen {
+            colour: wants_colour(std::io::stdout().is_terminal()),
+        }
+    }
+
+    fn for_stderr() -> Pen {
+        use std::io::IsTerminal;
+        Pen {
+            colour: wants_colour(std::io::stderr().is_terminal()),
+        }
+    }
+
+    fn wrap(&self, code: &str, text: &str) -> String {
+        if self.colour {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn strong(&self, text: &str) -> String {
+        self.wrap("1", text)
+    }
+    fn dim(&self, text: &str) -> String {
+        self.wrap("2", text)
+    }
+    fn command(&self, text: &str) -> String {
+        self.wrap("36", text)
+    }
+    fn alarm(&self, text: &str) -> String {
+        self.wrap("1;31", text)
+    }
+    fn caution(&self, text: &str) -> String {
+        self.wrap("33", text)
+    }
+}
+
+fn wants_colour(is_terminal: bool) -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var("TERM").map(|term| term == "dumb").unwrap_or(false) {
+        return false;
+    }
+    is_terminal
 }
 
 // ---------------------------------------------------------------------------
@@ -3892,6 +4017,32 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colour_is_only_for_a_terminal_and_only_when_wanted() {
+        // Piped into a file or another program, a script must see exactly the
+        // bytes it saw before colour existed, and a log file must have no
+        // escape sequences in it.
+        let plain = Pen { colour: false };
+        assert_eq!(plain.alarm("BLOCKER"), "BLOCKER");
+        assert_eq!(plain.dim("note"), "note");
+        assert_eq!(plain.command("onionskin doctor"), "onionskin doctor");
+
+        let coloured = Pen { colour: true };
+        assert!(coloured.alarm("BLOCKER").contains("BLOCKER"));
+        assert!(coloured.alarm("BLOCKER").starts_with('\x1b'));
+        assert!(coloured.alarm("BLOCKER").ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn a_terminal_is_not_enough_if_the_person_said_no() {
+        // NO_COLOR is the one thing everybody agrees on, and some terminals
+        // genuinely cannot show it.
+        assert!(!wants_colour(false), "colour on a pipe");
+        // Not asserted with the variable set, because the environment is
+        // process-wide and this test suite runs in threads — but the branch
+        // above it is what the flag guards, and it is one line.
+    }
 
     #[test]
     fn the_command_line_itself_is_valid() {
