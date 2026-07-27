@@ -585,8 +585,19 @@ One worker and one page, deliberately. A second worker would have nothing to do
 another seventy-odd megabytes of pixels waiting about. The bounded channel is
 what enforces that: the drawing thread blocks rather than running ahead.
 
-Twenty-three seconds became thirteen for a delta and twelve for a report. The
-output is byte-for-byte identical on every path tested, proof images included.
+**And the two documents are converted at once.** Converting one is mostly
+waiting for LibreOffice to start, the two have nothing to do with each other,
+and each conversion already took a private profile *precisely so that two could
+run together* — a comment in `render` that nothing had ever taken up on. Neither
+touches pdfium, so the renderer's lock is not involved.
+
+That one matters most to the people who will notice it least in a benchmark:
+a single-page job is almost entirely conversion, and it went from four seconds
+to two and a half.
+
+Twenty-three seconds became eleven for a twenty-one page delta, and four
+seconds became two and a half for a one-page one. The output is byte-for-byte
+identical on every path tested, proof images included.
 
 ## Placing words by what is already on the page
 

@@ -568,8 +568,20 @@ fn compare_documents(
         page: 0,
         pages: 0,
     });
-    let (original_pdf, _, original_notes) = render::to_pdf_noting(original, work, 180)?;
-    let (edited_pdf, _, edited_notes) = render::to_pdf_noting(edited, work, 180)?;
+    // Both at once. Converting a document is mostly waiting for LibreOffice to
+    // start, and the two documents have nothing to do with each other — each
+    // conversion already gets a private profile precisely so that two can run
+    // together, which is a comment in `render` that had never been taken up on.
+    // Neither touches pdfium, so the renderer's lock is not involved.
+    let (original_done, edited_done) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| render::to_pdf_noting(edited, work, 180));
+        let first = render::to_pdf_noting(original, work, 180);
+        // A panic in the conversion thread is not something to paper over, and
+        // there is nothing sensible to do but carry it up.
+        (first, second.join().expect("the converting thread panicked"))
+    });
+    let (original_pdf, _, original_notes) = original_done?;
+    let (edited_pdf, _, edited_notes) = edited_done?;
 
     let old_doc = engine.open(&original_pdf)?;
     let new_doc = engine.open(&edited_pdf)?;
