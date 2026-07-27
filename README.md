@@ -870,14 +870,26 @@ millimetre.
 onionskin undo letter.onionskin
 ```
 
-Every command that changes a document sets the previous version aside first, in
-a file named after it in the same folder. Undo swaps the two, so running it
-again goes forward — going back one step too many should not mean redoing the
-work by hand.
+```bash
+onionskin redo letter.onionskin
+```
 
-One version, not a hundred. Somebody who has just done the wrong thing wants
-the last thing undone; a program that quietly filled their folder with versions
-would be solving a different problem badly.
+Every command that changes a document sets the previous version aside first,
+in a numbered file beside it. **Ten steps are kept**, so three mistakes in a
+row can all be undone — and `redo` brings them back.
+
+Undo used to swap the two versions, so running it again went forward. That
+was neat and it was wrong: it meant you could not undo twice, because the
+second undo put the first one back. Going back is going back now, however
+many times you ask, and coming forward is a different word.
+
+Ten, not a hundred. The mistake somebody wants undone is nearly always the
+last one or the one before it, and a folder holding fifty copies of a letter
+is its own kind of mess.
+
+Making a new change after undoing forgets what could have been redone — those
+versions are no longer anywhere the document can get back to, and offering
+them would hand you a document that never existed.
 
 In the window there is an Undo button beside the page controls, on both the
 Make a document and Draw on a page screens — the two places where removing

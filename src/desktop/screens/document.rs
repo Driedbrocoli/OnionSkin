@@ -341,14 +341,25 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
         // only when there is something to go back to, so it never offers to
         // undo a document nobody has touched.
         if let Some(path) = &state.path {
-            let can = onionskin::document::can_undo(path);
+            let back = onionskin::document::steps_back(path);
+            let forward = onionskin::document::steps_forward(path);
             if ui
-                .add_enabled(can, egui::Button::new("Undo"))
-                .on_hover_text("Put the document back as it was before the last change")
+                .add_enabled(back > 0, egui::Button::new("Undo"))
+                .on_hover_text(format!(
+                    "Go back a step. {back} to go back through."
+                ))
                 .on_disabled_hover_text("Nothing has changed since this was opened")
                 .clicked()
             {
-                undo_last(state, doc);
+                step_back(state, doc);
+            }
+            if ui
+                .add_enabled(forward > 0, egui::Button::new("Redo"))
+                .on_hover_text(format!("Come forward again. {forward} to come through."))
+                .on_disabled_hover_text("Nothing has been undone")
+                .clicked()
+            {
+                step_forward(state, doc);
             }
         }
         if ui.button("Add a blank page").clicked() {
@@ -838,11 +849,25 @@ fn save(state: &mut State, doc: &Document) {
 /// `state.doc` looks right and is not: `show` puts its own `doc` back when
 /// this returns, which would quietly overwrite the restored version with the
 /// mistake and undo the undo.
-fn undo_last(state: &mut State, doc: &mut Document) {
+fn step_back(state: &mut State, doc: &mut Document) {
+    step(state, doc, onionskin::document::undo)
+}
+
+/// Come forward again, the other half of going back.
+fn step_forward(state: &mut State, doc: &mut Document) {
+    step(state, doc, onionskin::document::redo)
+}
+
+/// Move the document one step along its history, either way.
+fn step(
+    state: &mut State,
+    doc: &mut Document,
+    which: fn(&std::path::Path) -> Result<(), onionskin::document::DocumentError>,
+) {
     let Some(path) = state.path.clone() else {
         return;
     };
-    match onionskin::document::undo(&path) {
+    match which(&path) {
         Ok(()) => match Document::load(&path) {
             Ok(restored) => {
                 *doc = restored;
@@ -1647,9 +1672,9 @@ mod undo_tests {
     /// `show` put its own copy back over the restored one the moment the
     /// frame ended, so the file went back and the screen did not. Anything
     /// testing this has to go through the same take-and-put-back.
-    fn undo_as_the_button_does(state: &mut State) {
+    fn step_as_the_button_does(state: &mut State) {
         let mut doc = state.doc.take().expect("a document is open");
-        undo_last(state, &mut doc);
+        step_back(state, &mut doc);
         state.doc = Some(doc);
     }
 
@@ -1667,7 +1692,7 @@ mod undo_tests {
         state.doc = Some(doc);
         assert_eq!(state.doc.as_ref().unwrap().items.len(), 0);
 
-        undo_as_the_button_does(&mut state);
+        step_as_the_button_does(&mut state);
         assert_eq!(
             state.doc.as_ref().unwrap().items.len(),
             1,
@@ -1681,7 +1706,7 @@ mod undo_tests {
     fn undoing_with_nothing_to_go_back_to_says_so_and_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let (mut state, _) = a_document(dir.path());
-        undo_as_the_button_does(&mut state);
+        step_as_the_button_does(&mut state);
         assert!(state.save_error.is_some(), "no complaint was made");
         assert_eq!(state.doc.as_ref().unwrap().items.len(), 1);
     }
@@ -1698,7 +1723,7 @@ mod undo_tests {
         state.doc = Some(doc);
         state.page = 4;
 
-        undo_as_the_button_does(&mut state);
+        step_as_the_button_does(&mut state);
         let pages = state.doc.as_ref().unwrap().pages;
         assert!(state.page >= 1 && state.page <= pages, "{} of {pages}", state.page);
     }
@@ -1716,7 +1741,7 @@ mod undo_tests {
         doc.save(&path).unwrap();
         state.doc = Some(doc);
 
-        undo_as_the_button_does(&mut state);
+        step_as_the_button_does(&mut state);
 
         // Save what the window is holding, exactly as any later edit would.
         state.doc.as_ref().unwrap().save(&path).unwrap();

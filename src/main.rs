@@ -72,6 +72,8 @@ enum Command {
     Erase(EraseArgs),
     /// Put a document back as it was before the last change.
     Undo(UndoArgs),
+    /// Put back a change that undo took away.
+    Redo(UndoArgs),
     /// Delete the deltas Onionskin is holding on to.
     Tidy,
     /// One sheet each for everybody on a list: certificates, tickets, forms.
@@ -1260,6 +1262,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Edit(args) => cmd_edit(args),
         Command::Erase(args) => cmd_erase(args),
         Command::Undo(args) => cmd_undo(args),
+        Command::Redo(args) => cmd_redo(args),
         Command::Tidy => cmd_tidy(),
         Command::Batch(args) => cmd_batch(args),
         Command::Cover(args) => cmd_cover(args),
@@ -3861,7 +3864,42 @@ fn cmd_undo(args: UndoArgs) -> Result<ExitCode, String> {
         document.shapes.len(),
         if document.shapes.len() == 1 { "" } else { "s" },
     );
-    println!("\nRun it again to go forward, if that was one step too many.");
+    let back = onionskin::document::steps_back(&args.document);
+    if back > 0 {
+        println!(
+            "\n{back} more step{} back, if this was not far enough.",
+            if back == 1 { "" } else { "s" }
+        );
+    }
+    println!("Forward again: onionskin redo {}", args.document.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Put back a change that `undo` took away.
+fn cmd_redo(args: UndoArgs) -> Result<ExitCode, String> {
+    if !args.document.is_file() {
+        return Err(format!("no such document: {}", args.document.display()));
+    }
+    onionskin::document::redo(&args.document).map_err(|e| e.to_string())?;
+
+    let document = Document::load(&args.document).map_err(|e| e.to_string())?;
+    println!("{} is forward again.", args.document.display());
+    println!(
+        "  {} page{}, {} piece{} of text, {} drawing{}",
+        document.pages,
+        if document.pages == 1 { "" } else { "s" },
+        document.items.len(),
+        if document.items.len() == 1 { "" } else { "s" },
+        document.shapes.len(),
+        if document.shapes.len() == 1 { "" } else { "s" },
+    );
+    let forward = onionskin::document::steps_forward(&args.document);
+    if forward > 0 {
+        println!(
+            "\n{forward} more step{} forward.",
+            if forward == 1 { "" } else { "s" }
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 

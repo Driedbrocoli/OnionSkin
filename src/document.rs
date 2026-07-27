@@ -663,10 +663,72 @@ fn what_it_looks_like(path: &Path) -> (&'static str, &'static str) {
     }
 }
 
+/// How many steps back a document remembers.
+///
+/// Ten, because the mistake somebody wants undone is nearly always the last
+/// one or the one before it, and a folder holding fifty copies of a letter is
+/// its own kind of mess. Each one is the whole document, but a document is a
+/// few kilobytes of JSON — ten of them is smaller than one page of the PDF it
+/// prints to.
+pub const STEPS_KEPT: usize = 10;
+
+/// The nth step back, counting from 1. `<name>.before`, `<name>.before2`, …
+///
+/// Numbered files beside the document rather than a hidden store, so that
+/// somebody who wants to know what Onionskin is keeping can see it, and
+/// somebody who wants it gone can delete it.
 fn previous(path: &Path) -> PathBuf {
+    step_file(path, ".before", 1)
+}
+
+/// The nth step forward, for redo.
+fn next_step(path: &Path, step: usize) -> PathBuf {
+    step_file(path, ".after", step)
+}
+
+fn step_file(path: &Path, suffix: &str, step: usize) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".before");
+    name.push(suffix);
+    if step > 1 {
+        name.push(step.to_string());
+    }
     path.with_file_name(name)
+}
+
+/// Move every kept step one further away, so step 1 is free for a new one.
+///
+/// The oldest falls off the end. Failures are ignored throughout: a history
+/// that cannot be kept is not a reason to refuse to save the document, which
+/// is the thing somebody actually asked for.
+fn rotate_away(path: &Path, suffix: &str) {
+    for step in (1..STEPS_KEPT).rev() {
+        let from = step_file(path, suffix, step);
+        if from.is_file() {
+            let _ = std::fs::rename(&from, step_file(path, suffix, step + 1));
+        }
+    }
+}
+
+/// Move every kept step one nearer, after step 1 has been taken.
+fn rotate_towards(path: &Path, suffix: &str) {
+    for step in 2..=STEPS_KEPT {
+        let from = step_file(path, suffix, step);
+        if from.is_file() {
+            let _ = std::fs::rename(&from, step_file(path, suffix, step - 1));
+        }
+    }
+}
+
+/// Throw away everything that could be redone.
+///
+/// Called when the document changes: once a new edit is made, the versions
+/// that were undone are no longer anywhere the document could get back to,
+/// and offering to "redo" into a history that has been departed from would
+/// hand somebody a document that never existed.
+fn forget_the_redos(path: &Path) {
+    for step in 1..=STEPS_KEPT {
+        let _ = std::fs::remove_file(next_step(path, step));
+    }
 }
 
 /// Set the current version aside before overwriting it.
@@ -686,7 +748,9 @@ fn keep_the_last_one(path: &Path) {
     if !path.is_file() {
         return;
     }
+    rotate_away(path, ".before");
     let _ = std::fs::copy(path, previous(path));
+    forget_the_redos(path);
 }
 
 /// Is there a version to go back to?
@@ -696,27 +760,73 @@ pub fn can_undo(path: &Path) -> bool {
 
 /// Put the document back as it was before the last change.
 ///
-/// Swaps the two, so that an undo can itself be undone — somebody who goes back
-/// one step too many should not have to redo the work by hand. Running it twice
-/// therefore returns to where it started, which is what one undo button does in
-/// every program that has one.
+/// Can be asked as many times as there are steps kept — see [`STEPS_KEPT`].
+/// Coming forward again is [`redo`], which is a different word because it is
+/// a different thing.
 pub fn undo(path: &Path) -> Result<(), DocumentError> {
     let before = previous(path);
     if !before.is_file() {
         return Err(DocumentError::Invalid(format!(
-            "there is nothing to undo for {} — Onionskin keeps the version from \
-             before the last change, and this one has not been changed since it \
-             was opened.",
+            "there is nothing to undo for {} — it has not been changed since \
+             it was opened.",
             path.display()
         )));
     }
-    // Both are read before either is written, so a failure part-way through
-    // leaves the document as one of the two versions rather than as neither.
+    // Read before either is written, so a failure part-way through leaves the
+    // document as one of the two versions rather than as neither.
     let going_back = Document::load(&before)?;
     let current = Document::load(path)?;
+
+    // What is being left becomes the first thing `redo` would return to.
+    rotate_away(path, ".after");
+    current.save_without_keeping(&next_step(path, 1))?;
+
     going_back.save_without_keeping(path)?;
-    current.save_without_keeping(&before)?;
+    let _ = std::fs::remove_file(&before);
+    rotate_towards(path, ".before");
     Ok(())
+}
+
+/// Put back a change that `undo` took away.
+///
+/// The other half of undo, and the reason undo no longer swaps. Swapping made
+/// running it twice return you to where you started, so three mistakes could
+/// not be undone at all — the second `undo` put the first one back. Going
+/// back is going back now, however many times it is asked for, and coming
+/// forward is a different word.
+pub fn redo(path: &Path) -> Result<(), DocumentError> {
+    let after = next_step(path, 1);
+    if !after.is_file() {
+        return Err(DocumentError::Invalid(format!(
+            "there is nothing to redo for {} — nothing has been undone, or the \
+             document has been changed since it was.",
+            path.display()
+        )));
+    }
+    let going_forward = Document::load(&after)?;
+    let current = Document::load(path)?;
+
+    rotate_away(path, ".before");
+    current.save_without_keeping(&previous(path))?;
+
+    going_forward.save_without_keeping(path)?;
+    let _ = std::fs::remove_file(&after);
+    rotate_towards(path, ".after");
+    Ok(())
+}
+
+/// How many steps back this document can go.
+pub fn steps_back(path: &Path) -> usize {
+    (1..=STEPS_KEPT)
+        .take_while(|step| step_file(path, ".before", *step).is_file())
+        .count()
+}
+
+/// How many steps forward it can go.
+pub fn steps_forward(path: &Path) -> usize {
+    (1..=STEPS_KEPT)
+        .take_while(|step| step_file(path, ".after", *step).is_file())
+        .count()
 }
 
 impl Shape {

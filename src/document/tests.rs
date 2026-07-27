@@ -1270,7 +1270,9 @@ fn the_version_before_the_last_change_is_kept() {
 #[test]
 fn an_undo_can_itself_be_undone() {
     // Somebody who goes back one step too many should not have to redo the
-    // work by hand — which is what one undo button does everywhere else.
+    // work by hand. It is `redo` that does it now, not a second `undo`:
+    // undoing twice used to return you to where you started, which meant
+    // three mistakes could not be undone at all.
     let dir = tempfile::tempdir().unwrap();
     let path = a_document(dir.path(), "First");
     let mut doc = Document::load(&path).unwrap();
@@ -1279,16 +1281,16 @@ fn an_undo_can_itself_be_undone() {
 
     undo(&path).unwrap();
     assert_eq!(Document::load(&path).unwrap().items.len(), 1);
-    undo(&path).unwrap();
+    redo(&path).unwrap();
     assert_eq!(Document::load(&path).unwrap().items.len(), 0);
     undo(&path).unwrap();
     assert_eq!(Document::load(&path).unwrap().items.len(), 1);
 }
 
 #[test]
-fn only_the_last_change_is_kept_not_a_folder_full_of_them() {
-    // Somebody who has just done the wrong thing wants the last thing undone.
-    // Keeping a hundred versions would be solving a different problem badly.
+fn going_back_three_times_goes_back_three_steps() {
+    // The reason the swap had to go. Three mistakes in a row could not be
+    // undone at all: the second `undo` put the first one back.
     let dir = tempfile::tempdir().unwrap();
     let path = a_document(dir.path(), "One");
     for words in ["Two", "Three", "Four"] {
@@ -1296,13 +1298,78 @@ fn only_the_last_change_is_kept_not_a_folder_full_of_them() {
         doc.add(item(words, 25.0, 60.0)).unwrap();
         doc.save(&path).unwrap();
     }
+    assert_eq!(Document::load(&path).unwrap().items.len(), 4);
+
+    for expected in [3, 2, 1] {
+        undo(&path).unwrap();
+        assert_eq!(Document::load(&path).unwrap().items.len(), expected);
+    }
+    // And forward again, as far as it went back.
+    for expected in [2, 3, 4] {
+        redo(&path).unwrap();
+        assert_eq!(Document::load(&path).unwrap().items.len(), expected);
+    }
+}
+
+#[test]
+fn editing_after_an_undo_forgets_what_could_have_been_redone() {
+    // Once a new edit is made, the versions that were undone are not anywhere
+    // the document can get back to. Offering to redo into a history that has
+    // been departed from would hand somebody a document that never existed.
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "One");
+    let mut doc = Document::load(&path).unwrap();
+    doc.add(item("Two", 25.0, 60.0)).unwrap();
+    doc.save(&path).unwrap();
+
+    undo(&path).unwrap();
+    assert_eq!(steps_forward(&path), 1);
+
+    let mut doc = Document::load(&path).unwrap();
+    doc.add(item("Something else", 25.0, 80.0)).unwrap();
+    doc.save(&path).unwrap();
+    assert_eq!(steps_forward(&path), 0);
+    assert!(redo(&path).is_err());
+}
+
+#[test]
+fn a_history_that_is_not_there_is_said_plainly_rather_than_guessed_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "One");
+    assert_eq!(steps_back(&path), 0);
+    assert_eq!(steps_forward(&path), 0);
+    assert!(undo(&path).unwrap_err().to_string().contains("nothing to undo"));
+    assert!(redo(&path).unwrap_err().to_string().contains("nothing to redo"));
+}
+
+#[test]
+fn the_history_stops_rather_than_filling_the_folder() {
+    // Ten steps, because the mistake somebody wants undone is nearly always
+    // the last one or the one before it, and a folder holding fifty copies of
+    // a letter is its own kind of mess.
+    let dir = tempfile::tempdir().unwrap();
+    let path = a_document(dir.path(), "One");
+    for n in 0..STEPS_KEPT + 5 {
+        let mut doc = Document::load(&path).unwrap();
+        doc.add(item(&format!("change {n}"), 25.0, 60.0)).unwrap();
+        doc.save(&path).unwrap();
+    }
+
+    assert_eq!(steps_back(&path), STEPS_KEPT);
     let kept: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(kept.len(), 2, "{kept:?}");
-    assert!(kept.iter().any(|n| n.ends_with(".before")), "{kept:?}");
+    // The document itself, and no more history than was promised.
+    assert_eq!(kept.len(), STEPS_KEPT + 1, "{kept:?}");
+
+    // And every one of those steps really goes back, rather than merely
+    // existing as a file.
+    for _ in 0..STEPS_KEPT {
+        undo(&path).unwrap();
+    }
+    assert!(undo(&path).is_err(), "went back further than it kept");
 }
 
 #[test]

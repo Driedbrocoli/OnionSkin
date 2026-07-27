@@ -197,14 +197,25 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
         // Removing a shape is one click in the list below, so a way back
         // belongs here for the same reason it does on the document screen.
         if let Some(path) = &state.path {
-            let can = onionskin::document::can_undo(path);
+            let back = onionskin::document::steps_back(path);
+            let forward = onionskin::document::steps_forward(path);
             if ui
-                .add_enabled(can, egui::Button::new("Undo"))
-                .on_hover_text("Put the document back as it was before the last change")
+                .add_enabled(back > 0, egui::Button::new("Undo"))
+                .on_hover_text(format!(
+                    "Go back a step. {back} to go back through."
+                ))
                 .on_disabled_hover_text("Nothing has changed since this was opened")
                 .clicked()
             {
-                undo_last(state, doc);
+                step_back(state, doc);
+            }
+            if ui
+                .add_enabled(forward > 0, egui::Button::new("Redo"))
+                .on_hover_text(format!("Come forward again. {forward} to come through."))
+                .on_disabled_hover_text("Nothing has been undone")
+                .clicked()
+            {
+                step_forward(state, doc);
             }
         }
     });
@@ -539,11 +550,25 @@ fn show_shape_list(state: &mut State, doc: &mut Document, room: &mut Room) {
 /// for the frame — and not into `state.doc`, which `show` would overwrite
 /// with the version being undone the moment this returns. See
 /// [`super::document::undo_last`], which this mirrors.
-fn undo_last(state: &mut State, doc: &mut Document) {
+fn step_back(state: &mut State, doc: &mut Document) {
+    step(state, doc, onionskin::document::undo)
+}
+
+/// Come forward again, the other half of going back.
+fn step_forward(state: &mut State, doc: &mut Document) {
+    step(state, doc, onionskin::document::redo)
+}
+
+/// Move the document one step along its history, either way.
+fn step(
+    state: &mut State,
+    doc: &mut Document,
+    which: fn(&std::path::Path) -> Result<(), onionskin::document::DocumentError>,
+) {
     let Some(path) = state.path.clone() else {
         return;
     };
-    match onionskin::document::undo(&path) {
+    match which(&path) {
         Ok(()) => match Document::load(&path) {
             Ok(restored) => {
                 *doc = restored;
@@ -881,9 +906,9 @@ mod undo_tests {
     /// Run `undo_last` the way `show` really runs it — taken out of `state`
     /// for the frame and put back after. Asserting on `state.doc` without
     /// this passes while the button is broken; see `document`'s tests.
-    fn undo_as_the_button_does(state: &mut State) {
+    fn step_as_the_button_does(state: &mut State) {
         let mut doc = state.doc.take().expect("a document is open");
-        undo_last(state, &mut doc);
+        step_back(state, &mut doc);
         state.doc = Some(doc);
     }
 
@@ -930,7 +955,7 @@ mod undo_tests {
         state.doc = Some(doc);
         assert_eq!(state.doc.as_ref().unwrap().shapes.len(), 0);
 
-        undo_as_the_button_does(&mut state);
+        step_as_the_button_does(&mut state);
         assert_eq!(state.doc.as_ref().unwrap().shapes.len(), 1);
         assert_eq!(Document::load(&path).unwrap().shapes.len(), 1);
 
@@ -943,7 +968,7 @@ mod undo_tests {
     #[test]
     fn undoing_with_nothing_to_go_back_to_says_so() {
         let (mut state, path) = a_drawn_document();
-        undo_as_the_button_does(&mut state);
+        step_as_the_button_does(&mut state);
         assert!(state.save_error.is_some(), "no complaint was made");
         assert_eq!(state.doc.as_ref().unwrap().shapes.len(), 1);
         let _ = std::fs::remove_file(&path);
