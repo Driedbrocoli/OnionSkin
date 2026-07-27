@@ -531,6 +531,54 @@ name, and the promise on the sidebar was rewritten to match rather than left to
 drift. A promise that is nearly true is worth less than a smaller one that is
 exactly true.
 
+## Where the time goes
+
+Measured before anything was changed, on a twenty-one page comparison at four
+hundred dots an inch. Of twenty-three seconds: ten drawing pages in pdfium,
+eight comparing them, three and a half converting the documents to PDF, and
+under one writing the delta.
+
+pdfium is the largest single cost and cannot be threaded. `src/render.rs` holds
+it behind a mutex because the `thread_safe` feature makes each individual call
+safe and that is not enough: rendering a page is a *sequence* of calls, pdfium
+keeps state across them, and two interleaved sequences segfault inside the
+library. That was found the hard way, and the comment above the mutex says so.
+
+So the work went where the work was, and the guiding rule was that the pages
+must come out the same. They do: the delta is byte-for-byte identical on every
+path tested but one, and that one differs only in the creation timestamp
+LibreOffice embeds in its own PDF, which the old build differs from itself on.
+
+Three of the four wins were about doing less rather than doing it cleverer.
+
+**A branch per pixel.** The dilation was already separable — growing by *r*
+horizontally then vertically, rather than one (2r+1)² window — but it asked `if
+this pixel is set` fifteen million times a page. That question is what stops a
+compiler using the vector instructions every machine has had for twenty years.
+Written as one slice against another with `|=`, eight or sixteen pixels are
+grown per instruction: 120 ms a page became 39. The combine loop had the same
+fault, `&&` being a branch where `&` is not.
+
+**Copies that arrived at bytes already in hand.** The crop took the top-left
+*w* × *h* of each render, and when the two renders already agreed on their size
+— the ordinary case, being the same page at the same resolution — it copied
+fifteen megabytes to produce them unchanged. It borrows now.
+
+**Colour nobody read.** Every render built RGB *and* greyscale. The sheet being
+compared against is only ever wanted in grey, and when no delta is being built
+neither page needs colour: forty-six megabytes a page not allocated, not filled
+in and not handed back.
+
+**A delta built and deleted.** `onionskin compare` reports and writes nothing,
+and it did that by running the whole pipeline into a temporary folder and
+removing the file unread — cropping every changed region, giving it a soft
+mask, compressing it, for nothing. `pipeline::examine` stops before that.
+
+The remaining shape is: rendering dominates, and it belongs to pdfium. The next
+thing worth trying, when it is worth trying, is overlapping the comparison with
+the rendering — the render must stay on one thread, but nothing says the
+comparison of page *n* cannot run while page *n+1* is being drawn.
+
 ## Placing words by what is already on the page
 
 `src/anchor.rs`. Everything else in Onionskin wants millimetres from the
