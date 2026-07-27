@@ -388,19 +388,33 @@ fn what_the_window_needs_is_asked_for_by_name() {
 // Uninstalling
 // ---------------------------------------------------------------------------
 
-#[test]
-fn uninstalling_says_what_it_left_alone() {
-    let prefix = tempfile::tempdir().unwrap();
-    let options = Options {
+/// The install options a test uses: into its own prefix, touching neither the
+/// path nor the applications menu.
+fn options_for(prefix: &tempfile::TempDir) -> Options {
+    Options {
         prefix: Some(prefix.path().to_path_buf()),
         keep_path: true,
         no_menu: true,
-    };
-    install(&options).unwrap();
+    }
+}
+
+#[test]
+fn uninstalling_says_what_it_left_alone() {
+    let prefix = tempfile::tempdir().unwrap();
+    // A home of this test's own, and held for as long as it runs. Without it
+    // this reads and writes whichever home some other test happened to set a
+    // moment ago — ONIONSKIN_HOME is one variable for the whole process, and
+    // tests run beside one another. That is a failure that appears once in
+    // however many runs and passes the moment anybody looks at it.
+    let home = tempfile::tempdir().unwrap();
+    let _held = crate::calibrate::borrow_home(home.path());
+    install(&options_for(&prefix)).unwrap();
+    let options = options_for(&prefix);
 
     // Somebody's calibration profiles are their own work and are not the
     // installer's to delete.
     let profiles = crate::calibrate::profiles_dir().unwrap();
+    std::fs::create_dir_all(&profiles).unwrap();
     std::fs::write(profiles.join("keepme.json"), b"{}").unwrap();
 
     let report = uninstall(&options).unwrap();
