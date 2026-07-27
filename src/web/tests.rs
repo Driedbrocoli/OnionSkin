@@ -707,8 +707,13 @@ fn the_box_colours_the_form_offers_are_all_understood() {
             "the form does not offer {name}"
         );
     }
-    assert_ne!(outline_colour("blue"), outline_colour("red"));
-    assert_ne!(outline_colour("green"), outline_colour("black"));
+    // Compared by hand rather than with assert_ne!, which on a tuple of f64
+    // reads as a negated ordering and clippy is right to dislike it.
+    let differ = |a: (f64, f64, f64), b: (f64, f64, f64)| {
+        (a.0 - b.0).abs() > 1e-9 || (a.1 - b.1).abs() > 1e-9 || (a.2 - b.2).abs() > 1e-9
+    };
+    assert!(differ(outline_colour("blue"), outline_colour("red")));
+    assert!(differ(outline_colour("green"), outline_colour("black")));
     // Anything else falls back rather than refusing: a form can be posted by
     // hand with any value in it, and that is not worth losing a delta over.
     assert_eq!(outline_colour("chartreuse"), outline_colour("red"));
