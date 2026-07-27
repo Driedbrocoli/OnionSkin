@@ -916,7 +916,7 @@ pub fn rfc1123(at: SystemTime) -> String {
 /// matters here for one dull reason: a wrong date in a `Release` file makes apt
 /// say the repository is either not yet valid or has expired, and neither
 /// message mentions the date.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     // Counting from 1 March 0000 rather than 1 January 1970.
     let shifted = days + 719_468;
     let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;

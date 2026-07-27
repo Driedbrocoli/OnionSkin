@@ -95,6 +95,8 @@ enum Command {
     Proof(ProofArgs),
     /// Find the places on a form where something can be written.
     Blanks(BlanksArgs),
+    /// What was added to which sheet, and when.
+    History(HistoryArgs),
     /// Measure a printer's second-pass registration, once per printer.
     #[command(subcommand)]
     Calibrate(CalibrateCommand),
@@ -552,6 +554,26 @@ struct BlanksArgs {
     #[arg(long)]
     square: bool,
     /// Report them as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+/// The record of what has been added to sheets of paper.
+///
+/// "What did we add to that invoice, and when" is a question somebody asks
+/// months later about a sheet in a filing cabinet, and until now the answer was
+/// nowhere. Where the files were and how much went on them is kept — never the
+/// words themselves, which would make a far more sensitive file than any
+/// document it described.
+#[derive(clap::Args)]
+struct HistoryArgs {
+    /// How many to show.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Delete the record.
+    #[arg(long)]
+    forget: bool,
+    /// Report it as JSON.
     #[arg(long)]
     json: bool,
 }
@@ -1421,6 +1443,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Verify(args) => cmd_verify(args),
         Command::Proof(args) => cmd_proof(args),
         Command::Blanks(args) => cmd_blanks(args),
+        Command::History(args) => cmd_history(args),
         Command::Calibrate(command) => cmd_calibrate(command),
         Command::Doctor => cmd_doctor(),
         Command::Serve(args) => {
@@ -3643,6 +3666,7 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
+    note_the_delta(&args.edited, &output, outcome.total_regions(), outcome.pages.len());
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
@@ -3877,6 +3901,7 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
+    note_the_delta(&args.scan, &output, outcome.total_regions(), outcome.pages.len());
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
@@ -4553,6 +4578,82 @@ fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     })
 }
 
+/// Show what has been added to sheets of paper.
+fn cmd_history(args: HistoryArgs) -> Result<ExitCode, String> {
+    if args.forget {
+        let had = onionskin::history::forget();
+        println!(
+            "Forgotten {had} entr{}. Nothing else on this machine was touched.",
+            if had == 1 { "y" } else { "ies" }
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let entries = onionskin::history::recent(args.limit);
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if entries.is_empty() {
+        println!(
+            "Nothing written yet, or the record was forgotten.\n\n\
+             Every delta Onionskin writes goes in here, so a sheet in a filing \
+             cabinet can\nbe asked what was added to it and when."
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("What has been added, most recent first:\n");
+    for entry in &entries {
+        println!("  {}", entry.describe());
+    }
+    println!(
+        "\nKept in {}. The words themselves are not — only what they were \
+         written onto,\nand a fingerprint that recognises the same delta twice.",
+        onionskin::history::path().display()
+    );
+    println!("Forget the lot with:  onionskin history --forget");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Remember this delta, and say so if it is one that was written before.
+///
+/// Toner does not come off paper, so a delta printed twice onto the same sheet
+/// puts every letter down twice and cannot be undone. It is an easy mistake:
+/// the delta is a file like any other, it prints without complaint, and the
+/// second time looks exactly like the first. Nothing here refuses — printing
+/// the same delta onto a hundred *different* sheets is what a hundred
+/// certificates are — but the question is worth being asked.
+fn note_the_delta(source: &Path, delta: &Path, additions: usize, pages: usize) {
+    let Some(fingerprint) = onionskin::history::fingerprint(delta) else {
+        return;
+    };
+    let entry = onionskin::history::Entry {
+        at: onionskin::history::now(),
+        source: source.display().to_string(),
+        delta: delta.display().to_string(),
+        pages,
+        additions,
+        fingerprint,
+    };
+    let Some(before) = onionskin::history::remember(entry) else {
+        return;
+    };
+    println!(
+        "\nNOTE: this is the same delta you wrote {} ({}), as {}.\n  \
+         Printing it onto a sheet that already has it puts the ink down twice, \
+         and that\n  cannot be undone. Onto a fresh sheet it is exactly right.\n  \
+         Everything written so far:  onionskin history",
+        before.how_long_ago(),
+        before.when(),
+        before.delta
+    );
+}
+
 /// Say where on a form there is room to write.
 fn cmd_blanks(args: BlanksArgs) -> Result<ExitCode, String> {
     let page = parse_page(&args.page).map_err(|e| e.to_string())?;
@@ -4920,6 +5021,7 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
+    note_the_delta(&args.document, &output, outcome.total_regions(), outcome.pages.len());
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
@@ -4963,6 +5065,7 @@ fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> R
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
+    note_the_delta(&args.document, &output, outcome.total_regions(), outcome.pages.len());
     println!("\n{PRINT_INSTRUCTIONS}");
     open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)

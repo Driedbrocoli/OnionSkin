@@ -1023,6 +1023,43 @@ onionskin fetch -o scan.png --scanner http://printer.local/eSCL --capabilities
 onionskin send delta.pdf --printer ipp://printer.local/ipp/print --copies 2
 ```
 
+## What was added to which sheet, and when
+
+Overprinting is the one thing Onionskin does that cannot be undone. Toner does
+not come off paper, so a delta printed twice onto the same sheet puts every
+letter down twice — and it is an easy mistake, because the delta is a file like
+any other and the second time looks exactly like the first.
+
+So every delta is remembered by a fingerprint of the file itself, and writing
+the same one again says so:
+
+```
+NOTE: this is the same delta you wrote a moment ago (2026-07-27 15:03), as invoice-delta.pdf.
+  Printing it onto a sheet that already has it puts the ink down twice, and that
+  cannot be undone. Onto a fresh sheet it is exactly right.
+  Everything written so far:  onionskin history
+```
+
+It does not refuse — printing one delta onto a hundred *different* sheets is
+what a hundred certificates are. It just asks the question.
+
+The record is worth having on its own account. "What did we add to that invoice,
+and when" is a question somebody asks months later about a sheet in a filing
+cabinet:
+
+```bash
+onionskin history              # most recent first
+onionskin history --limit 100
+onionskin history --json
+onionskin history --forget
+```
+
+**The words themselves are never kept** — only which files were involved, how
+much went on, and the fingerprint. A log of everything anybody ever wrote onto
+anything would be a far more sensitive file than any document it described,
+sitting in a home directory being backed up. The fingerprint recognises a delta
+without describing it.
+
 ## Privacy and networking
 
 Onionskin never phones home. There is no telemetry, no update check, and no

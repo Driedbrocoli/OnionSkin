@@ -9,6 +9,7 @@ pub mod discover;
 pub mod document;
 pub mod font;
 pub mod geometry;
+pub mod history;
 pub mod install;
 pub mod letters;
 pub mod office;
