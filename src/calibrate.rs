@@ -1851,6 +1851,107 @@ pub const BELIEVABLE: f64 = 0.4;
 /// printer laying down a little more than was asked for is normal.
 pub const CROWDED: f64 = 1.6;
 
+/// How far the marks must spread across their own line before rotation and
+/// scale can be fitted from them.
+///
+/// A job whose additions run down one column — a form filled in on the left,
+/// a row of ticks — says where the paper sat and how far along that column it
+/// stretched, and nothing whatever about the direction across it. A fit will
+/// still hand back four numbers, and they will be confidently wrong everywhere
+/// off the line. Two and a half centimetres is enough leverage that a tenth of
+/// a degree shows up as more than the reading noise.
+pub const SPREAD_MM: f64 = 25.0;
+
+/// How far a set of points spreads across its own narrowest direction.
+///
+/// The extent along the minor principal axis: for marks in a line this is
+/// nearly nothing however long the line is, which is exactly the thing that
+/// has to be noticed.
+fn spread_across(points: &[(f64, f64)]) -> f64 {
+    let n = points.len() as f64;
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let mean = (
+        points.iter().map(|p| p.0).sum::<f64>() / n,
+        points.iter().map(|p| p.1).sum::<f64>() / n,
+    );
+    let (mut cxx, mut cyy, mut cxy) = (0.0, 0.0, 0.0);
+    for p in points {
+        let (dx, dy) = (p.0 - mean.0, p.1 - mean.1);
+        cxx += dx * dx;
+        cyy += dy * dy;
+        cxy += dx * dy;
+    }
+
+    // The smaller eigenvalue of the covariance, and the direction it belongs
+    // to. Written out rather than iterated because a symmetric 2×2 has a
+    // closed form and this is the whole of it.
+    let mid = (cxx + cyy) / 2.0;
+    let half = (((cxx - cyy) / 2.0).powi(2) + cxy * cxy).sqrt();
+    let minor = mid - half;
+    let axis = if cxy.abs() > 1e-9 {
+        let (ax, ay) = (cxy, minor - cxx);
+        let length = (ax * ax + ay * ay).sqrt();
+        (ax / length, ay / length)
+    } else if cxx <= cyy {
+        (1.0, 0.0)
+    } else {
+        (0.0, 1.0)
+    };
+
+    let mut low = f64::INFINITY;
+    let mut high = f64::NEG_INFINITY;
+    for p in points {
+        let along = (p.0 - mean.0) * axis.0 + (p.1 - mean.1) * axis.1;
+        low = low.min(along);
+        high = high.max(along);
+    }
+    high - low
+}
+
+/// Fit a shift, and deliberately nothing else.
+///
+/// What is left when the marks are too nearly in a line to say anything about
+/// rotation or scale. A shift measured from a column of marks is true — the
+/// paper path pushes every sheet the same way — so this is worth having, where
+/// a rotation invented from the same marks is not.
+fn fit_shift(nominal: &[(f64, f64)], observed: &[(f64, f64)]) -> SimilarityFit {
+    let n = nominal.len() as f64;
+    let dx = nominal
+        .iter()
+        .zip(observed)
+        .map(|(a, b)| b.0 - a.0)
+        .sum::<f64>()
+        / n;
+    let dy = nominal
+        .iter()
+        .zip(observed)
+        .map(|(a, b)| b.1 - a.1)
+        .sum::<f64>()
+        / n;
+
+    let mut sum_sq = 0.0;
+    let mut worst: f64 = 0.0;
+    for (a, b) in nominal.iter().zip(observed) {
+        let residual = ((a.0 + dx - b.0).powi(2) + (a.1 + dy - b.1).powi(2)).sqrt();
+        sum_sq += residual * residual;
+        worst = worst.max(residual);
+    }
+
+    SimilarityFit {
+        transform: Similarity {
+            dx_mm: dx,
+            dy_mm: dy,
+            rotation_deg: 0.0,
+            scale: 1.0,
+        },
+        rms_residual_mm: (sum_sq / n).sqrt(),
+        max_residual_mm: worst,
+        n_points: nominal.len(),
+    }
+}
+
 /// Work out this printer's error from where a job's additions landed.
 ///
 /// No correction is passed in, and that is deliberate. The intended positions
@@ -1899,8 +2000,29 @@ pub fn learn_from_landings(
     let nominal: Vec<(f64, f64)> = believed.iter().map(|l| l.intended).collect();
     let observed: Vec<(f64, f64)> = believed.iter().map(|l| l.observed).collect();
 
-    let fit = solve_similarity(&nominal, &observed, &page)
-        .map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+    // Marks nearly in a line can be fitted for a shift and nothing more. The
+    // alternative is not "no profile" but "a profile with a rotation invented
+    // from no evidence", which is worse than the error it replaces.
+    let spread = spread_across(&nominal);
+    let shift_only = spread < SPREAD_MM;
+    let fit = if shift_only {
+        fit_shift(&nominal, &observed)
+    } else {
+        solve_similarity(&nominal, &observed, &page)
+            .map_err(|e| CalibrateError::Invalid(e.to_string()))?
+    };
+
+    let mut notes = format!(
+        "learnt from a printed job, {} of {} additions measured",
+        believed.len(),
+        landings.len()
+    );
+    if shift_only {
+        notes.push_str(&format!(
+            "; shift only — the marks were within {spread:.0} mm of a straight \
+             line, which says nothing about rotation or scale"
+        ));
+    }
 
     Ok(Profile {
         name: name.to_string(),
@@ -1910,11 +2032,7 @@ pub fn learn_from_landings(
         max_residual_mm: Some(fit.max_residual_mm),
         n_points: believed.len(),
         created: now(),
-        notes: format!(
-            "learnt from a printed job, {} of {} additions measured",
-            believed.len(),
-            landings.len()
-        ),
+        notes,
     })
 }
 

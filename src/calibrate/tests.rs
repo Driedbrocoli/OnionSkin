@@ -1459,6 +1459,89 @@ fn an_addition_that_landed_on_existing_ink_is_left_out() {
     assert!(learnt.error.dy_mm.abs() < 0.15, "{:?}", learnt.error);
 }
 
+/// Additions running down one column give a shift and nothing else.
+///
+/// A form filled in on the left is a perfectly ordinary job to learn from, and
+/// its shift is worth having — the paper path pushes every sheet the same way.
+/// Its rotation is not: marks in a line say nothing about the direction across
+/// them, and a fit asked for one anyway would return a confident number that is
+/// wrong everywhere else on the page.
+#[test]
+fn marks_in_a_line_give_a_shift_and_no_invented_rotation() {
+    let page = A4;
+    let places = [(40.0, 60.0), (40.0, 140.0), (40.0, 220.0), (44.0, 260.0)];
+    let error = Similarity {
+        dx_mm: 0.9,
+        dy_mm: -0.4,
+        rotation_deg: 0.0,
+        scale: 1.0,
+    };
+    let (scan, registration) = sheet_with_blots(page, &places, error);
+
+    let landings = measure_landings(&scan, &registration, &asked_for(&places), 128);
+    let learnt = learn_from_landings(&landings, page, "office").unwrap();
+
+    assert_eq!(learnt.error.rotation_deg, 0.0, "{:?}", learnt.error);
+    assert_eq!(learnt.error.scale, 1.0, "{:?}", learnt.error);
+    assert!((learnt.error.dx_mm - 0.9).abs() < 0.1, "{:?}", learnt.error);
+    assert!((learnt.error.dy_mm - -0.4).abs() < 0.1, "{:?}", learnt.error);
+    assert!(learnt.notes.contains("shift only"), "{}", learnt.notes);
+}
+
+/// Marks spread over the sheet are fitted for everything, as before.
+#[test]
+fn marks_spread_over_the_sheet_are_fitted_for_rotation_too() {
+    let page = A4;
+    let places = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0), (160.0, 250.0)];
+    let error = Similarity {
+        dx_mm: 0.5,
+        dy_mm: 0.3,
+        rotation_deg: 0.25,
+        scale: 1.0,
+    };
+    let (scan, registration) = sheet_with_blots(page, &places, error);
+    let landings = measure_landings(&scan, &registration, &asked_for(&places), 128);
+    let learnt = learn_from_landings(&landings, page, "office").unwrap();
+
+    assert!(!learnt.notes.contains("shift only"), "{}", learnt.notes);
+    // Wide enough for the blots landing on whole pixels, which at 300 dpi is
+    // a twelfth of a millimetre and about a fiftieth of a degree over this
+    // lever arm; narrow enough that a rotation not really there would fail.
+    assert!(
+        (learnt.error.rotation_deg - 0.25).abs() < 0.07,
+        "{:?}",
+        learnt.error
+    );
+}
+
+/// The spread is measured across the marks, not along them.
+#[test]
+fn a_long_line_of_marks_is_still_a_line() {
+    // Nearly the whole height of the sheet, and a millimetre wide.
+    let along = [(40.0, 20.0), (40.5, 120.0), (40.2, 200.0), (40.8, 280.0)];
+    assert!(spread_across(&along) < 2.0, "{}", spread_across(&along));
+
+    // The same points turned 45°, so neither axis alone would notice.
+    let page = A4;
+    let turned: Vec<(f64, f64)> = along
+        .iter()
+        .map(|p| {
+            Similarity {
+                dx_mm: 0.0,
+                dy_mm: 0.0,
+                rotation_deg: 45.0,
+                scale: 1.0,
+            }
+            .apply(*p, &page)
+        })
+        .collect();
+    assert!(spread_across(&turned) < 2.0, "{}", spread_across(&turned));
+
+    // And a proper spread reads as one.
+    let spread = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0), (160.0, 250.0)];
+    assert!(spread_across(&spread) > 100.0, "{}", spread_across(&spread));
+}
+
 #[test]
 fn a_blank_sheet_teaches_nothing_rather_than_teaching_nonsense() {
     let page = A4;

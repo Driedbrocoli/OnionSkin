@@ -389,12 +389,15 @@ fn learn_from_job(state: &mut State, room: &mut Room) {
 
         match calibrate::save_profile(&profile) {
             Ok(_) => Outcome::done(format!(
-                "Saved as '{}'.\n\nWhere the additions landed:\n{}\n\n{}\n\nAsk \
+                "Saved as '{}'.\n\nWhere the additions landed:\n{}\n\n{}\n{}\n\nAsk \
                  for it by name when you make a delta. Scan another job back \
                  later and it gets better.",
                 profile.name,
                 measured.join("\n"),
                 profile.correction().describe(),
+                // Says when only a shift could be fitted, which changes what
+                // the profile is good for.
+                profile.notes,
             )),
             Err(e) => Outcome::refused(e.to_string()),
         }
