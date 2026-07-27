@@ -1,0 +1,54 @@
+# Remove files from a release that should not be on it.
+#
+# Uploading to the wrong release is easy to do and, until this existed, not
+# possible to undo: the API needs a token, and the only thing here that has
+# one is a workflow run. So this is that one job — `gh` and nothing else,
+# like the release workflow beside it.
+#
+# It only ever deletes named files from a named release. It cannot delete a
+# release, a tag, or anything in the repository.
+
+name: Tidy a release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Which release, with the v"
+        required: true
+      files:
+        description: "Files to remove, separated by spaces"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove the files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ inputs.tag }}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            echo "There is no release $tag." >&2
+            exit 1
+          fi
+          for file in ${{ inputs.files }}; do
+            if gh release view "$tag" --json assets \
+                 --jq '.assets[].name' | grep -qx -- "$file"; then
+              gh release delete-asset "$tag" "$file" --yes
+              echo "Removed $file from $tag."
+            else
+              # Not an error: saying so and carrying on is more useful than
+              # stopping half way through a list.
+              echo "$tag has no file called $file; nothing to do."
+            fi
+          done
+
+          echo
+          echo "$tag now holds:"
+          gh release view "$tag" --json assets --jq '.assets[].name'
