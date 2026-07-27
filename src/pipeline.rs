@@ -434,6 +434,7 @@ pub fn compose_run_drawing(
             *first,
         ));
     }
+    safety::drop_the_symptoms(&mut checks);
     safety::sort_checks(&mut checks);
 
     let correction = profile
@@ -630,6 +631,7 @@ pub fn run_watched(
             *first,
         ));
     }
+    safety::drop_the_symptoms(&mut checks);
     safety::sort_checks(&mut checks);
 
     let correction = profile

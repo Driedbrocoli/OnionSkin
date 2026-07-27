@@ -162,6 +162,19 @@ pub fn check_documents(original: &[PageSize], edited: &[PageSize]) -> Vec<Check>
     checks
 }
 
+/// Drop the checks that a bigger one has already explained.
+///
+/// When the two documents were handed over the wrong way round, every page
+/// reports reflow — all the added text is "missing" from the document that was
+/// called the original. That is true and it is not the problem, and the advice
+/// attached to it, about Word text boxes and fixed positions, is about a
+/// problem this person does not have. One clear cause beats five true symptoms.
+pub fn drop_the_symptoms(checks: &mut Vec<Check>) {
+    if checks.iter().any(|check| check.code == "documents_reversed") {
+        checks.retain(|check| check.code != "reflow" && check.code != "heavy_coverage");
+    }
+}
+
 /// The reflow alarm: ink that is gone from where it was.
 pub fn check_reflow(diff: &PageDiff) -> Vec<Check> {
     let removed = diff.removed_ink_mm2();
@@ -270,6 +283,31 @@ pub fn check_empty(diffs: &[PageDiff]) -> Vec<Check> {
     if diffs.iter().any(|d| d.has_additions()) {
         return Vec::new();
     }
+
+    // Nothing was added and something was taken away. That is not a document
+    // somebody edited badly — it is the same edit read backwards, which is
+    // what `onionskin delta new.pdf old.pdf` produces. Saying "the two
+    // documents render identically" would be plainly untrue, and the reflow
+    // advice that follows is about a problem this person does not have.
+    let removed: f64 = diffs.iter().map(|d| d.removed_ink_mm2()).sum();
+    if removed > 0.0 {
+        return vec![Check::new(
+            Severity::Blocker,
+            "documents_reversed",
+            "Nothing was added, and something was taken away — these two \
+             documents look like they were given the wrong way round."
+                .into(),
+        )
+        .with_detail(format!(
+            "{removed:.0} mm² of ink is in the first document and not in the \
+             second, and none is the other way about. The first one is the \
+             document as it was printed; the second is the edited copy. Try them \
+             in the other order.\n\nIf they really are in the right order, then \
+             the edit only removed things, and ink cannot be taken off paper — \
+             that page has to be printed fresh."
+        ))];
+    }
+
     vec![Check::new(
         Severity::Blocker,
         "empty_delta",

@@ -242,6 +242,55 @@ fn two_identical_documents_block_rather_than_print_a_blank_sheet() {
 }
 
 #[test]
+fn documents_the_wrong_way_round_are_named_as_such() {
+    // `onionskin delta new.pdf old.pdf` is an easy thing to type and produces
+    // a delta of what was *removed*, which prints nothing useful. Saying "the
+    // two documents render identically" would be plainly untrue.
+    let checks = check_empty(&[diff(0, vec![], vec![region(20.0, 20.0, 90.0, 30.0)])]);
+    assert_eq!(codes(&checks), vec!["documents_reversed"]);
+    assert_eq!(checks[0].severity, Severity::Blocker);
+    assert!(checks[0].detail.contains("other order"), "{}", checks[0].detail);
+    // And it allows for being wrong: an edit really can only remove things.
+    assert!(
+        checks[0].detail.contains("printed fresh"),
+        "{}",
+        checks[0].detail
+    );
+}
+
+#[test]
+fn the_reversal_silences_the_reflow_it_causes() {
+    // Every page reports reflow when the documents are the wrong way round —
+    // all the added text is "missing" from the one called the original. True,
+    // not the problem, and its advice is about Word text boxes, which is a
+    // problem this person does not have.
+    let mut checks = check_reflow(&diff(0, vec![], vec![region(20.0, 20.0, 90.0, 30.0)]));
+    checks.extend(check_empty(&[diff(
+        0,
+        vec![],
+        vec![region(20.0, 20.0, 90.0, 30.0)],
+    )]));
+    assert!(codes(&checks).contains(&"reflow"), "{:?}", codes(&checks));
+
+    drop_the_symptoms(&mut checks);
+    assert_eq!(codes(&checks), vec!["documents_reversed"]);
+}
+
+#[test]
+fn reflow_on_its_own_is_left_alone() {
+    // Nothing may be dropped when there is no bigger explanation for it: a
+    // real reflow with real additions is exactly what the check is for.
+    let mut checks = check_reflow(&diff(
+        0,
+        vec![region(20.0, 60.0, 90.0, 70.0)],
+        vec![region(20.0, 20.0, 90.0, 30.0)],
+    ));
+    let before: Vec<String> = codes(&checks).iter().map(|c| c.to_string()).collect();
+    drop_the_symptoms(&mut checks);
+    assert_eq!(codes(&checks), before);
+}
+
+#[test]
 fn one_page_with_additions_is_enough_to_not_be_empty() {
     let pages = [
         diff(0, vec![], vec![]),
