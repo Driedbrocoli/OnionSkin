@@ -583,6 +583,24 @@ fn inherited(pdf: &lopdf::Document, page: &Dictionary, key: &[u8]) -> Option<Obj
     None
 }
 
+/// One page turned into pixels, with only the grey of it.
+///
+/// The colour costs three bytes a pixel — forty-six megabytes on an A4 page at
+/// four hundred dots an inch — and most of what Onionskin does with a page
+/// never looks at it. Comparing two documents needs the grey and nothing else;
+/// only the sheet being *written* is needed in colour, and only when a delta is
+/// actually being built. Rendering the rest in grey alone is forty-six
+/// megabytes a page not allocated, not filled in, and not handed back.
+#[derive(Debug, Clone)]
+pub struct GrayPage {
+    pub index: usize,
+    pub size: PageSize,
+    pub width: usize,
+    pub height: usize,
+    /// One byte per pixel.
+    pub gray: Vec<u8>,
+}
+
 /// One page turned into pixels.
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
@@ -904,6 +922,62 @@ impl Document<'_> {
 
     /// Draw one page at `dpi`.
     pub fn render(&self, index: usize, dpi: f64) -> Result<RenderedPage, RenderError> {
+        let (width, height, size, rgb, gray) = self.raster(index, dpi, true)?;
+        Ok(RenderedPage {
+            index,
+            size,
+            width,
+            height,
+            rgb,
+            gray,
+        })
+    }
+
+    /// The same page, in grey only.
+    ///
+    /// See [`GrayPage`]: the colour is three bytes a pixel that most callers
+    /// never read.
+    pub fn render_gray(&self, index: usize, dpi: f64) -> Result<GrayPage, RenderError> {
+        let (width, height, size, _, gray) = self.raster(index, dpi, false)?;
+        Ok(GrayPage {
+            index,
+            size,
+            width,
+            height,
+            gray,
+        })
+    }
+
+    /// With the colour or without it, decided at the call.
+    ///
+    /// For the one caller that cannot know until it is running whether the
+    /// colour will be wanted: a delta needs it, a report does not, and both go
+    /// down the same loop.
+    pub fn render_either(
+        &self,
+        index: usize,
+        dpi: f64,
+        want_colour: bool,
+    ) -> Result<RenderedPage, RenderError> {
+        let (width, height, size, rgb, gray) = self.raster(index, dpi, want_colour)?;
+        Ok(RenderedPage {
+            index,
+            size,
+            width,
+            height,
+            rgb,
+            gray,
+        })
+    }
+
+    /// Draw a page, keeping the colour only if it was asked for.
+    #[allow(clippy::type_complexity)]
+    fn raster(
+        &self,
+        index: usize,
+        dpi: f64,
+        want_colour: bool,
+    ) -> Result<(usize, usize, PageSize, Vec<u8>, Vec<u8>), RenderError> {
         use pdfium_render::prelude::*;
 
         let size = self.page_sizes[index];
@@ -928,11 +1002,13 @@ impl Document<'_> {
         let height = bitmap.height() as usize;
         let raw = bitmap.as_rgba_bytes();
 
-        let mut rgb = Vec::with_capacity(width * height * 3);
+        let mut rgb = Vec::with_capacity(if want_colour { width * height * 3 } else { 0 });
         let mut gray = Vec::with_capacity(width * height);
         for pixel in raw.chunks_exact(4) {
             let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
-            rgb.extend_from_slice(&[r, g, b]);
+            if want_colour {
+                rgb.extend_from_slice(&[r, g, b]);
+            }
             // The same luma weights every image library uses, so a page
             // rasterised here and one rasterised elsewhere agree about grey.
             gray.push(((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000).min(255) as u8);
@@ -946,18 +1022,13 @@ impl Document<'_> {
         // time and blurs every glyph edge.
         let target = (target_w as usize, target_h as usize);
         if (width, height) != target {
-            rgb = fit(&rgb, (width, height), target, 3, 255);
+            if want_colour {
+                rgb = fit(&rgb, (width, height), target, 3, 255);
+            }
             gray = fit(&gray, (width, height), target, 1, 255);
         }
 
-        Ok(RenderedPage {
-            index,
-            size,
-            width: target.0,
-            height: target.1,
-            rgb,
-            gray,
-        })
+        Ok((target.0, target.1, size, rgb, gray))
     }
 }
 

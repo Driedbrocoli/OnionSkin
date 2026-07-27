@@ -2495,18 +2495,11 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
 }
 
 fn cmd_compare(args: CompareArgs) -> Result<ExitCode, String> {
-    // Somewhere to put the delta that is thrown away afterwards, so that
-    // "report, write nothing" really does write nothing anyone will find.
-    let scratch = onionskin::render::Workspace::new(false).map_err(|e| e.to_string())?;
+    // Nothing is written at all, and nothing is built to be thrown away
+    // either — see `pipeline::examine`.
     let options = delta_options("raster", args.dpi, args.margin, None, None, None)?;
-
-    let outcome = pipeline::run(
-        &args.original,
-        &args.edited,
-        &scratch.path.join("delta.pdf"),
-        &options,
-    )
-    .map_err(|e| e.to_string())?;
+    let outcome =
+        pipeline::examine(&args.original, &args.edited, &options).map_err(|e| e.to_string())?;
 
     if args.json {
         println!(

@@ -481,6 +481,34 @@ pub fn run(
     run_watched(original, edited, output, options, &mut unwatched)
 }
 
+/// Compare the two documents and report, writing no delta at all.
+///
+/// `onionskin compare` used to run the whole of [`run`] into a temporary
+/// folder and delete what it produced, which on a long document is most of the
+/// work: every changed region is cropped out of the page, given a soft mask,
+/// compressed and written, and then thrown away unread. On a twenty-page
+/// document that was seventeen seconds of the forty it took.
+///
+/// Everything reported — the regions, the ink, the checks — is worked out
+/// before the delta is built and is not affected by not building it.
+pub fn examine(
+    original: &Path,
+    edited: &Path,
+    options: &Options,
+) -> Result<Outcome, PipelineError> {
+    examine_watched(original, edited, options, &mut unwatched)
+}
+
+/// The same, saying how far along it is as it goes.
+pub fn examine_watched(
+    original: &Path,
+    edited: &Path,
+    options: &Options,
+    watch: &mut dyn FnMut(Step),
+) -> Result<Outcome, PipelineError> {
+    compare_documents(original, edited, None, options, watch)
+}
+
 /// The same, saying how far along it is as it goes.
 pub fn run_watched(
     original: &Path,
@@ -489,8 +517,23 @@ pub fn run_watched(
     options: &Options,
     watch: &mut dyn FnMut(Step),
 ) -> Result<Outcome, PipelineError> {
+    compare_documents(original, edited, Some(output), options, watch)
+}
+
+/// Compare two documents, and write a delta if one was asked for.
+///
+/// `output` is `None` for [`examine`], which reports and writes nothing.
+fn compare_documents(
+    original: &Path,
+    edited: &Path,
+    output: Option<&Path>,
+    options: &Options,
+    watch: &mut dyn FnMut(Step),
+) -> Result<Outcome, PipelineError> {
     options.validate()?;
-    guard_output(output, &[original, edited])?;
+    if let Some(output) = output {
+        guard_output(output, &[original, edited])?;
+    }
 
     let profile = match &options.profile {
         Some(name) => Some(calibrate::load_profile(name)?),
@@ -526,11 +569,14 @@ pub fn run_watched(
     checks.extend(opening_notes(&original_notes, &edited_notes));
 
     let staged = work.join("delta-raw.pdf");
-    let mut raster = match options.mode {
-        Mode::Raster => {
+    // No delta wanted, no delta built. Cropping every changed region out of
+    // the page, giving it a soft mask and compressing it is most of the work
+    // on a long document, and `examine` throws the result away unread.
+    let mut raster = match (output, options.mode) {
+        (Some(_), Mode::Raster) => {
             Some(RasterDeltaWriter::new(&staged, "Onionskin delta")?.marking(options.outline))
         }
-        Mode::Vector => None,
+        _ => None,
     };
 
     let mut diffs: Vec<PageDiff> = Vec::new();
@@ -543,11 +589,15 @@ pub fn run_watched(
             page: index + 1,
             pages: new_doc.len(),
         });
-        let new_page = new_doc.render(index, options.dpi)?;
+        // The colour is only ever wanted for the sheet being written, and only
+        // when a delta is actually being built. Everything else here compares
+        // grey against grey — see `render::GrayPage`.
+        let want_colour = raster.is_some();
+        let new_page = new_doc.render_either(index, options.dpi, want_colour)?;
         sizes.push(new_page.size);
 
         let old_gray: Vec<u8> = if index < old_doc.len() {
-            let old_page = old_doc.render(index, options.dpi)?;
+            let old_page = old_doc.render_gray(index, options.dpi)?;
             if old_page.size.matches(&new_page.size, 0.5) {
                 old_page.gray
             } else {
@@ -587,24 +637,26 @@ pub fn run_watched(
         diffs.push(diff);
     }
 
-    watch(Step {
-        doing: "Writing the delta",
-        page: 0,
-        pages: 0,
-    });
-    match raster {
-        Some(writer) => {
-            writer.close()?;
-        }
-        None => {
-            build_vector_delta(
-                &diffs,
-                &edited_pdf,
-                &staged,
-                options.pad_mm,
-                "Onionskin delta",
-                options.outline,
-            )?;
+    if output.is_some() {
+        watch(Step {
+            doing: "Writing the delta",
+            page: 0,
+            pages: 0,
+        });
+        match raster {
+            Some(writer) => {
+                writer.close()?;
+            }
+            None => {
+                build_vector_delta(
+                    &diffs,
+                    &edited_pdf,
+                    &staged,
+                    options.pad_mm,
+                    "Onionskin delta",
+                    options.outline,
+                )?;
+            }
         }
     }
 
@@ -638,6 +690,21 @@ pub fn run_watched(
         .as_ref()
         .map(|p| p.correction())
         .unwrap_or(Similarity::IDENTITY);
+
+    // Reporting stops here. Everything below writes the delta; everything
+    // above it — the regions, the ink, the checks — was worked out without
+    // needing to, which is why `examine` can stop at this line.
+    let Some(output) = output else {
+        return Ok(Outcome {
+            output: PathBuf::new(),
+            pages: diffs,
+            checks,
+            previews,
+            mode: options.mode,
+            dpi: options.dpi,
+            profile,
+        });
+    };
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|source| PipelineError::Io {

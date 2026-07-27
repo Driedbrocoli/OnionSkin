@@ -203,6 +203,11 @@ pub fn dilate(mask: &Mask, radius_px: usize) -> Mask {
     }
     let (w, h) = (mask.width, mask.height);
 
+    // Written as slice-against-slice rather than pixel-by-pixel with an `if`.
+    // A branch per pixel is a branch fifteen million times a page, and it stops
+    // the compiler using the vector instructions every machine has had for
+    // twenty years — with them, eight or sixteen pixels are grown per
+    // instruction. The `|=` does the same job as the `if` and is unconditional.
     let mut grown = mask.clone();
     for shift in 1..=radius_px {
         if shift >= w {
@@ -210,18 +215,22 @@ pub fn dilate(mask: &Mask, radius_px: usize) -> Mask {
         }
         for y in 0..h {
             let row = y * w;
-            for x in shift..w {
-                // Left neighbour reaches right, and vice versa.
-                if mask.bits[row + x - shift] {
-                    grown.bits[row + x] = true;
-                }
-                if mask.bits[row + x] {
-                    grown.bits[row + x - shift] = true;
-                }
+            let source = &mask.bits[row..row + w];
+            let target = &mut grown.bits[row..row + w];
+            // Left neighbours reaching right.
+            for (into, from) in target[shift..].iter_mut().zip(&source[..w - shift]) {
+                *into |= *from;
+            }
+            // And right neighbours reaching left.
+            for (into, from) in target[..w - shift].iter_mut().zip(&source[shift..]) {
+                *into |= *from;
             }
         }
     }
 
+    // The vertical pass is whole rows against whole rows, which is the shape
+    // the machine likes best: two runs of bytes, no addressing arithmetic per
+    // pixel at all.
     let mut out = grown.clone();
     for shift in 1..=radius_px {
         if shift >= h {
@@ -229,13 +238,17 @@ pub fn dilate(mask: &Mask, radius_px: usize) -> Mask {
         }
         for y in shift..h {
             let (here, above) = (y * w, (y - shift) * w);
-            for x in 0..w {
-                if grown.bits[above + x] {
-                    out.bits[here + x] = true;
-                }
-                if grown.bits[here + x] {
-                    out.bits[above + x] = true;
-                }
+            let (lower, upper) = if here > above {
+                let (first, second) = grown.bits.split_at(here);
+                (&second[..w], &first[above..above + w])
+            } else {
+                unreachable!("here is always below above")
+            };
+            for (into, from) in out.bits[here..here + w].iter_mut().zip(upper) {
+                *into |= *from;
+            }
+            for (into, from) in out.bits[above..above + w].iter_mut().zip(lower) {
+                *into |= *from;
             }
         }
     }
@@ -384,6 +397,24 @@ impl Default for DiffOptions {
     }
 }
 
+/// The top-left `w` × `h` of a render, without copying it when it already is.
+///
+/// Borrowed when the two renders agree on their size, which is the ordinary
+/// case — they are the same page at the same resolution. Copying fifteen
+/// megabytes twice a page to arrive at the bytes already in hand is most of a
+/// second on a long document, and every one of those megabytes is a page the
+/// kernel has to find and hand over.
+fn crop_to(gray: &[u8], from: (usize, usize), w: usize, h: usize) -> std::borrow::Cow<'_, [u8]> {
+    if from.0 == w && from.1 == h {
+        return std::borrow::Cow::Borrowed(&gray[..w * h]);
+    }
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        out.extend_from_slice(&gray[y * from.0..y * from.0 + w]);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Compare one rendered page against another.
 ///
 /// Each mask is taken against the *dilated* opposite: a glyph that shifted by a
@@ -405,18 +436,13 @@ pub fn diff_page(
     let w = old_size.0.min(new_size.0);
     let h = old_size.1.min(new_size.1);
 
-    let crop = |gray: &[u8], from: (usize, usize)| -> Vec<u8> {
-        if from.0 == w && from.1 == h {
-            return gray[..w * h].to_vec();
-        }
-        let mut out = Vec::with_capacity(w * h);
-        for y in 0..h {
-            out.extend_from_slice(&gray[y * from.0..y * from.0 + w]);
-        }
-        out
-    };
-    let old_gray = crop(old_gray, old_size);
-    let new_gray = crop(new_gray, new_size);
+    // Borrowed when the two renders already agree on their size, which is the
+    // ordinary case — they are the same page at the same resolution. Copying
+    // fifteen megabytes twice a page to arrive at the bytes already in hand is
+    // most of a second on a long document, and every one of those megabytes is
+    // a page the kernel has to find.
+    let old_gray = crop_to(old_gray, old_size, w, h);
+    let new_gray = crop_to(new_gray, new_size, w, h);
 
     let old_ink = ink_mask(&old_gray, w, h, options.ink_threshold);
     let new_ink = ink_mask(&new_gray, w, h, options.ink_threshold);
@@ -425,11 +451,27 @@ pub fn diff_page(
     let old_grown = dilate(&old_ink, radius);
     let new_grown = dilate(&new_ink, radius);
 
+    // One slice against another, and `&` rather than `&&`. The short-circuiting
+    // form is a branch, and a branch fifteen million times a page costs far
+    // more than the second load it saves — both operands are already in a
+    // register by the time the question is asked.
     let mut added = Mask::blank(w, h);
     let mut removed = Mask::blank(w, h);
-    for i in 0..w * h {
-        added.bits[i] = new_ink.bits[i] && !old_grown.bits[i];
-        removed.bits[i] = old_ink.bits[i] && !new_grown.bits[i];
+    for ((into, ink), grown) in added
+        .bits
+        .iter_mut()
+        .zip(&new_ink.bits)
+        .zip(&old_grown.bits)
+    {
+        *into = *ink & !*grown;
+    }
+    for ((into, ink), grown) in removed
+        .bits
+        .iter_mut()
+        .zip(&old_ink.bits)
+        .zip(&new_grown.bits)
+    {
+        *into = *ink & !*grown;
     }
 
     PageDiff {
