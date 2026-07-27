@@ -271,6 +271,32 @@ struct DeltaArgs {
     /// Report as JSON instead of for reading.
     #[arg(long)]
     json: bool,
+
+    // Expert. Everything below changes how the comparison itself is made.
+    // The defaults are right for paper; these are here because somebody
+    // working with an unusual document should not have to fork the program to
+    // change a number, and because a program that hides its own workings is
+    // asking to be trusted rather than checked.
+    /// How dark a pixel must be to count as ink, 1 to 254. Lower catches
+    /// fainter marks and more scanner noise with them.
+    #[arg(long, value_name = "1-254")]
+    ink_threshold: Option<u8>,
+    /// How far apart two pieces of new ink can be and still be called one
+    /// change, in millimetres.
+    #[arg(long, value_name = "MM")]
+    group: Option<f64>,
+    /// Ignore changes smaller than this, in square millimetres. Raise it to
+    /// throw away specks; lower it to catch a full stop.
+    #[arg(long, value_name = "MM2")]
+    min_region: Option<f64>,
+    /// How far outside the changed ink a vector delta's clip box reaches, in
+    /// millimetres. Only used with --mode vector.
+    #[arg(long, value_name = "MM")]
+    pad: Option<f64>,
+    /// How far a piece of ink may move and still count as unchanged, in
+    /// millimetres.
+    #[arg(long, value_name = "MM")]
+    tolerance: Option<f64>,
 }
 
 #[derive(clap::Args)]
@@ -2082,6 +2108,45 @@ fn delta_options(
     })
 }
 
+/// Apply the expert settings, leaving anything not given at its default.
+///
+/// Separate from [`delta_options`] so that the ordinary path reads as the
+/// ordinary path: five arguments somebody might reasonably choose, and then a
+/// line that says the fine adjustments were left alone unless asked for.
+fn expert_options(mut options: pipeline::Options, args: &DeltaArgs) -> Result<pipeline::Options, String> {
+    if let Some(threshold) = args.ink_threshold {
+        if threshold == 0 || threshold == 255 {
+            return Err("--ink-threshold must be between 1 and 254".into());
+        }
+        options.diff.ink_threshold = threshold;
+    }
+    for (value, name) in [
+        (args.group, "--group"),
+        (args.min_region, "--min-region"),
+        (args.pad, "--pad"),
+        (args.tolerance, "--tolerance"),
+    ] {
+        if let Some(value) = value {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{name} must be zero or more millimetres"));
+            }
+        }
+    }
+    if let Some(group) = args.group {
+        options.diff.group_mm = group;
+    }
+    if let Some(smallest) = args.min_region {
+        options.diff.min_region_mm2 = smallest;
+    }
+    if let Some(pad) = args.pad {
+        options.pad_mm = pad;
+    }
+    if let Some(tolerance) = args.tolerance {
+        options.diff.tolerance_mm = tolerance;
+    }
+    Ok(options)
+}
+
 /// A colour by name, or as three numbers.
 ///
 /// Names first because that is what somebody types, and the three-number form
@@ -2191,10 +2256,11 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         &args.mode,
         args.dpi,
         args.margin,
-        args.profile,
+        args.profile.clone(),
         args.preview.clone(),
         outline,
     )?;
+    let options = expert_options(options, &args)?;
 
     let outcome = pipeline::run_watched(
         &args.original,
