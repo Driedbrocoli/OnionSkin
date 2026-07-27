@@ -1139,14 +1139,59 @@ fn report_saving(outcome: &pipeline::Outcome) {
         format!("{per_cent:.0}%")
     };
 
-    let carrying = outcome.pages_with_additions().len();
-    let sheets = outcome.pages.len();
     println!("\nThis uses {ink} of the ink that printing it whole would.");
-    if sheets > 1 && carrying < sheets {
-        println!(
-            "  {carrying} sheet{} to feed, out of {sheets}.",
-            if carrying == 1 { "" } else { "s" }
-        );
+}
+
+/// Which sheets actually need to go back through the printer.
+///
+/// A forty-page document with three changes needs three sheets fed, not
+/// forty — and until this said so, working out which three meant opening the
+/// delta and looking at every page for ink.
+fn report_sheets_to_feed(outcome: &pipeline::Outcome) {
+    let carrying = outcome.pages_with_additions();
+    let sheets = outcome.pages.len();
+    if sheets < 2 || carrying.is_empty() || carrying.len() == sheets {
+        return;
+    }
+    println!(
+        "\nOnly {} of the {sheets} sheets has anything on it: {}",
+        if carrying.len() == 1 {
+            "one".to_string()
+        } else {
+            carrying.len().to_string()
+        },
+        describe_sheets(&carrying)
+    );
+    println!("  The rest of the delta is blank — feeding them would do nothing.");
+}
+
+/// Page numbers as somebody would say them: "3, 7 and 8", or "3 to 9".
+fn describe_sheets(pages: &[usize]) -> String {
+    // Runs collapse, because "4 to 21" is a thing a person can act on and
+    // eighteen comma-separated numbers is not.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for page in pages {
+        match runs.last_mut() {
+            Some(run) if run.1 + 1 == *page => run.1 = *page,
+            _ => runs.push((*page, *page)),
+        }
+    }
+    let parts: Vec<String> = runs
+        .iter()
+        .map(|(first, last)| match last - first {
+            0 => first.to_string(),
+            1 => format!("{first} and {last}"),
+            _ => format!("{first} to {last}"),
+        })
+        .collect();
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].clone(),
+        _ => format!(
+            "{} and {}",
+            parts[..parts.len() - 1].join(", "),
+            parts[parts.len() - 1]
+        ),
     }
 }
 
@@ -3406,6 +3451,7 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
             .join(", ")
     );
     report_saving(&outcome);
+    report_sheets_to_feed(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
@@ -3639,6 +3685,7 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
         }
     );
     report_saving(&outcome);
+    report_sheets_to_feed(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
@@ -4328,6 +4375,7 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         if outcome.total_regions() == 1 { "" } else { "s" }
     );
     report_saving(&outcome);
+    report_sheets_to_feed(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
@@ -4370,6 +4418,7 @@ fn draw_on_document(args: &DrawArgs, shapes: &[onionskin::document::Shape]) -> R
         if outcome.total_regions() == 1 { "" } else { "s" }
     );
     report_saving(&outcome);
+    report_sheets_to_feed(&outcome);
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
@@ -5483,6 +5532,19 @@ mod naming_tests {
         let list = dir.join("people.csv");
         std::fs::write(&list, "name,course\nA. One,Bookbinding\nB. Two,Letterpress\n").unwrap();
         (sheet, list)
+    }
+
+    #[test]
+    fn the_sheets_to_feed_are_named_the_way_somebody_would_say_them() {
+        assert_eq!(describe_sheets(&[3]), "3");
+        assert_eq!(describe_sheets(&[3, 7]), "3 and 7");
+        assert_eq!(describe_sheets(&[3, 7, 9]), "3, 7 and 9");
+        // A run collapses, because "4 to 21" is something a person can act
+        // on and eighteen comma-separated numbers is not.
+        assert_eq!(describe_sheets(&[4, 5, 6, 7]), "4 to 7");
+        assert_eq!(describe_sheets(&[1, 2]), "1 and 2");
+        assert_eq!(describe_sheets(&[1, 2, 3, 9, 11, 12, 13]), "1 to 3, 9 and 11 to 13");
+        assert_eq!(describe_sheets(&[]), "");
     }
 
     #[test]
