@@ -136,6 +136,67 @@ pub fn rows(page: &PageText) -> Vec<Row> {
         .collect()
 }
 
+/// The same rows, from a document's own layout rather than from a scan.
+///
+/// A document knows exactly where each of its words sits, so anchoring in one
+/// needs no rendering and no reading — and is exact rather than measured. The
+/// two paths meet here, at [`Row`], so `place_in` does not care which it was
+/// given.
+///
+/// Word rectangles are measured with the same font metrics that will set the
+/// text, so the gap after "Received:" is the gap the PDF will actually show.
+/// Text set in an embedded font file is skipped rather than guessed at: its
+/// widths are not knowable from here, and a wrong rectangle would place the
+/// new words at a wrong millimetre, which is worse than not finding them.
+pub fn rows_from_lines(lines: &[crate::pdf::PlacedLine]) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
+    for line in lines {
+        let crate::pdf::LineFont::Builtin(font) = line.font else {
+            continue;
+        };
+        // Cap height, near enough, and the same quantity the reader reports
+        // for a scanned letter: how tall the letters look, not the em.
+        let height_mm = crate::geometry::pt_to_mm(line.size_pt) * 0.7;
+
+        let mut words = Vec::new();
+        let mut at = 0usize;
+        for word in line.text.split_whitespace() {
+            // Where this word starts, by measuring everything before it in
+            // the very font it is set in.
+            let start = line.text[at..]
+                .find(word)
+                .map(|offset| at + offset)
+                .unwrap_or(at);
+            let before = crate::pdf::builtin_width_mm(font, &line.text[..start], line.size_pt);
+            let width = crate::pdf::builtin_width_mm(font, word, line.size_pt);
+            words.push((
+                word.to_string(),
+                Rect {
+                    x_mm: line.x_mm + before,
+                    y_mm: line.y_mm - height_mm,
+                    width_mm: width,
+                    height_mm,
+                },
+                height_mm,
+            ));
+            at = start + word.len();
+        }
+        if words.is_empty() {
+            continue;
+        }
+        rows.push(Row {
+            baseline_mm: line.y_mm,
+            words,
+        });
+    }
+    rows.sort_by(|a, b| {
+        a.baseline_mm
+            .partial_cmp(&b.baseline_mm)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    rows
+}
+
 /// Find `wanted` on the page and work out where the new words should start.
 ///
 /// `gap_mm` is how much room to leave after the anchor when placing on the same

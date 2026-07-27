@@ -223,3 +223,76 @@ fn where_is_parsed_from_what_somebody_would_type() {
     assert_eq!(Where::parse(" below-end "), Some(Where::BelowEnd));
     assert_eq!(Where::parse("beside"), None);
 }
+
+/// A line as a document's own layout hands it over.
+fn placed(text: &str, x_mm: f64, baseline_mm: f64, size_pt: f64) -> crate::pdf::PlacedLine {
+    crate::pdf::PlacedLine {
+        text: text.to_string(),
+        x_mm,
+        y_mm: baseline_mm,
+        size_pt,
+        font: crate::pdf::LineFont::Builtin(crate::pdf::Font::Helvetica),
+        rotation_deg: 0.0,
+        colour: (0.0, 0.0, 0.0),
+    }
+}
+
+#[test]
+fn a_documents_own_words_can_be_anchored_to_without_rendering_it() {
+    // A document knows where its words are to the millimetre they will print
+    // at, so anchoring in one needs no picture of it and no reading.
+    let rows = rows_from_lines(&[placed("Received:", 20.0, 40.0, 11.0)]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].words.len(), 1);
+    assert_eq!(rows[0].words[0].0, "Received:");
+    assert!((rows[0].baseline_mm - 40.0).abs() < 1e-9);
+
+    let placed_at = place_in(&rows, "Received:", Where::After, 1.0, 5.0).unwrap();
+    // Just past the anchor, which is as wide as Helvetica sets it.
+    let width = crate::pdf::builtin_width_mm(crate::pdf::Font::Helvetica, "Received:", 11.0);
+    assert!(
+        (placed_at.x_mm - (20.0 + width + 1.0)).abs() < 1e-9,
+        "{placed_at:?} against a width of {width}"
+    );
+}
+
+#[test]
+fn each_word_on_a_line_gets_its_own_place() {
+    // "Date of birth" is one line and three words, and the anchor may be any
+    // run of them — so each needs measuring where it actually sits.
+    let rows = rows_from_lines(&[placed("Date of birth", 20.0, 40.0, 11.0)]);
+    assert_eq!(rows[0].words.len(), 3);
+    let (first, second) = (&rows[0].words[0], &rows[0].words[1]);
+    assert_eq!(first.0, "Date");
+    assert_eq!(second.0, "of");
+    assert!(second.1.x_mm > first.1.x_mm + first.1.width_mm, "{rows:?}");
+
+    // And the whole run is findable as one anchor.
+    assert!(place_in(&rows, "Date of birth", Where::After, 1.0, 5.0).is_ok());
+}
+
+#[test]
+fn a_line_set_in_an_embedded_font_is_left_out_rather_than_guessed_at() {
+    // Its widths are not knowable from here, and a rectangle invented for it
+    // would place the new words at a wrong millimetre — worse than not
+    // finding the anchor at all, because it prints.
+    let mut line = placed("Received:", 20.0, 40.0, 11.0);
+    line.font = crate::pdf::LineFont::Embedded;
+    assert!(rows_from_lines(&[line]).is_empty());
+
+    // An empty line contributes nothing either, rather than an empty row.
+    assert!(rows_from_lines(&[placed("   ", 20.0, 40.0, 11.0)]).is_empty());
+}
+
+#[test]
+fn rows_come_back_down_the_page_whatever_order_they_were_written_in() {
+    // Items are stored in the order somebody added them, which is not the
+    // order they sit in. "the line below" has to mean the one below.
+    let rows = rows_from_lines(&[
+        placed("third", 20.0, 90.0, 11.0),
+        placed("first", 20.0, 40.0, 11.0),
+        placed("second", 20.0, 60.0, 11.0),
+    ]);
+    let order: Vec<&str> = rows.iter().map(|r| r.words[0].0.as_str()).collect();
+    assert_eq!(order, vec!["first", "second", "third"]);
+}
