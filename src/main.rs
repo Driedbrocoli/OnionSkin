@@ -1208,6 +1208,18 @@ fn anchored_places(
         .map(|lines| lines.as_slice())
         .unwrap_or(&[]);
     let rows = onionskin::anchor::rows_from_lines(lines);
+    if rows.is_empty() {
+        // Naming the page matters: the usual cause is a --page that is not
+        // the one the words are on, and "there is no text on this page" does
+        // not tell somebody which page Onionskin looked at.
+        return Err(format!(
+            "there is nothing on page {} to place anything against. The \
+             document has {} page{}.",
+            args.page,
+            document.pages,
+            if document.pages == 1 { "" } else { "s" }
+        ));
+    }
 
     let gap_mm = onionskin::geometry::pt_to_mm(args.size * 0.3);
     let step_mm = onionskin::geometry::pt_to_mm(args.size * 1.15);
@@ -4762,6 +4774,27 @@ mod naming_tests {
 
         let doc = Document::load(&path).unwrap();
         assert_eq!(doc.items.len(), 1, "something was written anyway");
+    }
+
+    #[test]
+    fn a_page_with_nothing_on_it_says_which_page_that_was() {
+        // The usual cause is a --page that is not the one the words are on,
+        // and "there is no text on this page" does not say which page was
+        // looked at, which is the whole question.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("form.onionskin");
+        let name = path.to_str().unwrap();
+        let mut doc = Document::blank(onionskin::calibrate::A4, 3);
+        doc.pages = 3;
+        doc.save(&path).unwrap();
+        write_run(&[name, "--at", "20,40:Received:"]).unwrap();
+
+        let said = write_run(&[name, "--after", "Received:x", "--page", "2"]).unwrap_err();
+        assert!(said.contains("page 2"), "{said}");
+        assert!(said.contains("3 pages"), "{said}");
+
+        // And the page it is on still works.
+        assert!(write_run(&[name, "--after", "Received:x", "--page", "1"]).is_ok());
     }
 
     #[test]
