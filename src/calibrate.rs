@@ -1581,6 +1581,27 @@ impl Landing {
         self.confidence >= BELIEVABLE && self.confidence <= CROWDED
     }
 
+    /// Whether the addition came out on the paper at all.
+    ///
+    /// Apart from `believable` because they are different questions with
+    /// different answers: an addition written across a line of the document
+    /// printed perfectly well and still cannot be measured.
+    pub fn printed(&self) -> bool {
+        self.confidence >= BELIEVABLE
+    }
+
+    /// One line about this landing, for a person reading a list of them.
+    pub fn describe(&self) -> String {
+        match self.doubt() {
+            None => format!("out by {:.2} mm", self.miss_mm()),
+            // Where nothing printed there is no distance to give: the middle
+            // of no ink is not a place, and reporting it as 0.00 mm out would
+            // read as the best result on the sheet.
+            Some(why) if !self.printed() => why,
+            Some(why) => format!("out by {:.2} mm — not counted, {why}", self.miss_mm()),
+        }
+    }
+
     /// Why it is not, in a few words. `None` when it is.
     pub fn doubt(&self) -> Option<String> {
         if self.confidence < BELIEVABLE {
@@ -1796,11 +1817,23 @@ pub fn measure_landings(
         let py0 = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
         let py1 = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
 
+        // Nothing there to read: off the edge of the scan, or clear paper.
+        // Recorded rather than dropped, because "this addition did not print"
+        // is the single most useful thing a sheet can say — and because a list
+        // that quietly loses its empty entries cannot be counted against the
+        // list that was asked for.
+        let nothing = Landing {
+            intended: mark.centre_mm,
+            observed: mark.centre_mm,
+            confidence: 0.0,
+        };
+
         let sx0 = px0.floor().max(0.0) as u32;
         let sy0 = py0.floor().max(0.0) as u32;
         let sx1 = (px1.ceil() as i64).clamp(0, width as i64) as u32;
         let sy1 = (py1.ceil() as i64).clamp(0, height as i64) as u32;
         if sx0 >= sx1 || sy0 >= sy1 {
+            landings.push(nothing);
             continue;
         }
 
@@ -1813,6 +1846,7 @@ pub fn measure_landings(
             threshold,
             |x, y| mapping.pixel_to_page_mm((x, y)),
         ) else {
+            landings.push(nothing);
             continue;
         };
 
@@ -1949,6 +1983,123 @@ fn fit_shift(nominal: &[(f64, f64)], observed: &[(f64, f64)]) -> SimilarityFit {
         rms_residual_mm: (sum_sq / n).sqrt(),
         max_residual_mm: worst,
         n_points: nominal.len(),
+    }
+}
+
+/// What a scan of a printed sheet says about how the job came out.
+///
+/// The other question the same measurement answers. Calibration wants to know
+/// what the printer does in general and needs marks spread over the page to say
+/// it; this wants to know whether *this sheet* is right, which one addition can
+/// settle — and wants settling before the other fifty-nine go through, because
+/// overprinting is the one operation where nothing tells you it went wrong
+/// until somebody opens the envelope.
+#[derive(Debug, Clone)]
+pub struct PrintReport {
+    pub landings: Vec<Landing>,
+    pub tolerance_mm: f64,
+    /// Additions that are not on the paper at all.
+    pub absent: usize,
+    /// Additions further from where they were asked for than the tolerance.
+    pub adrift: usize,
+    /// Additions that printed onto something already there, whose placement
+    /// cannot be read off the sheet either way.
+    pub unmeasurable: usize,
+    /// The worst miss among the ones that could be measured.
+    pub worst_mm: f64,
+}
+
+impl PrintReport {
+    pub fn of(landings: Vec<Landing>, tolerance_mm: f64) -> PrintReport {
+        // Three outcomes per addition, not two. One written across a line of
+        // the document printed perfectly well and cannot be measured — the ink
+        // in that window is both of them, and the distance it yields is not a
+        // distance. Counting that as misplaced would fail good sheets.
+        let mut report = PrintReport {
+            tolerance_mm,
+            absent: 0,
+            adrift: 0,
+            unmeasurable: 0,
+            worst_mm: 0.0,
+            landings,
+        };
+        for landing in &report.landings {
+            if !landing.printed() {
+                report.absent += 1;
+            } else if !landing.believable() {
+                report.unmeasurable += 1;
+            } else {
+                report.worst_mm = report.worst_mm.max(landing.miss_mm());
+                if landing.miss_mm() > tolerance_mm {
+                    report.adrift += 1;
+                }
+            }
+        }
+        report
+    }
+
+    /// Whether the sheet is fit to be handed over.
+    pub fn good(&self) -> bool {
+        self.absent == 0 && self.adrift == 0
+    }
+
+    /// One line per addition: a mark, where it was asked for, and how it went.
+    pub fn lines(&self) -> Vec<String> {
+        self.landings
+            .iter()
+            .map(|landing| {
+                let mark = if !landing.printed() {
+                    "✗"
+                } else if !landing.believable() {
+                    "?"
+                } else if landing.miss_mm() > self.tolerance_mm {
+                    "✗"
+                } else {
+                    "✓"
+                };
+                format!(
+                    "  {mark} {:>6.1},{:<6.1} mm   {}",
+                    landing.intended.0,
+                    landing.intended.1,
+                    landing.describe()
+                )
+            })
+            .collect()
+    }
+
+    /// What to say about the sheet as a whole.
+    pub fn verdict(&self) -> String {
+        let mut said = Vec::new();
+        if self.good() {
+            said.push(format!(
+                "Everything printed, and nothing is more than {:.2} mm out of place.",
+                self.worst_mm
+            ));
+        }
+        if self.absent > 0 {
+            said.push(format!(
+                "{} addition(s) did not print. The usual reason is the sheet going \
+                 in the wrong way up or the wrong end first — the delta went onto \
+                 the paper upside down, or off the edge of it.",
+                self.absent
+            ));
+        }
+        if self.adrift > 0 {
+            said.push(format!(
+                "{} addition(s) landed more than {:.2} mm from where they were \
+                 asked for; the worst is {:.2} mm out.",
+                self.adrift, self.tolerance_mm, self.worst_mm
+            ));
+        }
+        if self.unmeasurable > 0 {
+            said.push(format!(
+                "{} addition(s) went onto something already printed, so how well \
+                 they landed cannot be read off the sheet. Those have to be looked \
+                 at.",
+                self.unmeasurable
+            ));
+        }
+        said.join("\n")
     }
 }
 

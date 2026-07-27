@@ -25,6 +25,7 @@ pub struct Onionskin {
     document: screens::document::State,
     draw: screens::draw::State,
     read: screens::read::State,
+    verify: screens::verify::State,
     devices: screens::devices::State,
     calibrate: screens::calibrate::State,
     doctor: screens::doctor::State,
@@ -52,6 +53,7 @@ impl Onionskin {
             document: Default::default(),
             draw: Default::default(),
             read: Default::default(),
+            verify: Default::default(),
             devices: Default::default(),
             calibrate: Default::default(),
             doctor: Default::default(),
@@ -96,6 +98,9 @@ impl eframe::App for Onionskin {
                         }
                         Screen::Draw => screens::draw::show(&mut self.draw, &mut room),
                         Screen::Read => screens::read::show(&mut self.read, &mut room),
+                        Screen::Verify => {
+                            screens::verify::show(&mut self.verify, &mut room)
+                        }
                         Screen::Devices => {
                             screens::devices::show(&mut self.devices, &mut room)
                         }

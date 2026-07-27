@@ -691,6 +691,15 @@ means nothing; above it, something else is in the window — a line of the
 document the addition was written across — and the middle of two marks is the
 middle of neither.
 
+The same measurement answers a second question, and `verify` is that question:
+not "what does this printer do" but "did *this sheet* come out right". It needs
+no spread and no three points — one addition settles it — and it reports the
+thing calibration has no use for, which is an addition that did not print at
+all. That is why `measure_landings` records a landing with zero confidence
+rather than dropping the mark: a list that quietly loses its empty entries
+cannot be counted against the list that was asked for, and "nothing printed"
+is the most useful sentence a scanned sheet ever produces.
+
 The target has five crosshairs at chosen places; a job has whatever the job
 had. `spread_across` takes the extent along the minor principal axis of the
 marks, which for anything strung out in a line is nearly nothing however long

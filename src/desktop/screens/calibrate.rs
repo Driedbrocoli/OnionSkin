@@ -375,14 +375,10 @@ fn learn_from_job(state: &mut State, room: &mut Room) {
             .iter()
             .map(|landing| {
                 format!(
-                    "  {:>6.1},{:<6.1} mm   out by {:.2} mm{}",
+                    "  {:>6.1},{:<6.1} mm   {}",
                     landing.intended.0,
                     landing.intended.1,
-                    landing.miss_mm(),
-                    match landing.doubt() {
-                        Some(why) => format!("   (not counted: {why})"),
-                        None => String::new(),
-                    }
+                    landing.describe()
                 )
             })
             .collect();

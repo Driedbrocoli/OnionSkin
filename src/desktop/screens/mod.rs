@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod draw;
 pub mod read;
 pub mod scan;
+pub mod verify;
 
 use eframe::egui;
 
@@ -43,6 +44,7 @@ pub enum Screen {
     Document,
     Draw,
     Read,
+    Verify,
     Devices,
     Calibrate,
     Doctor,
@@ -57,6 +59,7 @@ impl Screen {
         Screen::Document,
         Screen::Draw,
         Screen::Read,
+        Screen::Verify,
         Screen::Devices,
         Screen::Calibrate,
         Screen::Doctor,
@@ -72,6 +75,7 @@ impl Screen {
             Screen::Document => "document",
             Screen::Draw => "draw",
             Screen::Read => "read",
+            Screen::Verify => "verify",
             Screen::Devices => "devices",
             Screen::Calibrate => "calibrate",
             Screen::Doctor => "doctor",
@@ -90,6 +94,7 @@ impl Screen {
             Screen::Document => "Make a document",
             Screen::Draw => "Draw on a page",
             Screen::Read => "Read a scan",
+            Screen::Verify => "Check a sheet",
             Screen::Devices => "Printers and scanners",
             Screen::Calibrate => "Calibration",
             Screen::Doctor => "This machine",
@@ -105,6 +110,7 @@ impl Screen {
             Screen::Document => "Start from blank paper and keep adding",
             Screen::Draw => "Lines, boxes and circles, in any colour",
             Screen::Read => "Turn a scan into a Word document",
+            Screen::Verify => "Did it come out of the printer right?",
             Screen::Devices => "Print and scan over the network",
             Screen::Calibrate => "Measure a printer, once, for exactness",
             Screen::Doctor => "What works here, and what is missing",

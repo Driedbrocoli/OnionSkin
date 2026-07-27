@@ -1409,11 +1409,20 @@ fn an_addition_that_did_not_print_is_not_measured() {
     let believed = landings.iter().filter(|l| l.believable()).count();
     assert_eq!(believed, 2, "{landings:?}");
 
+    // The one that did not print is still in the list, and says so. Dropping
+    // it would lose the most useful thing this sheet has to say, and would
+    // make the count below read "2 of 2" when 3 were asked for.
+    assert_eq!(landings.len(), 3, "{landings:?}");
+    let absent = &landings[2];
+    assert!(!absent.printed());
+    assert!(absent.describe().contains("did not print"), "{}", absent.describe());
+
     // And two is not enough to fit from, so it says so rather than guessing.
     let said = learn_from_landings(&landings, page, "office")
         .unwrap_err()
         .to_string();
     assert!(said.contains("three is the fewest"), "{said}");
+    assert!(said.contains("2 of the 3"), "{said}");
 }
 
 /// An addition written over something already printed is not measured.
@@ -1548,6 +1557,88 @@ fn a_blank_sheet_teaches_nothing_rather_than_teaching_nonsense() {
     let places = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0)];
     let (scan, registration) = sheet_with_blots(page, &[], Similarity::IDENTITY);
     let landings = measure_landings(&scan, &registration, &asked_for(&places), 128);
-    assert!(landings.is_empty(), "{landings:?}");
+    // One entry per addition asked for, every one of them saying nothing
+    // printed — which is what a sheet that went through the printer switched
+    // off looks like, and is worth being told.
+    assert_eq!(landings.len(), 3, "{landings:?}");
+    assert!(landings.iter().all(|l| !l.printed()), "{landings:?}");
     assert!(learn_from_landings(&landings, page, "x").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Checking one sheet before committing the rest of the stack
+// ---------------------------------------------------------------------------
+
+/// A landing with a chosen miss and a chosen amount of ink found.
+fn landed(miss_mm: f64, confidence: f64) -> Landing {
+    Landing {
+        intended: (100.0, 100.0),
+        observed: (100.0 + miss_mm, 100.0),
+        confidence,
+    }
+}
+
+#[test]
+fn a_sheet_where_everything_landed_close_enough_is_good() {
+    let report = PrintReport::of(vec![landed(0.2, 1.0), landed(0.31, 0.95)], 1.0);
+    assert!(report.good());
+    assert_eq!((report.absent, report.adrift, report.unmeasurable), (0, 0, 0));
+    assert!((report.worst_mm - 0.31).abs() < 1e-9);
+    assert!(report.verdict().contains("Everything printed"), "{}", report.verdict());
+    assert!(report.lines().iter().all(|l| l.contains('✓')), "{:?}", report.lines());
+}
+
+#[test]
+fn an_addition_that_is_not_on_the_sheet_fails_it_and_names_the_likely_cause() {
+    // The mistake this catches is the sheet going back in the wrong way up,
+    // which puts the whole delta somewhere it cannot be seen.
+    let report = PrintReport::of(vec![landed(0.0, 0.0), landed(0.0, 0.0)], 1.0);
+    assert!(!report.good());
+    assert_eq!(report.absent, 2);
+    let said = report.verdict();
+    assert!(said.contains("did not print"), "{said}");
+    assert!(said.contains("wrong way up"), "{said}");
+    // And no false comfort about how well it landed.
+    assert!(!said.contains("Everything printed"), "{said}");
+}
+
+/// An addition written over existing ink is not a misplaced addition.
+///
+/// Its centroid is the middle of the addition and of whatever it was written
+/// across, which is not a distance at all — and treating it as one would fail
+/// a sheet that came out perfectly well.
+#[test]
+fn an_addition_over_existing_ink_is_set_aside_rather_than_failed() {
+    let report = PrintReport::of(vec![landed(0.2, 1.0), landed(8.0, 1.9)], 1.0);
+    assert!(report.good(), "{}", report.verdict());
+    assert_eq!((report.absent, report.adrift, report.unmeasurable), (0, 0, 1));
+    // Eight millimetres of nonsense does not become the worst reading.
+    assert!((report.worst_mm - 0.2).abs() < 1e-9, "{}", report.worst_mm);
+    assert!(report.verdict().contains("already printed"), "{}", report.verdict());
+    assert!(report.lines()[1].contains('?'), "{:?}", report.lines());
+}
+
+#[test]
+fn how_close_is_close_enough_is_the_callers_to_set() {
+    // The same sheet: fine for a signature, not fine for a box on a form.
+    let landings = vec![landed(1.4, 1.0)];
+    assert!(PrintReport::of(landings.clone(), 2.0).good());
+    let strict = PrintReport::of(landings, 0.5);
+    assert!(!strict.good());
+    assert_eq!(strict.adrift, 1);
+    assert!(strict.verdict().contains("0.50 mm"), "{}", strict.verdict());
+    assert!(strict.verdict().contains("1.40 mm"), "{}", strict.verdict());
+}
+
+#[test]
+fn a_sheet_can_be_wrong_in_more_than_one_way_at_once() {
+    let report = PrintReport::of(
+        vec![landed(0.1, 1.0), landed(0.0, 0.0), landed(3.0, 1.0), landed(5.0, 1.8)],
+        1.0,
+    );
+    assert_eq!((report.absent, report.adrift, report.unmeasurable), (1, 1, 1));
+    let said = report.verdict();
+    assert!(said.contains("did not print"), "{said}");
+    assert!(said.contains("landed more than"), "{said}");
+    assert!(said.contains("already printed"), "{said}");
 }

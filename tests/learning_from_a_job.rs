@@ -12,6 +12,11 @@
 //! asked for, and photographed onto a sheet with margins and a bit of skew. If
 //! the number that comes back out is the distance that went in, the whole chain
 //! — placement, rendering, registration, centroid, fit — is right.
+//!
+//! The same round trip covers `verify`, which asks the other question the scan
+//! can answer: not "what does this printer do" but "did this sheet come out
+//! right", which one addition can settle and which wants settling before the
+//! other fifty-nine go through.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +35,7 @@ fn binary() -> PathBuf {
 
 struct Run {
     ok: bool,
+    code: i32,
     stdout: String,
     stderr: String,
 }
@@ -51,6 +57,7 @@ fn run(home: &Path, args: &[&str]) -> Run {
         .expect("the binary should run");
     Run {
         ok: output.status.success(),
+        code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     }
@@ -463,5 +470,199 @@ fn an_empty_delta_is_refused_rather_than_learnt_from() {
         learnt.said().contains("nothing"),
         "unhelpful refusal: {}",
         learnt.said()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Checking one sheet before committing the rest of the stack
+// ---------------------------------------------------------------------------
+
+/// A sheet that came out right says so, and exits 0 so a script can act on it.
+#[test]
+fn a_sheet_that_printed_properly_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_sheet_already_printed(dir.path());
+    let delta = dir.path().join("delta.pdf");
+    a_job_worth_learning_from(dir.path(), &source, &delta, &[]);
+
+    // A fifth of a millimetre out, which is a well-behaved printer.
+    let scan = dir.path().join("scan.png");
+    scan_of_the_printed_sheet(&delta, &Printed::shifted(0.2, 0.1))
+        .save(&scan)
+        .unwrap();
+
+    let checked = run(
+        dir.path(),
+        &[
+            "verify",
+            scan.to_str().unwrap(),
+            "--delta",
+            delta.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(checked.code, 0, "{}", checked.said());
+    assert!(
+        checked.stdout.contains("Everything printed"),
+        "{}",
+        checked.stdout
+    );
+}
+
+/// A sheet that landed too far out is refused, with the distance and what to
+/// do about it — and exits 2, so fifty-nine more do not follow it.
+#[test]
+fn a_sheet_that_landed_too_far_out_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_sheet_already_printed(dir.path());
+    let delta = dir.path().join("delta.pdf");
+    a_job_worth_learning_from(dir.path(), &source, &delta, &[]);
+
+    let scan = dir.path().join("scan.png");
+    scan_of_the_printed_sheet(&delta, &Printed::shifted(3.0, 2.0))
+        .save(&scan)
+        .unwrap();
+
+    let checked = run(
+        dir.path(),
+        &[
+            "verify",
+            scan.to_str().unwrap(),
+            "--delta",
+            delta.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(checked.code, 2, "{}", checked.said());
+    assert!(
+        checked.stdout.contains("landed more than"),
+        "{}",
+        checked.stdout
+    );
+    // And it points at the thing that fixes it, rather than only complaining.
+    assert!(
+        checked.stdout.contains("calibrate learn"),
+        "{}",
+        checked.stdout
+    );
+}
+
+/// The tolerance is the caller's to set: the same sheet passes when a
+/// signature is being placed and fails when a pre-printed box is being filled.
+#[test]
+fn how_close_is_close_enough_is_the_callers_to_say() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_sheet_already_printed(dir.path());
+    let delta = dir.path().join("delta.pdf");
+    a_job_worth_learning_from(dir.path(), &source, &delta, &[]);
+    let scan = dir.path().join("scan.png");
+    scan_of_the_printed_sheet(&delta, &Printed::shifted(1.5, 0.0))
+        .save(&scan)
+        .unwrap();
+
+    let check = |tolerance: &str| {
+        run(
+            dir.path(),
+            &[
+                "verify",
+                scan.to_str().unwrap(),
+                "--delta",
+                delta.to_str().unwrap(),
+                "--tolerance",
+                tolerance,
+            ],
+        )
+    };
+    assert_eq!(check("3.0").code, 0, "{}", check("3.0").said());
+    assert_eq!(check("0.5").code, 2, "{}", check("0.5").said());
+}
+
+/// A sheet that went through the printer the wrong way up carries none of the
+/// delta at all, and that is the failure worth naming rather than measuring.
+#[test]
+fn a_sheet_with_nothing_on_it_says_the_additions_did_not_print() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_sheet_already_printed(dir.path());
+    let delta = dir.path().join("delta.pdf");
+    a_job_worth_learning_from(dir.path(), &source, &delta, &[]);
+
+    // Blank paper: the delta never reached it.
+    let blank = dir.path().join("blank.pdf");
+    let doc = dir.path().join("nothing.onionskin");
+    assert!(run(dir.path(), &["new", doc.to_str().unwrap()]).ok);
+    assert!(
+        run(
+            dir.path(),
+            &[
+                "print",
+                doc.to_str().unwrap(),
+                "-o",
+                blank.to_str().unwrap()
+            ],
+        )
+        .ok
+    );
+    let scan = dir.path().join("scan.png");
+    scan_of_the_printed_sheet(&blank, &Printed::shifted(0.0, 0.0))
+        .save(&scan)
+        .unwrap();
+
+    let checked = run(
+        dir.path(),
+        &[
+            "verify",
+            scan.to_str().unwrap(),
+            "--delta",
+            delta.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(checked.code, 2, "{}", checked.said());
+    assert!(
+        checked.stdout.contains("did not print"),
+        "{}",
+        checked.stdout
+    );
+    assert!(
+        checked.stdout.contains("wrong way up"),
+        "the most likely cause was not named:\n{}",
+        checked.stdout
+    );
+}
+
+/// Checking and learning off the same scan, because somebody who went to the
+/// trouble of scanning the sheet may as well get the measurement out of it.
+#[test]
+fn the_same_scan_can_check_the_sheet_and_teach_the_printer() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_sheet_already_printed(dir.path());
+    let delta = dir.path().join("delta.pdf");
+    a_job_worth_learning_from(dir.path(), &source, &delta, &[]);
+    let how = Printed::shifted(1.2, 0.7);
+    let scan = dir.path().join("scan.png");
+    scan_of_the_printed_sheet(&delta, &how).save(&scan).unwrap();
+
+    let checked = run(
+        dir.path(),
+        &[
+            "verify",
+            scan.to_str().unwrap(),
+            "--delta",
+            delta.to_str().unwrap(),
+            "--learn",
+            "office",
+        ],
+    );
+    // The sheet is out of tolerance and says so…
+    assert_eq!(checked.code, 2, "{}", checked.said());
+    // …and the profile was still saved, because that is a different question.
+    let stored: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("profiles").join("office.json")).unwrap(),
+    )
+    .unwrap();
+    let (want_x, want_y) = how.really_off_by();
+    let dx = stored["error"]["dx_mm"].as_f64().unwrap();
+    let dy = stored["error"]["dy_mm"].as_f64().unwrap();
+    assert!(
+        (dx - want_x).abs() < 0.1 && (dy - want_y).abs() < 0.1,
+        "learnt {dx:.2},{dy:.2} rather than {want_x:.3},{want_y:.3}\n{}",
+        checked.stdout
     );
 }

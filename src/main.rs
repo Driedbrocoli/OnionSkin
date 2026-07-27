@@ -89,6 +89,8 @@ enum Command {
     Delta(DeltaArgs),
     /// Compare two documents and report, without writing anything.
     Compare(CompareArgs),
+    /// Check a printed sheet came out the way the delta asked.
+    Verify(VerifyArgs),
     /// Measure a printer's second-pass registration, once per printer.
     #[command(subcommand)]
     Calibrate(CalibrateCommand),
@@ -444,6 +446,39 @@ struct LearnArgs {
     /// Say what was measured without saving anything.
     #[arg(long)]
     dry_run: bool,
+}
+
+/// Checking a sheet actually came out right.
+///
+/// Overprinting is the one operation where nobody finds out it went wrong until
+/// somebody looks at the paper — a delta that was written perfectly can still
+/// land two millimetres low, or not print at all because the sheet went in the
+/// wrong way round, and the file on disk says nothing about any of it. Sixty
+/// certificates go in the envelopes and the mistake surfaces at the far end.
+///
+/// So: scan the first one, and be told.
+#[derive(clap::Args)]
+struct VerifyArgs {
+    /// A scan of the sheet after the delta was printed onto it.
+    scan: PathBuf,
+    /// The delta that was printed onto it.
+    #[arg(long)]
+    delta: PathBuf,
+    /// The paper it was printed on.
+    #[arg(long, default_value_t = default_page())]
+    page: String,
+    /// The scan is already cropped to the sheet.
+    #[arg(long)]
+    cropped: bool,
+    /// The sheet is square in the scan; do not look for skew.
+    #[arg(long)]
+    square: bool,
+    /// How far out an addition may be, in millimetres, before it is wrong.
+    #[arg(long, default_value_t = 1.0)]
+    tolerance: f64,
+    /// Also teach the profile of this name from what was measured.
+    #[arg(long, value_name = "NAME")]
+    learn: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -1236,7 +1271,9 @@ Printing the delta
      goes first — a page printed upside down is the usual first mistake.
   2. Print at 100% / \"Actual size\". Turn OFF \"Fit to page\"; it scales by a few
      percent and nothing will line up.
-  3. Do one sheet first and hold it against the original before committing more.";
+  3. Do one sheet first and hold it against the original before committing more.
+     Or scan that one sheet and be told, which is stricter than an eye is:
+       onionskin verify scan.png --delta <the delta>";
 
 fn main() -> ExitCode {
     allow_a_closed_pipe();
@@ -1303,6 +1340,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Read(args) => cmd_read(args),
         Command::Delta(args) => cmd_delta(args),
         Command::Compare(args) => cmd_compare(args),
+        Command::Verify(args) => cmd_verify(args),
         Command::Calibrate(command) => cmd_calibrate(command),
         Command::Doctor => cmd_doctor(),
         Command::Serve(args) => {
@@ -4322,6 +4360,85 @@ fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> 
     .map_err(|e| e.to_string())
 }
 
+/// Check a printed sheet came out the way the delta asked.
+///
+/// The same measurement `calibrate learn` takes, asked a different question.
+/// That one wants to know what the printer does in general and needs three
+/// marks spread across the page to say it. This one wants to know whether
+/// *this sheet* is right, which one addition can answer — and answers it before
+/// the other fifty-nine go through.
+fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+    let asked = calibrate::marks_on_delta(&args.delta).map_err(|e| e.to_string())?;
+    if asked.is_empty() {
+        return Err(format!(
+            "{} has nothing on it, so there is nothing to check for.",
+            args.delta.display()
+        ));
+    }
+
+    let image = image::open(&args.scan)
+        .map_err(|e| format!("could not read '{}': {e}", args.scan.display()))?;
+    let registration = register(
+        &image,
+        ScanOptions {
+            page,
+            assume_cropped: args.cropped,
+            assume_square: args.square,
+            ..ScanOptions::new(page)
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    println!("{}", registration.describe());
+
+    let gray = image.to_luma8();
+    let landings = calibrate::measure_landings(
+        &gray,
+        &registration,
+        &asked,
+        calibrate::ink_threshold(),
+    );
+
+    println!("\n{} addition(s) asked for:", landings.len());
+    let report = calibrate::PrintReport::of(landings, args.tolerance);
+    for line in report.lines() {
+        println!("{line}");
+    }
+    println!("\n{}", report.verdict());
+    if report.adrift > 0 {
+        println!(
+            "    Calibrate this printer and it will come down: \
+             onionskin calibrate learn {} --delta {}",
+            args.scan.display(),
+            args.delta.display()
+        );
+    }
+
+    // Learning from the same sheet, for somebody who scanned it to check and
+    // may as well get the measurement out of it too.
+    if let Some(name) = &args.learn {
+        println!();
+        match calibrate::learn_from_landings(&report.landings, page, name) {
+            Ok(profile) => {
+                let path = calibrate::save_profile(&profile).map_err(|e| e.to_string())?;
+                println!("Profile '{name}' saved in {}.", path.display());
+                println!("{}", profile.describe());
+            }
+            // Not a failure of the check. The sheet is still whatever it is,
+            // and the exit code below is about the sheet.
+            Err(e) => println!("Nothing learnt from it: {e}"),
+        }
+    }
+
+    // Exit 2 for a sheet that is not right, so this can go in a script between
+    // the first sheet and the rest of the stack.
+    Ok(if report.good() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
 /// Learn the printer's error from a job that was printed anyway.
 ///
 /// The target sheet exists because crosshairs are easy to find, and printing
@@ -4384,14 +4501,10 @@ fn cmd_calibrate_learn(args: LearnArgs) -> Result<ExitCode, String> {
     println!("\nWhere the additions landed:");
     for landing in &landings {
         println!(
-            "  {:>6.1},{:<6.1} mm   out by {:.2} mm{}",
+            "  {:>6.1},{:<6.1} mm   {}",
             landing.intended.0,
             landing.intended.1,
-            landing.miss_mm(),
-            match landing.doubt() {
-                Some(why) => format!("   (not counted: {why})"),
-                None => String::new(),
-            }
+            landing.describe()
         );
     }
 

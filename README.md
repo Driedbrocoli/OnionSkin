@@ -549,6 +549,40 @@ and works back to millimetres on the physical sheet. Across 360 combinations of
 page size, resolution, skew, margin and position, a point picked on the scan
 lands within **0.30 mm** of where it belongs on the paper.
 
+### Check the first sheet before doing sixty
+
+Overprinting is the one operation where nothing tells you it went wrong. The
+delta can be perfect and still land two millimetres low, or not print at all
+because the sheet went in the wrong way up — and the file on disk says nothing
+about any of it. Usually the mistake surfaces when somebody opens the envelope.
+
+Scan the first sheet and be told:
+
+```bash
+onionskin verify sheet.png --delta delta.pdf
+```
+
+```
+A4 (210.0×297.0 mm) at 200 dpi, sheet turned -0.00°, top-left at (60, 60) px
+
+4 addition(s) asked for:
+  ✓   40.1,38.5   mm   out by 0.29 mm
+  ✓  160.9,43.4   mm   out by 0.21 mm
+  ✓   37.5,248.7  mm   out by 0.34 mm
+  ✓  150.9,253.6  mm   out by 0.27 mm
+
+Everything printed, and nothing is more than 0.34 mm out of place.
+```
+
+It exits `2` when something did not print or landed further out than
+`--tolerance` (a millimetre by default), so it can go in a script between the
+first sheet and the rest of the stack. How close is close enough is yours to
+set: a signature can be two millimetres out and a pre-printed box cannot.
+
+Add `--learn office` and the same scan also teaches the printer's profile —
+having gone to the trouble of scanning it, you may as well have the
+measurement.
+
 ### See what changed
 
 A delta prints only what is new, which is the point — and can make the change
