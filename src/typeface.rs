@@ -213,6 +213,26 @@ pub fn match_scan(
     cropped: bool,
     square: bool,
 ) -> Option<Typeface> {
+    read_and_match(scan, page, cropped, square).and_then(|(_, found)| found)
+}
+
+/// The same, keeping the letters that were read as well as the answer.
+///
+/// Reading a page is the expensive part — it is three passes of template
+/// matching over every mark on the sheet — and a caller that wants both what
+/// the page says and what it is set in should not pay for it twice. Placing
+/// words after something already printed needs the words; matching the font
+/// needs the measurements; both come out of the same read.
+///
+/// The `Typeface` is optional inside a `Some` result on purpose: a page can be
+/// read perfectly well and still not say what it is set in, and those are
+/// different answers to different questions.
+pub fn read_and_match(
+    scan: &std::path::Path,
+    page: &str,
+    cropped: bool,
+    square: bool,
+) -> Option<(PageText, Option<Typeface>)> {
     let page = crate::geometry::parse_page(page).ok()?;
     let image = image::open(scan).ok()?;
     let registration = crate::scan::register(
@@ -278,7 +298,7 @@ pub fn match_scan(
     // recognisable the whole time by how evenly it was spaced.
     if monospaced(&text).is_some() {
         if let Some(found) = detect(&text) {
-            return Some(found);
+            return Some((text, Some(found)));
         }
     }
 
@@ -286,10 +306,16 @@ pub fn match_scan(
     // say nothing and use the default than to set somebody's addition in a
     // face picked by noise.
     if score < 0.35 {
-        return None;
+        // The shapes could not account for the page, so nothing here can say
+        // what it is set in — but the words that were read are still the words
+        // on the page, and somebody placing text after one of them wants them.
+        return Some((text, None));
     }
 
-    let mut found = detect(&text)?;
+    let Some(mut found) = detect(&text) else {
+        // The page was read; it simply did not say what it was set in.
+        return Some((text, None));
+    };
     // The two measurements disagreeing is not a tie to be broken quietly. The
     // shapes are the better witness for the family — that is what a person
     // looking at the page would compare — so they win, and the width fit keeps
@@ -298,7 +324,7 @@ pub fn match_scan(
         found.font = shape_says;
         found.confidence *= 0.5;
     }
-    Some(found)
+    Some((text, Some(found)))
 }
 
 /// Which of the three families a built-in face belongs to.

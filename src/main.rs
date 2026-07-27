@@ -740,6 +740,14 @@ struct AddArgs {
     /// top-left corner: 'X,Y:the words'. Use when you measured with a ruler.
     #[arg(long = "at-mm", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
     at_page: Vec<String>,
+    /// Words placed just after something already on the page, so no measuring
+    /// is needed: 'Received:Approved 27 July' puts the words after "Received".
+    #[arg(long = "after", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    after: Vec<String>,
+    /// The same, one line below the anchor and starting where it starts:
+    /// 'Signature:J. Bezzina'.
+    #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
+    below: Vec<String>,
 
     /// Size of the paper that was scanned.
     #[arg(long, default_value = "a4")]
@@ -1864,10 +1872,17 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     if is_document(&args.scan) {
         return add_to_document(args);
     }
-    if args.at_scan.is_empty() && args.at_page.is_empty() {
+    if args.at_scan.is_empty()
+        && args.at_page.is_empty()
+        && args.after.is_empty()
+        && args.below.is_empty()
+    {
         return Err(
-            "nothing to add. Use --at 'X,Y:the words' with coordinates read off the \
-             scan, or --at-mm 'X,Y:the words' with millimetres measured on the paper."
+            "nothing to add. Say where the words go — easiest first:\n    \
+             --after 'Received:Approved 27 July'   just after something on the page\n    \
+             --below 'Signature:J. Bezzina'        one line under it\n    \
+             --at-mm '45,63:Approved'              millimetres measured on the paper\n    \
+             --at '620,870:Approved'               pixels read off the scan"
                 .into(),
         );
     }
@@ -1892,12 +1907,31 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     // wants it to look like the rest of the form, and the page itself knows
     // what the rest of the form is set in — asking them to name a font is
     // asking a question the program can answer.
+    //
+    // The same read serves both questions. Placing words after something
+    // already printed needs the words; matching the font needs the
+    // measurements; reading the page is the expensive part and is done once.
     let asked = args.font.as_deref().map(str::to_string);
-    let matched = if embedded.is_some() || args.no_match_font || (asked.is_some() && args.size.is_some())
-    {
-        None
+    let anchoring = !args.after.is_empty() || !args.below.is_empty();
+    let want_font = !(embedded.is_some()
+        || args.no_match_font
+        || (asked.is_some() && args.size.is_some()));
+    let read = if anchoring || want_font {
+        onionskin::typeface::read_and_match(&args.scan, &args.page, args.cropped, args.square)
     } else {
-        onionskin::typeface::match_scan(&args.scan, &args.page, args.cropped, args.square)
+        None
+    };
+    if anchoring && read.is_none() {
+        return Err(
+            "nothing could be read off this page, so there is nothing to place words \
+             against.\nRun 'onionskin read <scan>' to see what it can make out, or \
+             give millimetres with --at-mm."
+                .into(),
+        );
+    }
+    let (page_text, matched) = match read {
+        Some((text, found)) => (Some(text), found.filter(|_| want_font)),
+        None => (None, None),
     };
     if let Some(found) = &matched {
         println!("Matched the page: {}", found.describe());
@@ -1965,6 +1999,39 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     }
     for spec in &args.at_page {
         placements.push(parse_placement(spec)?);
+    }
+
+    // Anchored placements: found on the page rather than measured onto it.
+    if !args.after.is_empty() || !args.below.is_empty() {
+        let text = page_text.as_ref().expect("checked above");
+        // A space's worth of room after the anchor, and a line's worth below
+        // it, both taken from the size the new words will be set at.
+        let gap_mm = onionskin::geometry::pt_to_mm(size * 0.3);
+        let step_mm = onionskin::geometry::pt_to_mm(size * 1.15);
+        for (specs, put) in [
+            (&args.after, onionskin::anchor::Where::After),
+            (&args.below, onionskin::anchor::Where::Below),
+        ] {
+            for spec in specs {
+                let (anchor, words) = spec.split_once(':').ok_or_else(|| {
+                    format!(
+                        "bad placement '{spec}'. Expected 'ANCHOR:the words' — the \
+                         thing already on the page, a colon, then what to add."
+                    )
+                })?;
+                let found = onionskin::anchor::place(text, anchor, put, gap_mm, step_mm)
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "Found \"{}\" on the line: {}\n  putting the words at {:.1}, {:.1} mm",
+                    anchor.trim(),
+                    found.line,
+                    found.x_mm,
+                    found.y_mm
+                );
+                placements.push(((found.x_mm, found.y_mm), unescape(words)));
+            }
+        }
+        println!();
     }
 
     for (position_mm, text) in &placements {
@@ -2467,10 +2534,12 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
                 .into(),
         );
     }
-    if args.at_page.is_empty() {
+    if args.at_page.is_empty() && args.after.is_empty() && args.below.is_empty() {
         return Err(
-            "nothing to add. Say where the words go, in millimetres from the \
-             top-left of the paper:\n    --at-mm '45,63:Approved'"
+            "nothing to add. Say where the words go — easiest first:\n    \
+             --after 'Received:Approved 27 July'   just after something in the document\n    \
+             --below 'Signature:J. Bezzina'        one line under it\n    \
+             --at-mm '45,63:Approved'              millimetres measured on the paper"
                 .into(),
         );
     }
@@ -2490,6 +2559,52 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
     let size = args.size.unwrap_or(11.0);
 
     let mut items = Vec::new();
+
+    // Anchored placements work on a document exactly as they do on a scan:
+    // the page is drawn and then read, which is what a person does when they
+    // look at it. Anything Onionskin can open can be written on this way.
+    if !args.after.is_empty() || !args.below.is_empty() {
+        let page_text = read_a_document(&args.scan)?;
+        let gap_mm = onionskin::geometry::pt_to_mm(size * 0.3);
+        let step_mm = onionskin::geometry::pt_to_mm(size * 1.15);
+        for (specs, put) in [
+            (&args.after, onionskin::anchor::Where::After),
+            (&args.below, onionskin::anchor::Where::Below),
+        ] {
+            for spec in specs {
+                let (anchor, words) = spec.split_once(':').ok_or_else(|| {
+                    format!(
+                        "bad placement '{spec}'. Expected 'ANCHOR:the words' — the \
+                         thing already in the document, a colon, then what to add."
+                    )
+                })?;
+                let found = onionskin::anchor::place(&page_text, anchor, put, gap_mm, step_mm)
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "Found \"{}\" on the line: {}\n  putting the words at {:.1}, {:.1} mm",
+                    anchor.trim(),
+                    found.line,
+                    found.x_mm,
+                    found.y_mm
+                );
+                items.push(Item {
+                    id: 0,
+                    page: 1,
+                    x_mm: found.x_mm,
+                    y_mm: found.y_mm,
+                    text: unescape(words),
+                    size_pt: size,
+                    font: face.clone(),
+                    width_mm: None,
+                    rotation_deg: args.rotation,
+                    colour: "#000000".into(),
+                    leading: 1.2,
+                });
+            }
+        }
+        println!();
+    }
+
     for placement in &args.at_page {
         let ((x_mm, y_mm), text) = parse_placement(placement)?;
         items.push(Item {
@@ -2583,6 +2698,53 @@ fn cmd_apt_repo(args: AptRepoArgs) -> Result<ExitCode, String> {
     println!("  index:   {}", built.release.display());
     println!("\n{}", onionskin::apt::instructions(&options, &args.url));
     Ok(ExitCode::SUCCESS)
+}
+
+/// Read the words on the first page of a document, by drawing it and looking.
+///
+/// A Word file knows where its words are, but only after it has been laid out,
+/// and Onionskin's answer to laying out a document is to render it — which is
+/// what it already does for every delta. So the page is drawn to pixels and
+/// then read exactly as a scan is read. The registration is trivial in this
+/// case, because the image *is* the page: no skew to find, no paper edge to
+/// look for, and the resolution is whatever was asked for.
+fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> {
+    let engine = onionskin::render::engine().map_err(|e| e.to_string())?;
+    let workspace = onionskin::render::Workspace::new(false).map_err(|e| e.to_string())?;
+    let (pdf, _, _) = onionskin::render::to_pdf_noting(path, &workspace.path, 180)
+        .map_err(|e| e.to_string())?;
+    let document = engine.open(&pdf).map_err(|e| e.to_string())?;
+
+    // Enough resolution to read small print, and not so much that a hundred
+    // megapixels are matched against a font for the sake of one anchor.
+    const DPI: f64 = 300.0;
+    let drawn = document.render(0, DPI).map_err(|e| e.to_string())?;
+    let image = image::GrayImage::from_raw(drawn.width as u32, drawn.height as u32, drawn.gray)
+        .ok_or("the page could not be turned into an image")?;
+    let registration = onionskin::scan::ScanRegistration {
+        page: drawn.size,
+        px_per_mm: DPI / 25.4,
+        skew_deg: 0.0,
+        origin_px: (0.0, 0.0),
+    };
+
+    let reference = suggest_system_font()
+        .or_else(|| onionskin::font::installed_fonts().first().map(|f| f.path.clone()))
+        .ok_or(
+            "there is no font on this machine to read the document against, so \
+             words cannot be placed by what is already in it. Use --at-mm with \
+             millimetres instead.",
+        )?;
+    let reference = EmbeddedFont::load(&reference).map_err(|e| e.to_string())?;
+
+    letters::read_with_font(
+        &image,
+        &registration,
+        &letters::ReadOptions::default(),
+        &reference,
+        Some(letters::COMMON_LATIN),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Measure a printed calibration sheet from a scan of it.
