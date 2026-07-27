@@ -46,6 +46,12 @@ pub struct State {
     selected: Option<u32>,
     dragging: Option<u32>,
 
+    /// The caret on the page itself, if there is one.
+    ///
+    /// Separate from `editing`, which is about the form below: this is a caret
+    /// sitting on the paper, and keystrokes go straight into the document.
+    typing: Option<Typing>,
+
     /// The item the form below is editing, or `None` while it is adding a
     /// new one instead.
     editing: Option<u32>,
@@ -77,6 +83,7 @@ impl Default for State {
             page: 1,
             selected: None,
             dragging: None,
+            typing: None,
             editing: None,
             draft: ItemDraft::default(),
             save_error: None,
@@ -88,10 +95,23 @@ impl Default for State {
     }
 }
 
+/// A caret sitting on the page, and whether anything has gone into it.
+///
+/// `changed` decides whether leaving is worth a save. Writing the file rotates
+/// the undo history, so saving on every keystroke would fill the ten steps
+/// somebody has to go back through with single letters — and saving on the way
+/// out of an item nobody typed into would spend one on nothing at all.
+#[derive(Clone, Copy)]
+struct Typing {
+    id: u32,
+    changed: bool,
+}
+
 /// What the add/edit form is holding, kept apart from [`Item`] because it has
 /// to represent things an `Item` cannot — a wrap width that is turned off
 /// rather than merely absent, for one — and because text mid-edit is not
 /// always a valid item yet.
+#[derive(Clone)]
 struct ItemDraft {
     text: String,
     x_mm: f64,
@@ -441,6 +461,53 @@ fn show_canvas(state: &mut State, doc: &mut Document, room: &mut Room) {
 
     let hit_at = |pos: egui::Pos2| hitboxes.iter().rev().find(|(_, r)| r.contains(pos)).map(|(id, _)| *id);
 
+    // The caret, and the keys that go into it. Drawn before the click handling
+    // below so that what is on screen this frame is what the last frame's
+    // keystrokes made — a caret one frame behind the letter it follows reads
+    // as lag.
+    if let Some(caret_in) = state.typing {
+        let id = caret_in.id;
+        // The last line of it, walking back from the end rather than through
+        // the whole list to reach the same place.
+        let last = hitboxes
+            .iter()
+            .rev()
+            .find(|(i, _)| *i == id)
+            .map(|(_, r)| *r);
+        let caret = match last {
+            Some(rect) => egui::Rect::from_min_max(
+                egui::pos2(rect.max.x + 1.0, rect.min.y),
+                egui::pos2(rect.max.x + 2.0, rect.max.y),
+            ),
+            // Nothing typed yet, so there is no glyph to sit after: put it
+            // where the item starts, as tall as its type is.
+            None => match doc.get(id) {
+                Some(item) => {
+                    let at = transform.to_screen(item.x_mm, item.y_mm);
+                    let high = transform.px(item.size_pt * 25.4 / 72.0);
+                    egui::Rect::from_min_max(
+                        egui::pos2(at.x, at.y - high),
+                        egui::pos2(at.x + 1.5, at.y),
+                    )
+                }
+                None => egui::Rect::NOTHING,
+            },
+        };
+        if caret != egui::Rect::NOTHING {
+            // Blinking, because a still line on a page of text is hard to
+            // find and a blinking one is the thing every editor has trained
+            // people to look for.
+            let phase = room.ui.input(|i| i.time * 1.6).fract();
+            if phase < 0.6 {
+                painter.rect_filled(caret, 0, room.ui.visuals().selection.stroke.color);
+            }
+            room.ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+        }
+    }
+    if take_typing(state, doc, room) {
+        save(state, doc);
+    }
+
     if canvas.response.drag_started() {
         if let Some(pos) = canvas.response.interact_pointer_pos() {
             let hit = hit_at(pos);
@@ -468,10 +535,32 @@ fn show_canvas(state: &mut State, doc: &mut Document, room: &mut Room) {
             state.dragging = None;
             save(state, doc);
         }
+    } else if canvas.response.double_clicked() {
+        // Twice on a piece of text puts the caret in it, which is what a
+        // double click means everywhere else text can be edited.
+        if let Some(id) = canvas.response.interact_pointer_pos().and_then(hit_at) {
+            state.selected = Some(id);
+            select_for_editing(state, doc);
+            begin_typing(state, room, id);
+        }
     } else if canvas.response.clicked() {
         if let Some(pos) = canvas.response.interact_pointer_pos() {
-            state.selected = hit_at(pos);
-            select_for_editing(state, doc);
+            match hit_at(pos) {
+                Some(id) => {
+                    state.selected = Some(id);
+                    select_for_editing(state, doc);
+                }
+                // Blank paper: put a caret there and take what is typed. The
+                // whole point of a page on screen is that clicking a spot on
+                // it and typing should put words on that spot.
+                None => {
+                    if stop_typing(state, doc) {
+                        save(state, doc);
+                    }
+                    let (x_mm, y_mm) = transform.to_mm(pos);
+                    type_here(state, doc, room, x_mm, y_mm);
+                }
+            }
         }
     }
 
@@ -484,6 +573,166 @@ fn show_canvas(state: &mut State, doc: &mut Document, room: &mut Room) {
             ),
         );
     }
+
+    // Findable, because a page you can type on that nobody knows they can type
+    // on is a page nobody types on.
+    widgets::hint(
+        room.ui,
+        match state.typing {
+            Some(_) => "Typing. Enter or Escape finishes; Shift-Enter starts another line.",
+            None => "Click the page and type. Double-click something already on it to change it; drag to move it.",
+        },
+    );
+}
+
+/// Put a caret on the paper at this spot and take what is typed.
+///
+/// The item is added to the document straight away, empty, so that everything
+/// else on this screen — the drawing, the hit boxes, the list below, the
+/// delta — sees one kind of thing and not two. An empty item that is never
+/// typed into is taken out again when the caret leaves it, so a stray click
+/// costs nothing.
+///
+/// The style comes from the form below rather than from a fixed default, so
+/// the size, face and colour set there are what the next thing typed comes out
+/// in — which is what somebody who has just changed them expects.
+fn type_here(state: &mut State, doc: &mut Document, room: &mut Room, x_mm: f64, y_mm: f64) {
+    let mut draft = state.draft.clone();
+    draft.text = String::new();
+    let mut item = draft.build(state.page);
+    item.x_mm = x_mm;
+    item.y_mm = y_mm;
+    let Ok(id) = doc.add(item) else {
+        // The only way this fails is a page number the document does not have,
+        // and the page being drawn is one it does.
+        return;
+    };
+    state.selected = Some(id);
+    select_for_editing(state, doc);
+    begin_typing(state, room, id);
+}
+
+/// Start typing into an item that already exists.
+fn begin_typing(state: &mut State, room: &mut Room, id: u32) {
+    state.typing = Some(Typing { id, changed: false });
+    // Whatever field was being typed into has to let go, or every keystroke
+    // would land in two places at once — the form below and the page above.
+    room.ui.memory_mut(|m| {
+        if let Some(focused) = m.focused() {
+            m.surrender_focus(focused);
+        }
+    });
+}
+
+/// Put the keys pressed into the item the caret is in, and say whether the
+/// caret should leave it.
+///
+/// Apart from [`take_typing`] so it can be tested with events made by hand:
+/// what a keystroke does to a document is the part worth pinning down, and it
+/// does not need a window to be true.
+fn apply_keys(events: &[egui::Event], caret: &mut Typing, doc: &mut Document) -> bool {
+    let id = caret.id;
+    let mut leave = false;
+    for event in events {
+        match event {
+            egui::Event::Text(typed) => {
+                if let Ok(item) = doc.get_mut(id) {
+                    item.text.push_str(typed);
+                    caret.changed = true;
+                }
+            }
+            egui::Event::Key {
+                key: egui::Key::Backspace,
+                pressed: true,
+                ..
+            } => {
+                if let Ok(item) = doc.get_mut(id) {
+                    caret.changed |= item.text.pop().is_some();
+                }
+            }
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                modifiers,
+                ..
+            } => {
+                // Shift-Enter is the everywhere-else way to say "another line
+                // in the same thing"; plain Enter finishes, which is what a
+                // caret dropped on a form wants to do.
+                if modifiers.shift {
+                    if let Ok(item) = doc.get_mut(id) {
+                        item.text.push('\n');
+                        caret.changed = true;
+                    }
+                } else {
+                    leave = true;
+                }
+            }
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                pressed: true,
+                ..
+            } => leave = true,
+            _ => {}
+        }
+    }
+    leave
+}
+
+/// Take the keys pressed this frame into whatever the caret is in.
+///
+/// Returns whether the caret has just left an item, which is when the document
+/// is worth writing to disk: saving per keystroke would put a hundred entries
+/// in the undo history for one sentence.
+fn take_typing(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
+    let Some(mut caret) = state.typing else {
+        return false;
+    };
+    let id = caret.id;
+    // A text field somewhere else has the keyboard. Its keystrokes are not
+    // ours, and taking them as well would type everything twice.
+    if room.ui.memory(|m| m.focused().is_some()) {
+        return false;
+    }
+
+    let events = room.ui.input(|i| i.events.clone());
+    let leave = apply_keys(&events, &mut caret, doc);
+
+    state.typing = Some(caret);
+    if let Some(item) = doc.get(id) {
+        if state.editing == Some(id) {
+            state.draft.text = item.text.clone();
+        }
+    }
+    if leave {
+        return stop_typing(state, doc);
+    }
+    false
+}
+
+/// Take the caret off the page.
+///
+/// An item that was never typed into is removed rather than left behind: a
+/// click on blank paper that somebody thought better of should leave the
+/// document exactly as it found it, not add an invisible empty thing to the
+/// list and to every delta after it.
+fn stop_typing(state: &mut State, doc: &mut Document) -> bool {
+    let Some(caret) = state.typing.take() else {
+        return false;
+    };
+    let empty = doc
+        .get(caret.id)
+        .map(|item| item.text.is_empty())
+        .unwrap_or(true);
+    if empty {
+        let _ = doc.remove(caret.id);
+        if state.selected == Some(caret.id) {
+            deselect(state);
+        }
+        // Nothing was ever written, so there is nothing to write back.
+        return false;
+    }
+    caret.changed
 }
 
 fn show_item_list(state: &mut State, doc: &mut Document, room: &mut Room) {
@@ -1457,6 +1706,130 @@ mod tests {
             };
             show(state, &mut room);
         });
+    }
+
+    // -----------------------------------------------------------------
+    // Typing on the page
+    // -----------------------------------------------------------------
+
+    fn typed(text: &str) -> egui::Event {
+        egui::Event::Text(text.to_string())
+    }
+
+    fn pressed(key: egui::Key, shift: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A document with one empty item on it, as a click on blank paper leaves.
+    fn caret_on_blank_paper() -> (State, Document, Typing) {
+        let mut doc = Document::blank(PageSize::new(210.0, 297.0), 1);
+        let mut item = ItemDraft::default().build(1);
+        item.text = String::new();
+        item.x_mm = 40.0;
+        item.y_mm = 60.0;
+        let id = doc.add(item).unwrap();
+        let state = State {
+            selected: Some(id),
+            typing: Some(Typing { id, changed: false }),
+            ..Default::default()
+        };
+        (state, doc, Typing { id, changed: false })
+    }
+
+    #[test]
+    fn what_is_typed_goes_onto_the_page_where_the_caret_is() {
+        let (_, mut doc, mut caret) = caret_on_blank_paper();
+        let leave = apply_keys(&[typed("Dear"), typed(" "), typed("Sir")], &mut caret, &mut doc);
+        assert!(!leave);
+        assert!(caret.changed);
+        assert_eq!(doc.get(caret.id).unwrap().text, "Dear Sir");
+        // And it went where the click was, not where the form's defaults were.
+        assert_eq!(doc.get(caret.id).unwrap().x_mm, 40.0);
+        assert_eq!(doc.get(caret.id).unwrap().y_mm, 60.0);
+    }
+
+    #[test]
+    fn backspace_takes_the_last_letter_back() {
+        let (_, mut doc, mut caret) = caret_on_blank_paper();
+        apply_keys(&[typed("Sirr")], &mut caret, &mut doc);
+        apply_keys(&[pressed(egui::Key::Backspace, false)], &mut caret, &mut doc);
+        assert_eq!(doc.get(caret.id).unwrap().text, "Sir");
+    }
+
+    /// Backspace on nothing is not a change, so it does not cost an undo step.
+    #[test]
+    fn backspace_with_nothing_to_take_back_changes_nothing() {
+        let (_, mut doc, mut caret) = caret_on_blank_paper();
+        apply_keys(&[pressed(egui::Key::Backspace, false)], &mut caret, &mut doc);
+        assert!(!caret.changed);
+        assert_eq!(doc.get(caret.id).unwrap().text, "");
+    }
+
+    #[test]
+    fn shift_enter_is_another_line_and_enter_on_its_own_finishes() {
+        let (_, mut doc, mut caret) = caret_on_blank_paper();
+        let leave = apply_keys(
+            &[typed("one"), pressed(egui::Key::Enter, true), typed("two")],
+            &mut caret,
+            &mut doc,
+        );
+        assert!(!leave, "shift-enter should not finish");
+        assert_eq!(doc.get(caret.id).unwrap().text, "one\ntwo");
+
+        assert!(apply_keys(&[pressed(egui::Key::Enter, false)], &mut caret, &mut doc));
+        assert!(apply_keys(&[pressed(egui::Key::Escape, false)], &mut caret, &mut doc));
+    }
+
+    /// A click on blank paper that somebody thought better of leaves the
+    /// document exactly as it found it — not an invisible empty item in the
+    /// list, and in every delta after it.
+    #[test]
+    fn a_caret_that_was_never_typed_into_leaves_nothing_behind() {
+        let (mut state, mut doc, _) = caret_on_blank_paper();
+        let before = doc.items.len();
+        assert_eq!(before, 1);
+        assert!(!stop_typing(&mut state, &mut doc), "nothing to save");
+        assert!(doc.items.is_empty(), "the empty item was left behind");
+        assert!(state.typing.is_none());
+        assert!(state.selected.is_none());
+    }
+
+    #[test]
+    fn a_caret_that_was_typed_into_keeps_the_words_and_asks_to_be_saved() {
+        let (mut state, mut doc, _) = caret_on_blank_paper();
+        let mut caret = state.typing.unwrap();
+        apply_keys(&[typed("Paid")], &mut caret, &mut doc);
+        state.typing = Some(caret);
+
+        assert!(stop_typing(&mut state, &mut doc), "should want saving");
+        assert_eq!(doc.items.len(), 1);
+        assert_eq!(doc.items[0].text, "Paid");
+        assert!(state.typing.is_none());
+    }
+
+    /// Going into something already written and coming straight back out is
+    /// not a change, and must not spend one of the ten undo steps.
+    #[test]
+    fn looking_at_existing_words_without_typing_is_not_a_change() {
+        let mut doc = Document::blank(PageSize::new(210.0, 297.0), 1);
+        let id = doc.add(text_item("Already here", 30.0, 40.0)).unwrap();
+        let mut state = State {
+            typing: Some(Typing { id, changed: false }),
+            ..Default::default()
+        };
+
+        assert!(!stop_typing(&mut state, &mut doc), "nothing was typed");
+        assert_eq!(doc.items.len(), 1, "and it was not removed");
+        assert_eq!(doc.items[0].text, "Already here");
     }
 
     #[test]

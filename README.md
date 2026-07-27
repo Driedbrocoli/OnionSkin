@@ -322,6 +322,18 @@ is in them, not by what they are named, so `order.pdf` works exactly as well —
 `new` will just mention that nothing *else* will open a file by that name, and
 tell you the one command that turns it into a real PDF.
 
+**In the window, click the page and type.** The **Make a document** screen draws
+the sheet at the size it will print; click a spot on it and a caret appears
+there, and what you type goes on the paper at that spot. Shift-Enter starts
+another line, Enter or Escape finishes. Double-click something already written
+to change it, and drag it to move it — the millimetre positions in the form
+below follow, so the two never disagree.
+
+A click you thought better of leaves nothing behind: an empty caret is taken off
+the page rather than left as an invisible item in the document and in every
+delta after it. The file is written once when the caret leaves, not once per
+letter, so Undo goes back a sentence at a time rather than a keystroke.
+
 ### Draw on it
 
 Lines, boxes, circles and paths, anywhere on the page, in any colour. Drawings
@@ -805,8 +817,32 @@ words and lines, and reports each in millimetres from the corner of the paper.
 That alone answers the question a delta has to answer before it prints: is this
 gap really a gap.
 
-Given the font the page was set in, it also reads them — the alphabet is
-whatever that font can draw, so the language is whatever the page is in. See
+It reads them too, and works out for itself what the page is set in — nobody
+looking at a scan of a letter knows which of three faces it was typed in, and
+being asked is what stops people at the first step:
+
+```bash
+onionskin read letter.png
+```
+
+```
+42 letters in 9 words on 3 lines.
+Read automatically: Helvetica at about 14.1 pt, from 9 words
+```
+
+It reads the page against each face it has and keeps whichever accounted for the
+most ink — which is also how it can say what it decided, and how sure it is.
+
+Naming a font is still there, and is how an alphabet the three built-in faces do
+not cover gets read:
+
+```bash
+onionskin read letter.png --font-file ~/fonts/NotoSansGreek.ttf
+```
+
+The alphabet is then whatever that font can draw, so the language is whatever
+the page is in. In the window it lives under **Read it in a particular font**,
+folded away, because most of the time there is nothing to answer. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how homoglyphs and right-to-left scripts
 are handled, and for the two honest limits (cursive scripts and combining
 marks).
