@@ -121,6 +121,36 @@ pub const PAGE_PRESETS: &[(&str, f64, f64)] = &[
     ("statement", 139.7, 215.9),
 ];
 
+/// Which named paper sizes are this shape, longest side down.
+///
+/// A scan does not say how big the paper was — a bare PNG carries no
+/// millimetres — but it does say what *shape* it was, and that is enough to
+/// catch the mistake that actually happens. A4 is 1:1.414 and US Letter is
+/// 1:1.294; a Letter sheet measured as A4 puts every addition several
+/// millimetres out, silently, on paper that may be somebody's only copy.
+///
+/// It cannot tell A4 from A5, because the whole point of the ISO A series is
+/// that every size in it has the same shape. That is fine: nobody scans A5 and
+/// tells the program A4 by accident nearly as often as they meet a page size
+/// they did not choose.
+///
+/// `tolerance` is how far off the ratio may be, as a fraction. A hundredth is
+/// about a millimetre and a half on the long side of A4, which is well inside
+/// what finding the paper's edge in a scan can promise.
+pub fn pages_shaped_like(aspect: f64, tolerance: f64) -> Vec<&'static str> {
+    if !aspect.is_finite() || aspect <= 0.0 {
+        return Vec::new();
+    }
+    PAGE_PRESETS
+        .iter()
+        .filter(|(_, width, height)| {
+            let theirs = height / width;
+            (theirs - aspect).abs() / theirs <= tolerance
+        })
+        .map(|(name, _, _)| *name)
+        .collect()
+}
+
 /// Resolve a page name, or a custom `WIDTHxHEIGHT` in millimetres.
 pub fn parse_page(spec: &str) -> Result<PageSize, String> {
     let text = spec.trim().to_ascii_lowercase();
@@ -696,6 +726,42 @@ mod tests {
         assert_eq!(parse_page("legal").unwrap(), PageSize::new(215.9, 355.6));
         assert_eq!(parse_page("210x297").unwrap(), PageSize::new(210.0, 297.0));
         assert_eq!(parse_page("100*150").unwrap(), PageSize::new(100.0, 150.0));
+    }
+
+    #[test]
+    fn a_shape_names_the_paper_it_could_be() {
+        // The measurement that catches the mistake that actually happens: a US
+        // Letter sheet measured as A4 puts every addition several millimetres
+        // out, silently, on paper that may be somebody's only copy.
+        let a4 = 297.0 / 210.0;
+        let letter = 279.4 / 215.9;
+        assert!(pages_shaped_like(a4, 0.012).contains(&"a4"));
+        assert!(!pages_shaped_like(a4, 0.012).contains(&"letter"));
+        assert!(pages_shaped_like(letter, 0.012).contains(&"letter"));
+        assert!(!pages_shaped_like(letter, 0.012).contains(&"a4"));
+        assert!(pages_shaped_like(355.6 / 215.9, 0.012).contains(&"legal"));
+    }
+
+    #[test]
+    fn the_whole_a_series_is_one_shape_and_says_so() {
+        // Every size in the ISO A series has the same proportions on purpose,
+        // so a shape can never tell A4 from A5 and this must not pretend to.
+        let a4 = 297.0 / 210.0;
+        let fits = pages_shaped_like(a4, 0.012);
+        assert!(fits.contains(&"a4"), "{fits:?}");
+        assert!(fits.contains(&"a5"), "{fits:?}");
+        assert!(fits.contains(&"a3"), "{fits:?}");
+    }
+
+    #[test]
+    fn a_shape_nothing_matches_names_nothing() {
+        // A square sheet, and nonsense. Both have to come back empty rather
+        // than reaching for the nearest thing, because "try --page letter" is
+        // worse than silence when it is not letter.
+        assert!(pages_shaped_like(1.0, 0.012).is_empty());
+        assert!(pages_shaped_like(0.0, 0.012).is_empty());
+        assert!(pages_shaped_like(-2.0, 0.012).is_empty());
+        assert!(pages_shaped_like(f64::NAN, 0.012).is_empty());
     }
 
     #[test]

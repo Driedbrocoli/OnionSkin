@@ -258,12 +258,34 @@ pub fn register(
             options.page.height_mm * found_aspect,
             options.page.height_mm,
         );
+        // Named rather than merely measured. "It looks more like 229.5×297.0
+        // mm" is true and useless: nobody knows what paper that is, and the
+        // thing they have to type next is a name. So the shape is compared
+        // against the sizes Onionskin knows and the answer says "letter",
+        // which can be pasted straight back into --page.
+        let shape = if found_aspect > 0.0 {
+            (1.0 / found_aspect).max(found_aspect)
+        } else {
+            0.0
+        };
+        let fits = crate::geometry::pages_shaped_like(shape, 0.03);
+        let guess = if fits.is_empty() {
+            format!(
+                "It looks more like {}, which is no paper size Onionskin knows by \n    \
+                 name — give it as --page WIDTHxHEIGHT in millimetres.",
+                implied.describe()
+            )
+        } else {
+            format!(
+                "It looks like {}. Try:  --page {}",
+                fits.join(" or "),
+                fits[0]
+            )
+        };
         return Err(ScanError::Detection(format!(
             "the sheet found in this scan is the wrong shape for {}.\n    \
-             It looks more like {}. Check the --page size, and that only one \
-             sheet is on the glass.",
+             {guess}\n    Check too that only one sheet is on the glass.",
             options.page.describe(),
-            implied.describe()
         )));
     }
 
@@ -398,6 +420,30 @@ pub fn otsu_of_histogram(histogram: &[u64; 256]) -> u8 {
 /// Many scanners already crop to the page, in which case the whole image is
 /// the sheet and this returns its full extent — the right answer, not a
 /// failure.
+/// What shape the sheet in this scan is: its height divided by its width.
+///
+/// Enough to tell an A-series page from a US one, which is the paper mistake
+/// that actually costs somebody a sheet — see
+/// [`crate::geometry::pages_shaped_like`]. `None` when no sheet could be made
+/// out at all, which is not an error here: a scan with no findable paper in it
+/// has bigger problems than its shape, and they are reported elsewhere.
+pub fn sheet_shape(image: &image::DynamicImage) -> Option<f64> {
+    let gray = image.to_luma8();
+    let bounds = find_sheet(&gray)?;
+    let (width, height) = (bounds.width(), bounds.height());
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // Longest side down, so a sheet scanned sideways is still recognised as
+    // the size it is rather than as nothing at all.
+    let (short, long) = if width <= height {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    Some(long as f64 / short as f64)
+}
+
 pub fn find_sheet(gray: &GrayImage) -> Option<Bounds> {
     let (width, height) = gray.dimensions();
     let threshold = otsu_threshold(gray);
