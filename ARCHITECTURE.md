@@ -16,6 +16,7 @@ went with it.
 | `diff`     | What ink is new, what ink is gone |
 | `delta`    | Writing the delta PDF, raster or vector |
 | `merge`    | Several deltas onto one, so the sheet goes through the printer once |
+| `split`    | Which pages can be overprinted, and which need a fresh sheet |
 | `safety`   | The checks that run before paper is committed |
 | `calibrate`| The two-pass target, the fit, learning from a printed job, and the stored profiles |
 | `pipeline` | The whole job, end to end |
@@ -736,6 +737,37 @@ roundings of the same millimetres, so the delta is placed onto the sheet by
 proportion rather than index for index; lining them up index for index drifts
 across the page and puts the additions furthest out exactly where they are
 hardest to notice.
+
+## Splitting a job that only partly works
+
+`src/split.rs`. `check_reflow` finds the pages whose existing ink has gone from
+where it was — the sign that an edit moved the text under it — and calls that a
+blocker, correctly: no overlay can fix such a page. What it could not do was act
+on the finding, so a single moved line on page two of forty produced
+`Blocked — nothing worth printing was produced`, and the person either reprinted
+forty sheets or passed `--force` and printed new words onto text that had moved.
+
+The split does both things. The pages that moved are **blanked** in the delta —
+not removed, because the delta's page *n* is fed the printed sheet *n* and a
+missing page shifts every sheet after it — and written out whole to a second
+PDF from the edited document's own pages. What was a blocker becomes a warning
+naming which sheets to feed and which to replace, since there is now something
+worth printing.
+
+Three details matter. The blanking happens *after* `conform_to_source`, on the
+delta as finally written, rather than on any of the staged intermediates it
+passes through — the earlier files are not what goes to the printer. The blank
+is written before the fresh pages are extracted, so a failure between the two
+leaves a delta that is safe to feed rather than one carrying ink for a sheet
+nobody should feed. And the summary counts `pages_in_the_delta` rather than
+`pages_with_additions`: after a split those differ, and telling somebody to feed
+a sheet the delta has blanked wastes a pass through the printer.
+
+Page numbers are said out loud by `split::sheets`, which the delta summary now
+shares. It used to live in `main` and rendered `[1, 3, 4]` as "1 and 3 and 4",
+because a run of two collapsed to "1 and 2" whether or not anything stood beside
+it. A middle page reprinted produces exactly that shape, so the split would have
+met it immediately.
 
 ## Several deltas, one pass through the printer
 

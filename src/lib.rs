@@ -27,5 +27,6 @@ pub mod rows;
 pub mod safety;
 pub mod scan;
 pub mod settings;
+pub mod split;
 pub mod typeface;
 pub mod web;

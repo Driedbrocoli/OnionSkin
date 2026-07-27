@@ -854,6 +854,8 @@ fn a_saving_is_only_reported_where_it_was_measured() {
         dpi: 400.0,
         profile: None,
         whole_page_ink_mm2: None,
+        fresh: None,
+        reprinted: Vec::new(),
     };
     assert!(outcome.saving().is_none());
 }
@@ -911,7 +913,9 @@ fn a_stack_with_no_pictures_at_all_is_perfectly_ordinary() {
             per_sheet: &per_sheet,
             pictures_per_sheet: &pictures,
         };
-        let sheets = plan.sheets(1).expect("a short picture list is not an error");
+        let sheets = plan
+            .sheets(1)
+            .expect("a short picture list is not an error");
         assert_eq!(sheets.len(), 2, "a sheet went missing");
         assert!(sheets[1].images.is_empty());
     }

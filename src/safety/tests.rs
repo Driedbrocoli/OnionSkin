@@ -249,7 +249,11 @@ fn documents_the_wrong_way_round_are_named_as_such() {
     let checks = check_empty(&[diff(0, vec![], vec![region(20.0, 20.0, 90.0, 30.0)])]);
     assert_eq!(codes(&checks), vec!["documents_reversed"]);
     assert_eq!(checks[0].severity, Severity::Blocker);
-    assert!(checks[0].detail.contains("other order"), "{}", checks[0].detail);
+    assert!(
+        checks[0].detail.contains("other order"),
+        "{}",
+        checks[0].detail
+    );
     // And it allows for being wrong: an edit really can only remove things.
     assert!(
         checks[0].detail.contains("printed fresh"),
@@ -311,8 +315,16 @@ fn an_uncalibrated_run_says_what_to_expect() {
     assert!(checks[0].message.contains("±2 mm"));
     // Both routes, because the person reading this has a sheet in their hand
     // and the easier one costs them nothing extra.
-    assert!(checks[0].detail.contains("calibrate learn"), "{:?}", checks[0]);
-    assert!(checks[0].detail.contains("calibrate target"), "{:?}", checks[0]);
+    assert!(
+        checks[0].detail.contains("calibrate learn"),
+        "{:?}",
+        checks[0]
+    );
+    assert!(
+        checks[0].detail.contains("calibrate target"),
+        "{:?}",
+        checks[0]
+    );
 }
 
 #[test]

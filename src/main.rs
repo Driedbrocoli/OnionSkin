@@ -362,6 +362,11 @@ struct DeltaArgs {
     /// each from 0 to 1.
     #[arg(long)]
     outline_colour: Option<String>,
+    /// Split the job: write the pages whose existing text moved here, whole,
+    /// and blank them in the delta. Those pages get fresh paper; the rest are
+    /// still an overlay. Without this, one moved line blocks the whole job.
+    #[arg(long, value_name = "PATH")]
+    fresh: Option<PathBuf>,
     /// Write the delta even when a check blocks it.
     #[arg(long)]
     force: bool,
@@ -1462,13 +1467,21 @@ fn report_saving(outcome: &pipeline::Outcome) {
     println!("\nThis uses {ink} of the ink that printing it whole would.");
 }
 
+/// How many pages had their existing text move under them.
+fn moved_pages(checks: &[onionskin::safety::Check]) -> usize {
+    checks.iter().filter(|check| check.code == "reflow").count()
+}
+
 /// Which sheets actually need to go back through the printer.
 ///
 /// A forty-page document with three changes needs three sheets fed, not
 /// forty — and until this said so, working out which three meant opening the
 /// delta and looking at every page for ink.
 fn report_sheets_to_feed(outcome: &pipeline::Outcome) {
-    let carrying = outcome.pages_with_additions();
+    // What the delta carries, not what the edit changed: after a split those
+    // differ, and telling somebody to feed a sheet the delta has blanked wastes
+    // a pass through the printer.
+    let carrying = outcome.pages_in_the_delta();
     let sheets = outcome.pages.len();
     if sheets < 2 || carrying.is_empty() || carrying.len() == sheets {
         return;
@@ -1487,32 +1500,9 @@ fn report_sheets_to_feed(outcome: &pipeline::Outcome) {
 
 /// Page numbers as somebody would say them: "3, 7 and 8", or "3 to 9".
 fn describe_sheets(pages: &[usize]) -> String {
-    // Runs collapse, because "4 to 21" is a thing a person can act on and
-    // eighteen comma-separated numbers is not.
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for page in pages {
-        match runs.last_mut() {
-            Some(run) if run.1 + 1 == *page => run.1 = *page,
-            _ => runs.push((*page, *page)),
-        }
-    }
-    let parts: Vec<String> = runs
-        .iter()
-        .map(|(first, last)| match last - first {
-            0 => first.to_string(),
-            1 => format!("{first} and {last}"),
-            _ => format!("{first} to {last}"),
-        })
-        .collect();
-    match parts.len() {
-        0 => String::new(),
-        1 => parts[0].clone(),
-        _ => format!(
-            "{} and {}",
-            parts[..parts.len() - 1].join(", "),
-            parts[parts.len() - 1]
-        ),
-    }
+    // One spelling of this, in the library, so the delta's summary and the
+    // split's instructions cannot disagree about how to say "1, 3 and 4".
+    onionskin::split::sheets(pages)
 }
 
 const PRINT_INSTRUCTIONS: &str = "\
@@ -3825,7 +3815,20 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         args.preview.clone(),
         outline,
     )?;
-    let options = expert_options(options, &args)?;
+    let mut options = expert_options(options, &args)?;
+    if let Some(fresh) = &args.fresh {
+        refuse_to_clobber(
+            fresh,
+            "fresh pages",
+            &[
+                (&args.original, "original"),
+                (&args.edited, "edited copy"),
+                (&output, "delta"),
+            ],
+        )?;
+        check_writable(fresh, "fresh pages")?;
+        options.fresh = Some(fresh.clone());
+    }
 
     let outcome = pipeline::run_watched(
         &args.original,
@@ -3858,23 +3861,39 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         // there, and why it should not go in the tray.
         eprintln!(
             "\nBlocked. '{}' was written, but printing it onto the existing sheet \
-             will not line up.\nPrint the affected pages fresh, or --force if you \
-             know better.",
+             will not line up.",
             output.display()
         );
+        // A page whose text moved blocks only that page. Saying so — and how
+        // to get the rest — beats a person reprinting all forty sheets, which
+        // is the cost this program exists to avoid.
+        if args.fresh.is_none() && moved_pages(&outcome.checks) > 0 {
+            eprintln!(
+                "\n  The text moved on {} of the {} page(s); the rest can still be \
+                 overprinted.\n  Split the job and get both:\n\n      onionskin \
+                 delta {} {} -o {} --fresh fresh.pdf\n\n  That blanks the moved \
+                 page(s) in the delta and writes them whole to fresh.pdf, to print \
+                 on new paper.",
+                moved_pages(&outcome.checks),
+                outcome.pages.len(),
+                args.original.display(),
+                args.edited.display(),
+                output.display(),
+            );
+        } else {
+            eprintln!("Print the affected pages fresh, or --force if you know better.");
+        }
         return Ok(ExitCode::from(2));
     }
 
-    let pages = outcome.pages_with_additions();
+    // What the delta as written carries, which after a split is not the same
+    // as what the edit added — the pages whose text moved have been blanked.
+    let pages = outcome.pages_in_the_delta();
+    let carried = outcome.regions_in_the_delta();
     println!(
-        "\n{}: {} addition{} on page{} {}.",
+        "\n{}: {carried} addition{} on page{} {}.",
         output.display(),
-        outcome.total_regions(),
-        if outcome.total_regions() == 1 {
-            ""
-        } else {
-            "s"
-        },
+        if carried == 1 { "" } else { "s" },
         if pages.len() == 1 { "" } else { "s" },
         pages
             .iter()
@@ -3884,6 +3903,11 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
     );
     report_saving(&outcome);
     report_sheets_to_feed(&outcome);
+    if let Some(fresh) = &outcome.fresh {
+        // The plan itself is in the check above; this is the file, named where
+        // somebody scanning the last few lines will see it.
+        println!("fresh pages: {}", fresh.display());
+    }
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }

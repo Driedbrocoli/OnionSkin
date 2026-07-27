@@ -58,6 +58,13 @@ pub struct Options {
     /// producing a finished page does not, and on a delta the difference is
     /// permanent, because it is printed onto the paper.
     pub outline: Option<Outline>,
+    /// Where to write the pages that cannot be overprinted, whole.
+    ///
+    /// Asking for this is asking for the job to be split: pages whose existing
+    /// text moved are blanked in the delta and written here instead, so the
+    /// pages that *can* be overprinted are not held back by the ones that
+    /// cannot. See [`crate::split`].
+    pub fresh: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -71,6 +78,7 @@ impl Default for Options {
             pad_mm: 0.3,
             preview_dir: None,
             outline: None,
+            fresh: None,
         }
     }
 }
@@ -131,6 +139,12 @@ pub struct Outcome {
     /// `None` where it was not measured, rather than nought, because nought
     /// is a real answer meaning "these pages are blank".
     pub whole_page_ink_mm2: Option<f64>,
+    /// Where the pages that could not be overprinted were written, whole, when
+    /// the job was split. `None` when nothing moved, or no split was asked for.
+    pub fresh: Option<PathBuf>,
+    /// Which pages went into that file, counted from 1 — and so which pages
+    /// were blanked in the delta.
+    pub reprinted: Vec<usize>,
 }
 
 /// What printing only the additions saved, against printing the pages whole.
@@ -192,12 +206,35 @@ impl Outcome {
         saving.worth_saying().then_some(saving)
     }
 
+    /// Pages the *edit* added something to, whether or not the delta carries it.
     pub fn pages_with_additions(&self) -> Vec<usize> {
         self.pages
             .iter()
             .filter(|p| p.has_additions())
             .map(|p| p.index + 1)
             .collect()
+    }
+
+    /// Pages the delta as written actually carries ink for.
+    ///
+    /// Different from [`Outcome::pages_with_additions`] only when the job was
+    /// split: a page whose text moved has been blanked, so counting it here
+    /// would tell somebody to feed a sheet that will come out unchanged.
+    pub fn pages_in_the_delta(&self) -> Vec<usize> {
+        self.pages_with_additions()
+            .into_iter()
+            .filter(|page| !self.reprinted.contains(page))
+            .collect()
+    }
+
+    /// How many additions the delta as written carries.
+    pub fn regions_in_the_delta(&self) -> usize {
+        let carried = self.pages_in_the_delta();
+        self.pages
+            .iter()
+            .filter(|page| carried.contains(&(page.index + 1)))
+            .map(|page| page.added_regions.len())
+            .sum()
     }
 
     pub fn to_json(&self) -> serde_json::Value {
@@ -665,7 +702,10 @@ pub(crate) fn compose_onto(
     // drawing them to answer it anyway made the work grow with the length of
     // the document rather than with the size of the edit.
     let want_every_page = options.preview_dir.is_some();
-    for sheet in sheets.iter().filter(|s| want_every_page || s.has_anything()) {
+    for sheet in sheets
+        .iter()
+        .filter(|s| want_every_page || s.has_anything())
+    {
         if let std::collections::btree_map::Entry::Vacant(slot) = beneath.entry(sheet.from) {
             let small = doc.render(sheet.from, safety::BENEATH_DPI)?;
             slot.insert((small.gray, small.width));
@@ -682,7 +722,12 @@ pub(crate) fn compose_onto(
         .filter(|s| s.has_anything())
         .filter_map(|sheet| beneath.get(&sheet.from))
         .map(|(gray, width)| {
-            ink_area_mm2(gray, *width, safety::BENEATH_DPI, options.diff.ink_threshold)
+            ink_area_mm2(
+                gray,
+                *width,
+                safety::BENEATH_DPI,
+                options.diff.ink_threshold,
+            )
         })
         .sum();
 
@@ -804,6 +849,8 @@ pub(crate) fn compose_onto(
         dpi: options.dpi,
         profile,
         whole_page_ink_mm2: Some(whole_page_ink_mm2),
+        fresh: None,
+        reprinted: Vec::new(),
     })
 }
 
@@ -927,7 +974,10 @@ fn compare_documents(
         let first = render::to_pdf_noting(original, work, 180);
         // A panic in the conversion thread is not something to paper over, and
         // there is nothing sensible to do but carry it up.
-        (first, second.join().expect("the converting thread panicked"))
+        (
+            first,
+            second.join().expect("the converting thread panicked"),
+        )
     });
     let (original_pdf, _, original_notes) = original_done?;
     let (edited_pdf, _, edited_notes) = edited_done?;
@@ -998,9 +1048,9 @@ fn compare_documents(
         std::collections::VecDeque::new();
 
     let collect = |diffs: &mut Vec<PageDiff>,
-                       previews: &mut Vec<PathBuf>,
-                       raster: &mut Option<RasterDeltaWriter>,
-                       waiting: &mut std::collections::VecDeque<(Vec<u8>, Vec<u8>, usize)>|
+                   previews: &mut Vec<PathBuf>,
+                   raster: &mut Option<RasterDeltaWriter>,
+                   waiting: &mut std::collections::VecDeque<(Vec<u8>, Vec<u8>, usize)>|
      -> Result<(), PipelineError> {
         let Ok(mut diff) = done.recv() else {
             return Ok(());
@@ -1156,6 +1206,8 @@ fn compare_documents(
             dpi: options.dpi,
             profile,
             whole_page_ink_mm2: None,
+            fresh: None,
+            reprinted: Vec::new(),
         });
     };
     if let Some(parent) = output.parent() {
@@ -1183,6 +1235,37 @@ fn compare_documents(
     }
     conform_to_source(&corrected, output, &frames)?;
 
+    // Splitting the job, where one was asked for.
+    //
+    // Last, because it works on the delta as written rather than on any of the
+    // stages before it — and because it changes the verdict: the blocker that
+    // said "nothing worth printing was produced" stops being true the moment
+    // there is something worth printing.
+    // The checks are the authority on which pages moved, not the measurement
+    // they came from: two documents given the wrong way round have ink missing
+    // from every page, `drop_the_symptoms` has already recognised that as one
+    // mistake and dropped the reflow findings, and splitting on the raw numbers
+    // would blank the whole delta and call the entire document "fresh".
+    let split = crate::split::Split::given(&diffs, &safety::pages_that_moved(&checks));
+    let mut fresh = None;
+    let mut reprinted: Vec<usize> = Vec::new();
+    if let Some(wanted) = &options.fresh {
+        let reprint = split.reprint();
+        if !reprint.is_empty() {
+            // Blanked first. If writing the fresh pages then fails, the delta
+            // is still safe to feed; the other way round would leave ink in it
+            // that lands on a sheet nobody should be feeding.
+            crate::split::blank_pages(output, &reprint)
+                .map_err(|e| PipelineError::Invalid(e.to_string()))?;
+            crate::split::keep_only(&edited_pdf, &reprint, wanted)
+                .map_err(|e| PipelineError::Invalid(e.to_string()))?;
+            safety::reflow_is_handled(&mut checks, split.what_to_do(output, wanted));
+            safety::sort_checks(&mut checks);
+            fresh = Some(wanted.clone());
+            reprinted = reprint;
+        }
+    }
+
     Ok(Outcome {
         output: output.to_path_buf(),
         pages: diffs,
@@ -1192,6 +1275,8 @@ fn compare_documents(
         dpi: options.dpi,
         profile,
         whole_page_ink_mm2: None,
+        fresh,
+        reprinted,
     })
 }
 

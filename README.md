@@ -709,6 +709,42 @@ Add `--learn office` and the same scan also teaches the printer's profile —
 having gone to the trouble of scanning it, you may as well have the
 measurement.
 
+### When one page moved and the rest did not
+
+Ink does not come off paper. So when an edit *moves* what was already printed —
+a paragraph inserted on page two pushes everything below it down — no overlay
+can fix that page. Onionskin has always said so, and then refused the whole job:
+on a forty-page report where one line moved, that is thirty-nine pages of
+perfectly good overlay held back by one, and the choice was reprint all forty or
+`--force` and print new words onto text that has since moved.
+
+Do both things instead:
+
+```bash
+onionskin delta before.pdf after.pdf -o delta.pdf --fresh fresh.pdf
+```
+
+```
+WARNING: Existing content moved on page 2, so it cannot be overprinted.
+The job has been split.
+    Two things to print, and they are not the same thing.
+    1. delta.pdf: feed sheets 1, 3 and 4 back in. That is the overlay.
+    2. fresh.pdf: print sheet 2 on fresh paper and throw the old one away —
+       the text on it moved, and ink does not come off paper.
+    That page is blank in the delta, so feeding it would do nothing.
+```
+
+`fresh.pdf` holds the moved pages **whole**, from the edited document, ready to
+print at their true size. In the delta those pages are blanked — their additions
+were placed against text that has since moved, and leaving them in would be an
+invitation to feed a sheet that is about to be thrown away.
+
+Blanked, not removed: the delta's page three has to stay page three, because the
+whole scheme is that page *n* is fed the printed sheet *n*.
+
+Without `--fresh` the job is still refused, but the refusal now says how to get
+the pages that are fine rather than leaving you to reprint everything.
+
 ### Several deltas, one pass through the printer
 
 A day's work on one document arrives as more than one delta. The paid stamp is a

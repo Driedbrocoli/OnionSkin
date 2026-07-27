@@ -170,7 +170,10 @@ pub fn check_documents(original: &[PageSize], edited: &[PageSize]) -> Vec<Check>
 /// attached to it, about Word text boxes and fixed positions, is about a
 /// problem this person does not have. One clear cause beats five true symptoms.
 pub fn drop_the_symptoms(checks: &mut Vec<Check>) {
-    if checks.iter().any(|check| check.code == "documents_reversed") {
+    if checks
+        .iter()
+        .any(|check| check.code == "documents_reversed")
+    {
         checks.retain(|check| check.code != "reflow" && check.code != "heavy_coverage");
     }
 }
@@ -202,6 +205,57 @@ pub fn check_reflow(diff: &PageDiff) -> Vec<Check> {
         removed, top
     ))
     .on_page(diff.index + 1)]
+}
+
+/// The pages the reflow check reported, after any dropping.
+///
+/// The authority on which pages moved, rather than the raw measurement: two
+/// documents handed over the wrong way round have ink missing from every page,
+/// [`drop_the_symptoms`] recognises that as one mistake and takes the reflow
+/// findings away, and anything acting on "which pages moved" has to see that.
+pub fn pages_that_moved(checks: &[Check]) -> Vec<usize> {
+    checks
+        .iter()
+        .filter(|check| check.code == "reflow")
+        .filter_map(|check| check.page)
+        .collect()
+}
+
+/// The reflow blockers, once those pages have been taken out of the delta and
+/// written out to be printed fresh instead.
+///
+/// The finding was right and stays on the list — a sheet is being thrown away,
+/// which is worth knowing. What is no longer true is that nothing can be
+/// printed: the pages that did not move are still an overlay, and holding
+/// thirty-nine of them back because one moved is the thing this undoes.
+pub fn reflow_is_handled(checks: &mut Vec<Check>, detail: String) {
+    let moved: Vec<usize> = checks
+        .iter()
+        .filter(|check| check.code == "reflow")
+        .filter_map(|check| check.page)
+        .collect();
+    if moved.is_empty() {
+        return;
+    }
+    checks.retain(|check| check.code != "reflow");
+    let pages = moved
+        .iter()
+        .map(|page| page.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    checks.push(
+        Check::new(
+            Severity::Warning,
+            "reflow_split",
+            format!(
+                "Existing content moved on {} {pages}, so {} cannot be \
+                 overprinted. The job has been split.",
+                if moved.len() == 1 { "page" } else { "pages" },
+                if moved.len() == 1 { "it" } else { "they" },
+            ),
+        )
+        .with_detail(detail),
+    );
 }
 
 /// Additions that stray into the border a printer cannot reach.
@@ -296,10 +350,15 @@ pub fn check_legibility(
     for region in &diff.added_regions {
         // The region is in millimetres on the paper, so it maps onto any
         // rendering of that paper whatever resolution it was drawn at.
-        let x0 = crate::geometry::mm_to_px(region.x0_mm, dpi).floor().max(0.0) as usize;
-        let y0 = crate::geometry::mm_to_px(region.y0_mm, dpi).floor().max(0.0) as usize;
+        let x0 = crate::geometry::mm_to_px(region.x0_mm, dpi)
+            .floor()
+            .max(0.0) as usize;
+        let y0 = crate::geometry::mm_to_px(region.y0_mm, dpi)
+            .floor()
+            .max(0.0) as usize;
         let x1 = (crate::geometry::mm_to_px(region.x1_mm, dpi).ceil().max(0.0) as usize).min(width);
-        let y1 = (crate::geometry::mm_to_px(region.y1_mm, dpi).ceil().max(0.0) as usize).min(height);
+        let y1 =
+            (crate::geometry::mm_to_px(region.y1_mm, dpi).ceil().max(0.0) as usize).min(height);
         if x0 >= x1 || y0 >= y1 {
             continue;
         }
@@ -696,8 +755,8 @@ mod tests;
 #[cfg(test)]
 mod legibility_tests {
     use super::*;
-    use crate::diff::{Mask, PageDiff, Region};
     use crate::calibrate::A4;
+    use crate::diff::{Mask, PageDiff, Region};
 
     /// A page of the given size, all paper, with one dark rectangle on it.
     fn page_with_a_blot(dpi: f64, blot: (f64, f64, f64, f64)) -> (Vec<u8>, usize) {
@@ -756,7 +815,11 @@ mod legibility_tests {
             "{:?}",
             checks[0]
         );
-        assert!(checks[0].message.contains("above and below"), "{:?}", checks[0]);
+        assert!(
+            checks[0].message.contains("above and below"),
+            "{:?}",
+            checks[0]
+        );
     }
 
     /// Writing directly after a label is what filling in a form *is*, and a
@@ -787,7 +850,11 @@ mod legibility_tests {
         assert_eq!(checks.len(), 1, "{checks:?}");
         assert_eq!(checks[0].severity, Severity::Warning);
         assert_eq!(checks[0].code, "tight_fit");
-        assert!(checks[0].message.contains("above or below"), "{:?}", checks[0]);
+        assert!(
+            checks[0].message.contains("above or below"),
+            "{:?}",
+            checks[0]
+        );
         // And says what to do about it rather than only that it is a problem.
         assert!(
             checks[0].detail.contains("calibrate learn"),

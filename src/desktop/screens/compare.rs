@@ -325,6 +325,9 @@ fn start(state: &mut State, room: &mut Room) {
         diff: state.expert,
         pad_mm: state.pad_mm,
         preview_dir: None,
+        // The window has nowhere yet to put the pages that cannot be
+        // overprinted, so it still reports the blocker rather than splitting.
+        fresh: None,
     };
 
     room.previews.forget(&output);
