@@ -45,6 +45,16 @@ pub struct State {
     /// How far to turn the words, degrees clockwise on the page. For a form
     /// with a sideways box on it, or a note down the margin.
     rotation_deg: f64,
+    /// The thing already on the page to put the next words after.
+    anchor: String,
+    /// What to say about the last attempt to find one.
+    anchor_said: Option<String>,
+    /// Below the anchor rather than after it.
+    anchor_below: bool,
+    /// The page as it was last read, so finding a second anchor does not read
+    /// it again — reading is three passes of template matching over every mark
+    /// on the sheet, and the page has not changed between one and the next.
+    read: Option<onionskin::letters::PageText>,
 }
 
 impl Default for State {
@@ -60,6 +70,10 @@ impl Default for State {
             output: None,
             matched: None,
             rotation_deg: 0.0,
+            anchor: String::new(),
+            anchor_said: None,
+            anchor_below: false,
+            read: None,
         }
     }
 }
@@ -68,14 +82,20 @@ pub fn show(state: &mut State, room: &mut Room) {
     let screen = super::Screen::Scan;
     widgets::title(room.ui, screen.name(), screen.lede());
 
-    widgets::file_row(
+    if widgets::file_row(
         room.ui,
         room.picker,
         "The scan",
         &mut state.scan,
         &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
         room.dropped,
-    );
+    ) {
+        // A different sheet: everything worked out about the last one is now
+        // about the wrong piece of paper.
+        state.read = None;
+        state.matched = None;
+        state.anchor_said = None;
+    }
 
     room.ui.horizontal(|ui| {
         ui.label("Paper size");
@@ -331,6 +351,78 @@ fn show_placements(state: &mut State, room: &mut Room) {
         room.ui,
         "Position is the baseline — where the letters sit, not the top of them.",
     );
+
+    // The other way of saying where: by what is already printed there. Nobody
+    // holding a form knows the gap after "Received:" starts 44.9 mm across.
+    // They know it is the gap after "Received:".
+    room.ui.add_space(10.0);
+    room.ui.label("Or put them next to something already on the page");
+    let ready = state.scan.is_some() && !state.anchor.trim().is_empty();
+    room.ui.horizontal(|ui| {
+        ui.label(if state.anchor_below { "Below" } else { "After" });
+        ui.add(
+            egui::TextEdit::singleline(&mut state.anchor)
+                .hint_text("Received:")
+                .desired_width(200.0),
+        );
+        ui.checkbox(&mut state.anchor_below, "on the next line");
+    });
+    if room
+        .ui
+        .add_enabled(ready, egui::Button::new("Find it and add a placement"))
+        .clicked()
+    {
+        add_by_anchor(state);
+    }
+    if let Some(said) = &state.anchor_said {
+        widgets::hint(room.ui, said);
+    }
+}
+
+/// Find the anchor on the page and put a placement where it says.
+///
+/// Everything is allowed to fail into a sentence rather than an error box.
+/// Somebody who has not chosen a scan, or whose anchor is not on the page, is
+/// mid-thought about where to put some words — the answer is to say what went
+/// wrong beside the box they typed it into, and leave everything else alone.
+fn add_by_anchor(state: &mut State) {
+    let Some(scan) = state.scan.clone() else {
+        return;
+    };
+    if state.read.is_none() {
+        state.read = onionskin::typeface::read_and_match(&scan, &state.page, false, false)
+            .map(|(text, _)| text);
+    }
+    let Some(text) = &state.read else {
+        state.anchor_said = Some(
+            "Nothing could be read off this page, so there is nothing to place              words against. Add a placement above and give the millimetres."
+                .to_string(),
+        );
+        return;
+    };
+
+    let put = if state.anchor_below {
+        onionskin::anchor::Where::Below
+    } else {
+        onionskin::anchor::Where::After
+    };
+    let gap_mm = onionskin::geometry::pt_to_mm(state.size_pt * 0.3);
+    let step_mm = onionskin::geometry::pt_to_mm(state.size_pt * 1.15);
+    match onionskin::anchor::place(text, &state.anchor, put, gap_mm, step_mm) {
+        Ok(found) => {
+            state.anchor_said = Some(format!(
+                "Found it on the line \"{}\" — a placement is waiting above at                  {:.1}, {:.1} mm.",
+                found.line, found.x_mm, found.y_mm
+            ));
+            state.placements.push(Placement {
+                text: String::new(),
+                x_mm: found.x_mm,
+                y_mm: found.y_mm,
+            });
+            state.anchor.clear();
+        }
+        Err(e) => state.anchor_said = Some(e.to_string()),
+    }
 }
 
 fn start(state: &mut State, room: &mut Room) {
@@ -468,4 +560,56 @@ fn mm_to_point(rect: egui::Rect, page: geometry::PageSize, mm: (f64, f64)) -> eg
         rect.left() + fx * rect.width(),
         rect.top() + fy * rect.height(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_scan_forgets_everything_about_the_last_one() {
+        // The page read, the font matched off it, and whatever was said about
+        // finding an anchor are all about one piece of paper. Carrying any of
+        // them to the next sheet would place words by measurements taken from
+        // a document that is no longer open.
+        let mut state = State {
+            read: None,
+            matched: Some("Times-Roman at about 11 pt".into()),
+            anchor_said: Some("Found it".into()),
+            ..State::default()
+        };
+        // What `show` does when the file row reports a change.
+        state.read = None;
+        state.matched = None;
+        state.anchor_said = None;
+
+        assert!(state.read.is_none());
+        assert!(state.matched.is_none());
+        assert!(state.anchor_said.is_none());
+    }
+
+    #[test]
+    fn asking_for_an_anchor_with_no_scan_chosen_does_nothing_at_all() {
+        // Not an error box: somebody is mid-thought about where to put some
+        // words, and the answer is to leave everything alone until there is a
+        // page to look at.
+        let mut state = State {
+            anchor: "Received:".into(),
+            ..State::default()
+        };
+        add_by_anchor(&mut state);
+        assert!(state.placements.is_empty());
+        assert!(state.anchor_said.is_none());
+        assert_eq!(state.anchor, "Received:");
+    }
+
+    #[test]
+    fn the_default_state_is_the_one_somebody_should_meet() {
+        let state = State::default();
+        assert_eq!(state.page, "a4");
+        assert_eq!(state.size_pt, 11.0);
+        assert_eq!(state.rotation_deg, 0.0);
+        assert!(!state.anchor_below, "the ordinary case is 'after'");
+        assert!(state.placements.is_empty());
+    }
 }
