@@ -23,8 +23,12 @@ pub struct State {
     target_to: Option<std::path::PathBuf>,
     /// What was measured off the printed target, one line per mark.
     measurements: String,
-    /// A scan of the printed sheet, for the route that needs no ruler.
+    /// A scan of the printed target, for the route that needs no ruler.
     sheet: Option<std::path::PathBuf>,
+    /// A delta that was printed on an ordinary job.
+    delta: Option<std::path::PathBuf>,
+    /// A scan of the sheet that job came out on.
+    job_sheet: Option<std::path::PathBuf>,
 }
 
 impl Default for State {
@@ -36,6 +40,8 @@ impl Default for State {
             target_to: None,
             measurements: String::new(),
             sheet: None,
+            delta: None,
+            job_sheet: None,
         }
     }
 }
@@ -49,9 +55,9 @@ pub fn show(state: &mut State, room: &mut Room) {
 
     widgets::caution(
         room.ui,
-        "Without this, expect about ±2 mm. With it, better than ±0.5 mm. It is \
-         worth doing once for a printer you will use often, and not worth doing \
-         at all for one you will not.",
+        "Without this, expect about ±2 mm. With it, better than ±0.5 mm. The \
+         quickest way needs nothing you were not already doing: print a delta, \
+         scan the sheet afterwards, and hand both of them over.",
     );
     room.ui.add_space(12.0);
 
@@ -94,18 +100,94 @@ pub fn show(state: &mut State, room: &mut Room) {
     room.ui.separator();
     room.ui.add_space(10.0);
 
-    // ------------------------------------------------------------ the target
-    room.ui
-        .label(egui::RichText::new("Step 1 — print the target").strong());
+    // ----------------------------------------------------- what both routes need
+    //
+    // The name and the paper belong to the profile, not to the way it was
+    // arrived at, so they are asked for once rather than twice.
+    room.ui.horizontal(|ui| {
+        ui.label("Call it");
+        ui.text_edit_singleline(&mut state.name);
+    });
     widgets::hint(
         room.ui,
-        "A sheet with marks at known places. Print it at 100%, put the same \
-         sheet back in the tray, and print it a second time.",
+        "a name you will recognise, such as 'office' or 'the big one'",
     );
     room.ui.horizontal(|ui| {
         ui.label("Paper");
         ui.text_edit_singleline(&mut state.page);
     });
+    widgets::hint(
+        room.ui,
+        "the paper you actually print on — a shift carries over to any size, \
+         but rotation and scale do not",
+    );
+
+    room.ui.add_space(14.0);
+    room.ui.separator();
+    room.ui.add_space(10.0);
+
+    // -------------------------------------------------- from an ordinary job
+    //
+    // Offered first because it costs nothing extra. Every delta ever printed
+    // is a set of marks in known places, so the sheet that came out of the
+    // printer is already a calibration target — and somebody who was never
+    // going to sit down and calibrate gets it anyway.
+    room.ui.label(
+        egui::RichText::new("The quick way — learn from a job you printed").strong(),
+    );
+    widgets::hint(
+        room.ui,
+        "Print a delta as usual, scan the sheet afterwards, and give both here. \
+         No target sheet, no ruler.",
+    );
+    widgets::file_row(
+        room.ui,
+        room.picker,
+        "The delta that was printed",
+        &mut state.delta,
+        &["pdf"],
+        room.dropped,
+    );
+    widgets::file_row(
+        room.ui,
+        room.picker,
+        "A scan of the sheet afterwards",
+        &mut state.job_sheet,
+        &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+        room.dropped,
+    );
+    let can_learn = state.delta.is_some()
+        && state.job_sheet.is_some()
+        && !state.name.trim().is_empty();
+    if room
+        .ui
+        .add_enabled(
+            can_learn && !room.jobs.busy(),
+            egui::Button::new(egui::RichText::new("Learn from this sheet").strong()),
+        )
+        .clicked()
+    {
+        learn_from_job(state, room);
+    }
+    if !can_learn {
+        widgets::hint(
+            room.ui,
+            "Give the delta, a scan of the sheet it was printed on, and a name.",
+        );
+    }
+
+    room.ui.add_space(14.0);
+    room.ui.separator();
+    room.ui.add_space(10.0);
+
+    // ------------------------------------------------------------ the target
+    room.ui
+        .label(egui::RichText::new("Or measure a target sheet — step 1, print it").strong());
+    widgets::hint(
+        room.ui,
+        "A sheet with marks at known places. Print it at 100%, put the same \
+         sheet back in the tray, and print it a second time.",
+    );
     widgets::save_row(
         room.ui,
         room.picker,
@@ -151,7 +233,7 @@ pub fn show(state: &mut State, room: &mut Room) {
 
     // ------------------------------------------------------------ the answer
     room.ui
-        .label(egui::RichText::new("Step 2 — measure and save").strong());
+        .label(egui::RichText::new("Step 2 — read the target back").strong());
 
     // The route that needs no ruler, offered first because it is the one
     // worth taking: a scanner reads tenths of a millimetre about ten times
@@ -202,11 +284,6 @@ pub fn show(state: &mut State, room: &mut Room) {
             .font(egui::TextStyle::Monospace),
     );
     room.ui.add_space(6.0);
-    room.ui.horizontal(|ui| {
-        ui.label("Call it");
-        ui.text_edit_singleline(&mut state.name);
-    });
-    widgets::hint(room.ui, "a name you will recognise, such as 'office' or 'the big one'");
 
     let ready = !state.name.trim().is_empty() && !state.measurements.trim().is_empty();
     if room
@@ -230,6 +307,98 @@ pub fn show(state: &mut State, room: &mut Room) {
             state.profiles = calibrate::list_profiles().ok();
         }
     }
+}
+
+/// Learn the printer from a job that was going to be printed anyway.
+///
+/// The target sheet exists because crosshairs are easy to find. But a delta is
+/// also a set of marks in known places, so the sheet it was printed on carries
+/// the same measurement — and taking it that way turns calibration from an
+/// errand somebody has to decide to run into something that happens by using
+/// the program.
+fn learn_from_job(state: &mut State, room: &mut Room) {
+    let (Some(delta), Some(sheet)) = (state.delta.clone(), state.job_sheet.clone()) else {
+        return;
+    };
+    let name = state.name.trim().to_string();
+    let page_text = state.page.clone();
+    state.profiles = None;
+
+    room.jobs.start("Learning from the sheet", move |report| {
+        let page = match onionskin::geometry::parse_page(&page_text) {
+            Ok(page) => page,
+            Err(e) => return Outcome::refused(e.to_string()),
+        };
+
+        report.saying("Reading what the delta asked for…");
+        let intended = match calibrate::marks_on_delta(&delta) {
+            Ok(marks) => marks,
+            Err(e) => return Outcome::refused(e.to_string()),
+        };
+        if intended.is_empty() {
+            return Outcome::refused(
+                "There is nothing on that delta, so there is nothing to measure. \
+                 Give the delta that was actually printed onto this sheet."
+                    .to_string(),
+            );
+        }
+
+        report.saying("Opening the scan…");
+        let image = match image::open(&sheet) {
+            Ok(image) => image,
+            Err(e) => return Outcome::refused(format!("could not read that scan: {e}")),
+        };
+        report.saying("Finding the sheet on the glass…");
+        let registration =
+            match onionskin::scan::register(&image, onionskin::scan::ScanOptions::new(page)) {
+                Ok(registration) => registration,
+                Err(e) => return Outcome::refused(e.to_string()),
+            };
+
+        report.saying("Finding where each addition landed…");
+        let gray = image.to_luma8();
+        let landings = calibrate::measure_landings(
+            &gray,
+            &registration,
+            &intended,
+            calibrate::ink_threshold(),
+        );
+        let profile = match calibrate::learn_from_landings(&landings, page, &name) {
+            Ok(profile) => profile,
+            Err(e) => return Outcome::refused(e.to_string()),
+        };
+
+        // Where each one went, so the numbers are something a person can check
+        // against the sheet in their hand rather than something to take on
+        // trust.
+        let measured: Vec<String> = landings
+            .iter()
+            .map(|landing| {
+                format!(
+                    "  {:>6.1},{:<6.1} mm   out by {:.2} mm{}",
+                    landing.intended.0,
+                    landing.intended.1,
+                    landing.miss_mm(),
+                    match landing.doubt() {
+                        Some(why) => format!("   (not counted: {why})"),
+                        None => String::new(),
+                    }
+                )
+            })
+            .collect();
+
+        match calibrate::save_profile(&profile) {
+            Ok(_) => Outcome::done(format!(
+                "Saved as '{}'.\n\nWhere the additions landed:\n{}\n\n{}\n\nAsk \
+                 for it by name when you make a delta. Scan another job back \
+                 later and it gets better.",
+                profile.name,
+                measured.join("\n"),
+                profile.correction().describe(),
+            )),
+            Err(e) => Outcome::refused(e.to_string()),
+        }
+    });
 }
 
 /// Read the printed sheet from a scan of it, and save the profile.

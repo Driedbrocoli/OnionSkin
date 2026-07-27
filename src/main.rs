@@ -403,6 +403,8 @@ enum CalibrateCommand {
     Target(TargetArgs),
     /// Measure the printed sheet from a scan of it, and save the profile.
     Measure(MeasureArgs),
+    /// Learn from an ordinary job: scan the sheet you just printed.
+    Learn(LearnArgs),
     /// Turn readings you took by hand into a stored profile.
     Solve(SolveArgs),
     /// List the profiles on this machine.
@@ -411,6 +413,37 @@ enum CalibrateCommand {
     Show(ProfileName),
     /// Delete a profile.
     Delete(ProfileName),
+}
+
+/// Learning the printer's error from a job that was printed anyway.
+///
+/// The target sheet exists because crosshairs are easy to find. But every
+/// delta that was ever printed is also a set of marks in known places, so a
+/// scan of the sheet afterwards says where they really went — which makes
+/// calibration something that happens by using the program rather than
+/// something somebody has to sit down and do.
+#[derive(clap::Args)]
+struct LearnArgs {
+    /// A scan of the sheet after the delta was printed onto it.
+    scan: PathBuf,
+    /// The delta that was printed onto it.
+    #[arg(long)]
+    delta: PathBuf,
+    /// Which profile to teach. Without it, the one in your settings.
+    #[arg(long)]
+    name: Option<String>,
+    /// The paper it was printed on.
+    #[arg(long, default_value_t = default_page())]
+    page: String,
+    /// The scan is already cropped to the sheet.
+    #[arg(long)]
+    cropped: bool,
+    /// The sheet is square in the scan; do not look for skew.
+    #[arg(long)]
+    square: bool,
+    /// Say what was measured without saving anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -4289,12 +4322,96 @@ fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> 
     .map_err(|e| e.to_string())
 }
 
-/// Measure a printed calibration sheet from a scan of it.
+/// Learn the printer's error from a job that was printed anyway.
 ///
-/// The part of calibration that was a chore. Reading eight offsets off paper
-/// with a ruler, in tenths of a millimetre, is unpleasant to do and easy to do
-/// badly — and the numbers it produces are the ones every later delta is
-/// placed by. The scanner can read them instead, and it reads them better.
+/// The target sheet exists because crosshairs are easy to find, and printing
+/// one is an errand somebody has to decide to run. Most never will, so most
+/// deltas land within about two millimetres for want of a measurement that was
+/// sitting in the out tray the whole time: a delta is also a set of marks in
+/// known places, and the sheet it printed onto says where they really went.
+///
+/// Nothing here is asked of the user that the job did not already produce.
+fn cmd_calibrate_learn(args: LearnArgs) -> Result<ExitCode, String> {
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+
+    // Which profile is being taught. Naming none teaches the one already in
+    // use, which is the case that makes this automatic rather than a chore.
+    let name = match args.name.clone() {
+        Some(name) => name,
+        None => onionskin::settings::load()
+            .defaults
+            .profile
+            .ok_or_else(|| {
+                "no profile named, and none saved. Give --name, or set one \
+                 with `onionskin config set profile NAME`."
+                    .to_string()
+            })?,
+    };
+    // Where the delta asked for ink. Read off the delta itself rather than
+    // remembered, so this works on any delta Onionskin ever wrote — and so a
+    // correction the delta was already written with is in the measurement
+    // rather than needing to be remembered and taken off again.
+    let intended = calibrate::marks_on_delta(&args.delta).map_err(|e| e.to_string())?;
+    if intended.is_empty() {
+        return Err(format!(
+            "{} has nothing on it, so there is nothing to measure.",
+            args.delta.display()
+        ));
+    }
+
+    let image = image::open(&args.scan)
+        .map_err(|e| format!("could not read '{}': {e}", args.scan.display()))?;
+    let registration = register(
+        &image,
+        ScanOptions {
+            page,
+            assume_cropped: args.cropped,
+            assume_square: args.square,
+            ..ScanOptions::new(page)
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    println!("{}", registration.describe());
+
+    let gray = image.to_luma8();
+    let landings = calibrate::measure_landings(
+        &gray,
+        &registration,
+        &intended,
+        calibrate::ink_threshold(),
+    );
+
+    println!("\nWhere the additions landed:");
+    for landing in &landings {
+        println!(
+            "  {:>6.1},{:<6.1} mm   out by {:.2} mm{}",
+            landing.intended.0,
+            landing.intended.1,
+            landing.miss_mm(),
+            match landing.doubt() {
+                Some(why) => format!("   (not counted: {why})"),
+                None => String::new(),
+            }
+        );
+    }
+
+    let learnt =
+        calibrate::learn_from_landings(&landings, page, &name).map_err(|e| e.to_string())?;
+
+    println!("\nWhat this printer does:");
+    println!("{}", learnt.describe());
+
+    if args.dry_run {
+        println!("\nNothing saved — --dry-run.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let path = calibrate::save_profile(&learnt).map_err(|e| e.to_string())?;
+    println!("\nSaved as '{name}' in {}.", path.display());
+    println!("Every delta from now on is corrected by it, and every job you scan back makes it better.");
+    Ok(ExitCode::SUCCESS)
+}
+
+
 fn cmd_calibrate_measure(args: MeasureArgs) -> Result<ExitCode, String> {
     let page = parse_page(&args.page).map_err(|e| e.to_string())?;
     let image = image::open(&args.scan)
@@ -4499,6 +4616,7 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
         }
 
         CalibrateCommand::Measure(args) => cmd_calibrate_measure(args),
+        CalibrateCommand::Learn(args) => cmd_calibrate_learn(args),
 
         CalibrateCommand::Solve(args) => {
             if args.points.len() < 2 {
@@ -4554,7 +4672,11 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
             let profiles = calibrate::list_profiles().map_err(|e| e.to_string())?;
             if profiles.is_empty() {
                 println!(
-                    "No calibration profiles yet.\n\nMake one:\n  onionskin calibrate \
+                    "No calibration profiles yet.\n\n\
+                     From a job you were printing anyway — scan the sheet after it \
+                     goes through:\n  onionskin calibrate learn scan.png --delta \
+                     delta.pdf --name office\n\n\
+                     Or up front, from a target sheet:\n  onionskin calibrate \
                      target -o target.pdf"
                 );
                 return Ok(ExitCode::SUCCESS);

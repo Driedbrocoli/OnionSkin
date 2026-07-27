@@ -1551,6 +1551,373 @@ pub fn calibrate_from_scan(
     Ok((profile, readings))
 }
 
+// ---------------------------------------------------------------------------
+// Learning from an ordinary job, rather than only from the target
+// ---------------------------------------------------------------------------
+
+/// Where one addition was meant to land, and where it did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Landing {
+    /// Where the delta asked for it, in millimetres on the paper.
+    pub intended: (f64, f64),
+    /// Where it is on the sheet that came out of the printer.
+    pub observed: (f64, f64),
+    /// How much ink was found there, as a fraction of what was expected.
+    /// Well under 1 means most of the addition was not found, and the reading
+    /// is not to be trusted.
+    pub confidence: f64,
+}
+
+impl Landing {
+    /// How far it missed by, in millimetres.
+    pub fn miss_mm(&self) -> f64 {
+        let dx = self.observed.0 - self.intended.0;
+        let dy = self.observed.1 - self.intended.1;
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// Whether this reading is worth fitting to.
+    pub fn believable(&self) -> bool {
+        self.confidence >= BELIEVABLE && self.confidence <= CROWDED
+    }
+
+    /// Why it is not, in a few words. `None` when it is.
+    pub fn doubt(&self) -> Option<String> {
+        if self.confidence < BELIEVABLE {
+            Some(format!(
+                "only {:.0}% of the ink turned up — it did not print",
+                self.confidence * 100.0
+            ))
+        } else if self.confidence > CROWDED {
+            Some("it landed on something already on the sheet".into())
+        } else {
+            None
+        }
+    }
+}
+
+/// How far around an intended position to look for the ink that landed.
+///
+/// Wide enough to find an addition that a badly-fed sheet put four
+/// millimetres off, narrow enough that the search does not wander into the
+/// next line of the document and measure that instead. A printer that is out
+/// by more than this is not out of calibration, it is broken.
+pub const SEARCH_MM: f64 = 4.0;
+
+/// One mark the delta asked the printer for.
+///
+/// Measured off the delta as it was rendered, rather than remembered from the
+/// placement, so this works on any delta Onionskin ever wrote — and so a
+/// correction the delta was already written with is in the reading rather than
+/// having to be taken off it again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Asked {
+    /// Where the mark's ink balances, in millimetres on the paper.
+    pub centre_mm: (f64, f64),
+    /// The mark's extent — x0, y0, x1, y1 — so the search covers all of it.
+    pub bounds_mm: (f64, f64, f64, f64),
+    /// How much ink the delta put there, measured the same way the scan is.
+    pub ink_mm2: f64,
+}
+
+/// The middle of the ink in a box, weighted by how dark each pixel is.
+///
+/// Both halves of a landing go through this, and that is the point of it. A
+/// bounding box and a centre of ink are the same point only for a symmetrical
+/// blot; for a word like "14 March", where a tall M sits beside short letters,
+/// they are a third of a millimetre apart. Measuring what was asked for one way
+/// and what arrived the other puts that difference into the profile as though
+/// the printer had caused it — on a measurement whose whole job is to get the
+/// error under half a millimetre.
+///
+/// Returns the centre and the total weight, which is what the ink amounts to.
+fn ink_centre(
+    darkness: impl Fn(u32, u32) -> u8,
+    box_px: (u32, u32, u32, u32),
+    threshold: u8,
+    to_mm: impl Fn(f64, f64) -> (f64, f64),
+) -> Option<((f64, f64), f64)> {
+    let (x0, y0, x1, y1) = box_px;
+    let mut weight_total = 0.0;
+    let mut x_total = 0.0;
+    let mut y_total = 0.0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let value = darkness(x, y);
+            if value >= threshold {
+                continue;
+            }
+            let weight = (threshold - value) as f64;
+            let (mm_x, mm_y) = to_mm(x as f64 + 0.5, y as f64 + 0.5);
+            x_total += mm_x * weight;
+            y_total += mm_y * weight;
+            weight_total += weight;
+        }
+    }
+    if weight_total <= 0.0 {
+        return None;
+    }
+    Some((
+        (x_total / weight_total, y_total / weight_total),
+        weight_total,
+    ))
+}
+
+/// What weight of ink amounts to in square millimetres of solid black.
+fn ink_mm2(weight: f64, threshold: u8, px_per_mm: f64) -> f64 {
+    weight / (threshold as f64) / px_per_mm.powi(2)
+}
+
+/// Read the marks off a delta as it was rendered for the printer.
+///
+/// `regions` are the delta's ink already grouped into separate marks; this
+/// gives each one a centre measured the way the scan will be measured.
+pub fn marks_asked_for(
+    gray: &[u8],
+    width: usize,
+    dpi: f64,
+    regions: &[crate::diff::Region],
+    threshold: u8,
+) -> Vec<Asked> {
+    let px_per_mm = dpi / 25.4;
+    let height = if width == 0 { 0 } else { gray.len() / width };
+    regions
+        .iter()
+        .filter_map(|region| {
+            let (x0, y0, x1, y1) = region.px_bbox;
+            let box_px = (
+                x0.min(width) as u32,
+                y0.min(height) as u32,
+                x1.min(width) as u32,
+                y1.min(height) as u32,
+            );
+            let (centre_mm, weight) = ink_centre(
+                |x, y| gray[y as usize * width + x as usize],
+                box_px,
+                threshold,
+                |x, y| (x / px_per_mm, y / px_per_mm),
+            )?;
+            Some(Asked {
+                centre_mm,
+                bounds_mm: (region.x0_mm, region.y0_mm, region.x1_mm, region.y1_mm),
+                ink_mm2: ink_mm2(weight, threshold, px_per_mm),
+            })
+        })
+        .collect()
+}
+
+/// The marks a delta asked for, read straight off the file.
+///
+/// The single place that knows how a printed delta is turned back into
+/// something measurable, so the command line and the window cannot drift apart
+/// on it.
+pub fn marks_on_delta(path: &Path) -> Result<Vec<Asked>, CalibrateError> {
+    // Fine enough that the middle of a mark settles to well under a tenth of a
+    // millimetre, coarse enough that a page renders in a moment.
+    const DPI: f64 = 200.0;
+
+    let engine = crate::render::engine().map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+    let doc = engine
+        .open(path)
+        .map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+    let drawn = doc
+        .render_gray(0, DPI)
+        .map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+
+    let options = crate::diff::DiffOptions::default();
+    let mask = crate::diff::ink_mask(
+        &drawn.gray,
+        drawn.width,
+        drawn.height,
+        options.ink_threshold,
+    );
+    let regions = crate::diff::label_regions(
+        &mask,
+        DPI,
+        options.group_mm,
+        options.min_region_mm2,
+    );
+    Ok(marks_asked_for(
+        &drawn.gray,
+        drawn.width,
+        DPI,
+        &regions,
+        options.ink_threshold,
+    ))
+}
+
+/// The darkness at which the scan of a printed sheet counts as ink.
+///
+/// The same threshold the delta's own marks were read with, so "how much of it
+/// turned up" compares like with like.
+pub fn ink_threshold() -> u8 {
+    crate::diff::DiffOptions::default().ink_threshold
+}
+
+/// Measure where the additions on a printed sheet actually landed.
+///
+/// This is what makes calibration something that happens by using the
+/// program rather than something somebody has to sit down and do. The target
+/// sheet exists because crosshairs are easy to find; but every delta that
+/// was ever printed is also a set of marks in known places, and a scan of the
+/// sheet afterwards says where they really went.
+///
+/// Only additions on clear paper can be measured — where the delta was laid
+/// over ink that was already there, the centroid would be the sum of both and
+/// mean nothing. Those are skipped rather than guessed at.
+pub fn measure_landings(
+    scan: &image::GrayImage,
+    registration: &crate::scan::ScanRegistration,
+    intended: &[Asked],
+    threshold: u8,
+) -> Vec<Landing> {
+    let mapping = registration.mapping();
+    let (width, height) = scan.dimensions();
+    let mut landings = Vec::new();
+
+    for mark in intended {
+        // The window to look in: the mark as asked for, plus room for the
+        // sheet to have gone in crooked.
+        let x0 = mark.bounds_mm.0 - SEARCH_MM;
+        let y0 = mark.bounds_mm.1 - SEARCH_MM;
+        let x1 = mark.bounds_mm.2 + SEARCH_MM;
+        let y1 = mark.bounds_mm.3 + SEARCH_MM;
+
+        // Four corners through the mapping, because a skewed scan turns a
+        // rectangle in millimetres into a quadrilateral in pixels.
+        let corners = [
+            mapping.page_mm_to_pixel((x0, y0)),
+            mapping.page_mm_to_pixel((x1, y0)),
+            mapping.page_mm_to_pixel((x0, y1)),
+            mapping.page_mm_to_pixel((x1, y1)),
+        ];
+        let px0 = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let px1 = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let py0 = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let py1 = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+
+        let sx0 = px0.floor().max(0.0) as u32;
+        let sy0 = py0.floor().max(0.0) as u32;
+        let sx1 = (px1.ceil() as i64).clamp(0, width as i64) as u32;
+        let sy1 = (py1.ceil() as i64).clamp(0, height as i64) as u32;
+        if sx0 >= sx1 || sy0 >= sy1 {
+            continue;
+        }
+
+        // The ink's middle, weighted by how dark each pixel is, so a faint
+        // edge pulls less than a solid stroke — the same measure the delta's
+        // own ink was read with.
+        let Some((observed, weight)) = ink_centre(
+            |x, y| scan.get_pixel(x, y).0[0],
+            (sx0, sy0, sx1, sy1),
+            threshold,
+            |x, y| mapping.pixel_to_page_mm((x, y)),
+        ) else {
+            continue;
+        };
+
+        // How much ink turned up against how much was asked for. A mark where
+        // almost nothing was found did not print, and measuring where its
+        // middle is would be measuring noise.
+        let found_mm2 = ink_mm2(weight, threshold, registration.px_per_mm);
+        let confidence = if mark.ink_mm2 > 0.0 {
+            (found_mm2 / mark.ink_mm2).min(2.0)
+        } else {
+            0.0
+        };
+
+        landings.push(Landing {
+            intended: mark.centre_mm,
+            observed,
+            confidence,
+        });
+    }
+    landings
+}
+
+/// The least ink that has to turn up before a reading is believed.
+///
+/// Well under what the delta asked for means the addition did not print at all,
+/// and the middle of an empty window is the middle of the window rather than
+/// the middle of anything.
+pub const BELIEVABLE: f64 = 0.4;
+
+/// The most ink that can turn up before a reading is thrown out.
+///
+/// More in the window than the delta put there means something else is in it —
+/// a line of the document the addition was written over. The middle of two
+/// marks is the middle of neither, so that reading is dropped rather than
+/// averaged in with the good ones. Set clear of 1 because toner spreads: a
+/// printer laying down a little more than was asked for is normal.
+pub const CROWDED: f64 = 1.6;
+
+/// Work out this printer's error from where a job's additions landed.
+///
+/// No correction is passed in, and that is deliberate. The intended positions
+/// are read off the delta as it was rendered — the page the printer was
+/// actually handed — so a correction the delta was written with is already in
+/// them. Fitting from there to where the ink came out gives what the printer
+/// does to a page it is given, which is exactly what a profile holds.
+///
+/// This is what makes the second measurement safe. Once a profile is
+/// correcting 1.2 mm and the ink is therefore landing on the mark, learning
+/// again asks the printer to place a page whose content sits 1.2 mm back, sees
+/// it come out on the mark, and concludes the printer still shifts by 1.2 mm.
+/// A reading taken against the *requested* position instead would conclude the
+/// printer was perfect, drop the correction, and put the error straight back.
+pub fn learn_from_landings(
+    landings: &[Landing],
+    page: PageSize,
+    name: &str,
+) -> Result<Profile, CalibrateError> {
+    let believed: Vec<&Landing> = landings.iter().filter(|l| l.believable()).collect();
+
+    // Three, for the same reason the target needs three: two points and a
+    // similarity is four numbers through four numbers, which fits exactly and
+    // says nothing about whether either reading was any good.
+    if believed.len() < 3 {
+        let crowded = landings.iter().filter(|l| l.confidence > CROWDED).count();
+        let crowding = if crowded > 0 {
+            format!(
+                "\n    {crowded} of them landed on something already on the \
+                 sheet, which cannot be measured — the middle of two marks is \
+                 the middle of neither."
+            )
+        } else {
+            String::new()
+        };
+        return Err(CalibrateError::Invalid(format!(
+            "only {} of the {} additions on this sheet could be measured, and \
+             three is the fewest a shift, a rotation and a scale can be fitted \
+             from.{crowding}\n    A job with more separate additions on clear \
+             paper, or the calibration target, will do it.",
+            believed.len(),
+            landings.len()
+        )));
+    }
+
+    let nominal: Vec<(f64, f64)> = believed.iter().map(|l| l.intended).collect();
+    let observed: Vec<(f64, f64)> = believed.iter().map(|l| l.observed).collect();
+
+    let fit = solve_similarity(&nominal, &observed, &page)
+        .map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+
+    Ok(Profile {
+        name: name.to_string(),
+        error: fit.transform,
+        page,
+        rms_residual_mm: Some(fit.rms_residual_mm),
+        max_residual_mm: Some(fit.max_residual_mm),
+        n_points: believed.len(),
+        created: now(),
+        notes: format!(
+            "learnt from a printed job, {} of {} additions measured",
+            believed.len(),
+            landings.len()
+        ),
+    })
+}
+
 /// `25` rather than `25.0`, the way the label reads on paper.
 fn trim(value: f64) -> String {
     if (value - value.round()).abs() < 1e-9 {

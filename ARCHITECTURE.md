@@ -16,7 +16,7 @@ went with it.
 | `diff`     | What ink is new, what ink is gone |
 | `delta`    | Writing the delta PDF, raster or vector |
 | `safety`   | The checks that run before paper is committed |
-| `calibrate`| The two-pass target, the fit, and the stored profiles |
+| `calibrate`| The two-pass target, the fit, learning from a printed job, and the stored profiles |
 | `pipeline` | The whole job, end to end |
 | `scan`     | Finding the sheet in a scan and measuring how it sits |
 | `letters`  | Reading the ink off a registered scan |
@@ -654,6 +654,42 @@ through both readings and says nothing about whether either was any good.
 
 On a synthetic sheet with a known 0.76 mm offset, the five crosshairs come back
 within 0.05 mm on average. A ruler and a good eye do perhaps ten times worse.
+
+### Learning from a job instead of from a target
+
+That still leaves an errand somebody has to decide to run, and most never will.
+But the target sheet is not special: it is marks in known places, and so is
+every delta Onionskin has ever written. `marks_on_delta` renders the delta at
+200 dpi, groups its ink into regions the same way a comparison does, and gives
+each one a centre; `measure_landings` looks for that ink in a scan of the sheet
+it was printed on; `learn_from_landings` fits the two sets together. The
+printer gets measured by somebody using the program.
+
+Two details decide whether the number is worth having.
+
+The first is that both halves of a landing must be measured the same way. The
+intended position started as a region's bounding-box centre while the observed
+position was an ink-weighted centroid, and for a word like "14 March" — a tall
+M beside short letters — those are a third of a millimetre apart. The
+difference went into the profile as though the printer had caused it: rms
+residual 0.255 mm on a pure translation, and scale wrong by 0.086% on a
+simulation with no scale error in it at all. One `ink_centre` for both sides
+took the residual to 0.047 mm and the scale error to 0.001%.
+
+The second is that the correction already in force must be measured *through*,
+not subtracted out. The marks are read off the delta as rendered, so a
+correction the delta was written with is already in them: what is fitted is
+"the page the printer was handed" against "what came off the printer", which is
+the printer's own behaviour whether or not anything was being corrected. Read
+the *requested* positions instead and a printer that is now landing on the mark
+looks like a printer with no error, the correction is dropped, and the error
+comes straight back — calibration that oscillates instead of converging.
+
+A reading is used only if between 40% and 160% of the ink asked for turns up
+there. Below that the addition did not print and the middle of an empty window
+means nothing; above it, something else is in the window — a line of the
+document the addition was written across — and the middle of two marks is the
+middle of neither.
 
 ## Publishing an apt repository
 

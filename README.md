@@ -607,6 +607,49 @@ Uncalibrated, a second pass through a sheet-fed printer lands within about
 **±2 mm**. That is fine for a signature and useless for filling a pre-printed
 box. Calibration gets it under **±0.5 mm**.
 
+There are two ways to get there. The second one is a chore, so start with the
+first.
+
+### Learn from a job you were printing anyway
+
+Every delta ever printed is a set of marks in known places. So the sheet that
+comes out of the printer *is* a calibration target — scan it afterwards and
+Onionskin reads its own error off it:
+
+```bash
+onionskin write invoice.pdf --at '30,40:Paid' -o delta.pdf   # print this
+onionskin calibrate learn scan.png --delta delta.pdf --name office
+```
+
+```
+A4 (210.0×297.0 mm) at 200 dpi, sheet turned -0.00°, top-left at (60, 60) px
+
+Where the additions landed:
+    40.1,38.5   mm   out by 1.38 mm
+   160.9,43.4   mm   out by 1.30 mm
+    37.5,248.7  mm   out by 1.43 mm
+   150.9,253.6  mm   out by 1.36 mm
+
+What this printer does:
+profile 'office'
+  printer error : shift +1.11, +0.80 mm, rotate -0.010° cw, scale 1.00001
+  correction    : shift -1.11, -0.80 mm, rotate +0.010° cw, scale 0.99999
+  fit           : 4 points, rms 0.047 mm, max 0.058 mm
+```
+
+No target sheet, no ruler, no separate errand — one scan of work you were doing
+regardless. `--dry-run` shows the numbers without saving. Run it again next
+week and it gets better: the correction already in force is measured *through*,
+so a printer that is now landing on the mark is understood as a printer being
+corrected, not a printer with no error.
+
+It needs at least three additions far enough apart to fit from — a single word
+in one corner says where the paper sat and nothing about rotation or scale. An
+addition that landed on top of existing ink is left out rather than guessed at,
+because the middle of two overlapping marks is the middle of neither.
+
+### Or measure a target sheet, once
+
 ```bash
 onionskin calibrate target -o target.pdf                 # A4 by default
 onionskin calibrate target -o target.pdf --page legal    # or a5, a3, tabloid…

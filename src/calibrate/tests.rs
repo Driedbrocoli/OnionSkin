@@ -1223,3 +1223,248 @@ fn a_target_printed_twice_and_scanned_gives_back_the_offset() {
         assert!(reading.confidence > 0.85, "{}", reading.describe());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Learning from an ordinary job
+// ---------------------------------------------------------------------------
+
+/// A scan of a sheet with square blots at the given places, printed by a
+/// printer whose error is `error`.
+fn sheet_with_blots(page: PageSize, at_mm: &[(f64, f64)], error: Similarity) -> (image::GrayImage, crate::scan::ScanRegistration) {
+    let px_per_mm = 300.0 / 25.4;
+    let width = (page.width_mm * px_per_mm).round() as u32;
+    let height = (page.height_mm * px_per_mm).round() as u32;
+    let mut scan = image::GrayImage::from_pixel(width, height, image::Luma([255]));
+
+    for (x_mm, y_mm) in at_mm {
+        // Where the printer really put it.
+        let (px_mm, py_mm) = error.apply((*x_mm, *y_mm), &page);
+        let cx = (px_mm * px_per_mm) as i64;
+        let cy = (py_mm * px_per_mm) as i64;
+        let arm = (1.5 * px_per_mm) as i64;
+        for dy in -arm..=arm {
+            for dx in -arm..=arm {
+                let (x, y) = (cx + dx, cy + dy);
+                if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
+                    scan.put_pixel(x as u32, y as u32, image::Luma([0]));
+                }
+            }
+        }
+    }
+
+    let registration = crate::scan::ScanRegistration {
+        page,
+        px_per_mm,
+        skew_deg: 0.0,
+        origin_px: (0.0, 0.0),
+    };
+    (scan, registration)
+}
+
+/// The marks a delta asked for, as squares round the given places.
+fn asked_for(at_mm: &[(f64, f64)]) -> Vec<Asked> {
+    at_mm
+        .iter()
+        .map(|(x, y)| Asked {
+            centre_mm: (*x, *y),
+            bounds_mm: (x - 1.5, y - 1.5, x + 1.5, y + 1.5),
+            ink_mm2: 9.0,
+        })
+        .collect()
+}
+
+/// A mark read off a rendered delta is centred on its ink, not on its box.
+///
+/// The two are the same point only for something symmetrical. Here the left
+/// half of the box is black and the right half is paper, so the box's middle
+/// and the ink's middle are a quarter of the box apart — and it is the ink's
+/// middle that must come back, because that is what the scan will be measured
+/// against.
+#[test]
+fn a_mark_is_centred_on_its_ink_rather_than_on_its_box() {
+    let dpi = 100.0;
+    let px_per_mm = dpi / 25.4;
+    let (width, height) = (40usize, 20usize);
+    let mut gray = vec![255u8; width * height];
+    for y in 0..height {
+        for x in 0..width / 2 {
+            gray[y * width + x] = 0;
+        }
+    }
+    let region = crate::diff::Region {
+        x0_mm: 0.0,
+        y0_mm: 0.0,
+        x1_mm: width as f64 / px_per_mm,
+        y1_mm: height as f64 / px_per_mm,
+        ink_mm2: 0.0,
+        px_bbox: (0, 0, width, height),
+    };
+
+    let marks = marks_asked_for(&gray, width, dpi, &[region], 128);
+    assert_eq!(marks.len(), 1);
+    let mark = marks[0];
+    let box_middle = (region.x1_mm / 2.0, region.y1_mm / 2.0);
+    assert!(
+        (mark.centre_mm.0 - box_middle.0 / 2.0).abs() < 0.1,
+        "centred on the box at {:?} instead of on the ink",
+        mark.centre_mm
+    );
+    assert!((mark.centre_mm.1 - box_middle.1).abs() < 0.1, "{mark:?}");
+    // Half the box is solid ink, and that is what it should report.
+    let half = region.x1_mm * region.y1_mm / 2.0;
+    assert!((mark.ink_mm2 - half).abs() < 0.2, "{mark:?} against {half}");
+}
+
+/// A mark with nothing in it is dropped rather than reported at the origin.
+#[test]
+fn a_mark_with_no_ink_in_it_is_not_a_mark() {
+    let region = crate::diff::Region {
+        x0_mm: 0.0,
+        y0_mm: 0.0,
+        x1_mm: 5.0,
+        y1_mm: 5.0,
+        ink_mm2: 0.0,
+        px_bbox: (0, 0, 20, 20),
+    };
+    let gray = vec![255u8; 20 * 20];
+    assert!(marks_asked_for(&gray, 20, 100.0, &[region], 128).is_empty());
+}
+
+#[test]
+fn a_shift_the_printer_introduced_is_measured_off_an_ordinary_job() {
+    // The whole point: every delta ever printed is a set of marks in known
+    // places, so calibration can happen by using the program rather than by
+    // sitting down to do it.
+    let page = A4;
+    let places = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0), (160.0, 250.0)];
+    let real_error = Similarity {
+        dx_mm: 0.8,
+        dy_mm: -0.5,
+        rotation_deg: 0.0,
+        scale: 1.0,
+    };
+    let (scan, registration) = sheet_with_blots(page, &places, real_error);
+
+    let landings = measure_landings(&scan, &registration, &asked_for(&places), 128);
+    assert_eq!(landings.len(), 4, "{landings:?}");
+    for landing in &landings {
+        assert!(landing.confidence >= BELIEVABLE, "{landing:?}");
+        // Each one missed by about the shift that was applied.
+        assert!((landing.miss_mm() - 0.943).abs() < 0.2, "{landing:?}");
+    }
+
+    // And the fit recovers the printer's error, to a tenth of a millimetre.
+    let learnt = learn_from_landings(&landings, page, "office").unwrap();
+    assert!((learnt.error.dx_mm - 0.8).abs() < 0.1, "{:?}", learnt.error);
+    assert!((learnt.error.dy_mm - -0.5).abs() < 0.1, "{:?}", learnt.error);
+    assert_eq!(learnt.n_points, 4);
+}
+
+#[test]
+fn a_correction_already_applied_is_not_thrown_away() {
+    // A printer that is already being corrected would otherwise appear to
+    // have no error at all, and the next profile would undo the correction
+    // that was working.
+    let page = A4;
+    let places = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0), (160.0, 250.0)];
+    let error = Similarity {
+        dx_mm: 1.0,
+        dy_mm: 0.0,
+        rotation_deg: 0.0,
+        scale: 1.0,
+    };
+    // The delta was written with the correction for that error, so its content
+    // sits a millimetre back from where it was asked for…
+    let correction = error.inverse();
+    let rendered: Vec<(f64, f64)> = places
+        .iter()
+        .map(|p| correction.apply(*p, &page))
+        .collect();
+    // …and the printer's shift then puts the ink on the mark, which is the
+    // whole point of having the profile. A scan of this sheet looks perfect.
+    let (scan, registration) = sheet_with_blots(page, &places, Similarity::IDENTITY);
+
+    // What is measured against is the delta as rendered, not as asked for.
+    let landings = measure_landings(&scan, &registration, &asked_for(&rendered), 128);
+    let learnt = learn_from_landings(&landings, page, "office").unwrap();
+
+    // The printer's own error is still about a millimetre — not nothing.
+    assert!(
+        (learnt.error.dx_mm - 1.0).abs() < 0.15,
+        "the correction was thrown away: {:?}",
+        learnt.error
+    );
+}
+
+#[test]
+fn an_addition_that_did_not_print_is_not_measured() {
+    // A region where almost no ink turned up did not print, and measuring
+    // where its middle is would be measuring the paper.
+    let page = A4;
+    let places = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0)];
+    // Only two of the three were actually printed.
+    let (scan, registration) = sheet_with_blots(page, &places[..2], Similarity::IDENTITY);
+
+    let landings = measure_landings(&scan, &registration, &asked_for(&places), 128);
+    let believed = landings.iter().filter(|l| l.believable()).count();
+    assert_eq!(believed, 2, "{landings:?}");
+
+    // And two is not enough to fit from, so it says so rather than guessing.
+    let said = learn_from_landings(&landings, page, "office")
+        .unwrap_err()
+        .to_string();
+    assert!(said.contains("three is the fewest"), "{said}");
+}
+
+/// An addition written over something already printed is not measured.
+///
+/// The centroid of a window holding both the addition and the line it was
+/// written across is the middle of neither, and it would be fitted to as though
+/// it were a real reading — a bad number carried into every later delta,
+/// arrived at confidently.
+#[test]
+fn an_addition_that_landed_on_existing_ink_is_left_out() {
+    let page = A4;
+    let places = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0), (160.0, 250.0)];
+    let (mut scan, registration) = sheet_with_blots(page, &places, Similarity::IDENTITY);
+
+    // A line of the document running through the last of them.
+    let px_per_mm = registration.px_per_mm;
+    let y = (250.0 * px_per_mm) as u32;
+    for x in ((150.0 * px_per_mm) as u32)..((172.0 * px_per_mm) as u32) {
+        for dy in 0..(1.2 * px_per_mm) as u32 {
+            scan.put_pixel(x, y + dy, image::Luma([0]));
+        }
+    }
+
+    let landings = measure_landings(&scan, &registration, &asked_for(&places), 128);
+    assert_eq!(landings.len(), 4, "{landings:?}");
+    let crowded = &landings[3];
+    assert!(
+        crowded.confidence > CROWDED,
+        "the line through it was not noticed: {crowded:?}"
+    );
+    assert!(!crowded.believable());
+    assert!(
+        crowded.doubt().unwrap().contains("already on the sheet"),
+        "{:?}",
+        crowded.doubt()
+    );
+
+    // Three clean readings are still enough to fit from, and the answer is the
+    // one the three clean marks say — not one dragged sideways by the fourth.
+    let learnt = learn_from_landings(&landings, page, "office").unwrap();
+    assert_eq!(learnt.n_points, 3);
+    assert!(learnt.error.dx_mm.abs() < 0.15, "{:?}", learnt.error);
+    assert!(learnt.error.dy_mm.abs() < 0.15, "{:?}", learnt.error);
+}
+
+#[test]
+fn a_blank_sheet_teaches_nothing_rather_than_teaching_nonsense() {
+    let page = A4;
+    let places = [(40.0, 40.0), (160.0, 40.0), (40.0, 250.0)];
+    let (scan, registration) = sheet_with_blots(page, &[], Similarity::IDENTITY);
+    let landings = measure_landings(&scan, &registration, &asked_for(&places), 128);
+    assert!(landings.is_empty(), "{landings:?}");
+    assert!(learn_from_landings(&landings, page, "x").is_err());
+}

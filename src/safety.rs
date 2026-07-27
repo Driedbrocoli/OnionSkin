@@ -436,8 +436,13 @@ pub fn check_calibration(calibrated: bool, profile_name: Option<&str>) -> Vec<Ch
         "No calibration profile — expect roughly ±2 mm of registration error.".into(),
     )
     .with_detail(
-        "Run 'onionskin calibrate target' once per printer to bring that under \
-         ±0.5 mm."
+        // Two routes, easiest first. Somebody about to feed a sheet back in is
+        // exactly the person who can calibrate without doing anything extra:
+        // the sheet they are about to print is the measurement.
+        "Print this delta, scan the sheet afterwards, and run 'onionskin calibrate \
+         learn scan.png --delta <this file>'.\n    That measures the printer off \
+         the job itself. Or do it up front, once, with 'onionskin calibrate \
+         target'. Either brings it under ±0.5 mm."
             .into(),
     )]
 }

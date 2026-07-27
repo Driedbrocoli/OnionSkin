@@ -309,7 +309,10 @@ fn an_uncalibrated_run_says_what_to_expect() {
     assert_eq!(codes(&checks), vec!["uncalibrated"]);
     assert_eq!(checks[0].severity, Severity::Note);
     assert!(checks[0].message.contains("±2 mm"));
-    assert!(checks[0].detail.contains("calibrate target"));
+    // Both routes, because the person reading this has a sheet in their hand
+    // and the easier one costs them nothing extra.
+    assert!(checks[0].detail.contains("calibrate learn"), "{:?}", checks[0]);
+    assert!(checks[0].detail.contains("calibrate target"), "{:?}", checks[0]);
 }
 
 #[test]
