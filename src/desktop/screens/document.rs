@@ -336,6 +336,21 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
             state.page += 1;
             deselect(state);
         }
+        // Deleting a piece of text is one click here, which makes a way back
+        // matter more than it does on the command line. The button appears
+        // only when there is something to go back to, so it never offers to
+        // undo a document nobody has touched.
+        if let Some(path) = &state.path {
+            let can = onionskin::document::can_undo(path);
+            if ui
+                .add_enabled(can, egui::Button::new("Undo"))
+                .on_hover_text("Put the document back as it was before the last change")
+                .on_disabled_hover_text("Nothing has changed since this was opened")
+                .clicked()
+            {
+                undo_last(state);
+            }
+        }
         if ui.button("Add a blank page").clicked() {
             doc.pages += 1;
             state.page = doc.pages;
@@ -808,6 +823,33 @@ fn save(state: &mut State, doc: &Document) {
     let Some(path) = &state.path else { return };
     match doc.save(path) {
         Ok(()) => state.save_error = None,
+        Err(e) => state.save_error = Some(e.to_string()),
+    }
+}
+
+/// Put the document back as it was before the last change, and show it.
+///
+/// The document on screen has to be re-read afterwards rather than kept: what
+/// is in memory is the version being undone, and drawing it over the restored
+/// file would put the mistake straight back the next time anything was saved.
+fn undo_last(state: &mut State) {
+    let Some(path) = state.path.clone() else {
+        return;
+    };
+    match onionskin::document::undo(&path) {
+        Ok(()) => match Document::load(&path) {
+            Ok(document) => {
+                state.doc = Some(document);
+                state.save_error = None;
+                deselect(state);
+                // The page being looked at may not exist in the version that
+                // came back.
+                if let Some(doc) = &state.doc {
+                    state.page = state.page.clamp(1, doc.pages.max(1));
+                }
+            }
+            Err(e) => state.save_error = Some(e.to_string()),
+        },
         Err(e) => state.save_error = Some(e.to_string()),
     }
 }
@@ -1559,5 +1601,87 @@ mod tests {
         assert_eq!(first_line("Dear Sir\nYours faithfully"), "Dear Sir…");
         let long = "x".repeat(80);
         assert!(first_line(&long).ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod undo_tests {
+    use super::*;
+
+    /// A document on disk with one piece of text on it.
+    fn a_document(dir: &std::path::Path) -> (State, PathBuf) {
+        let path = dir.join("d.onionskin");
+        let mut doc = Document::blank(onionskin::geometry::parse_page("a4").unwrap(), 1);
+        doc.add(onionskin::document::Item {
+            id: 0,
+            page: 1,
+            x_mm: 25.0,
+            y_mm: 40.0,
+            text: "First".into(),
+            size_pt: 11.0,
+            font: "Helvetica".into(),
+            width_mm: None,
+            rotation_deg: 0.0,
+            colour: "#000000".into(),
+            leading: 1.2,
+        })
+        .unwrap();
+        doc.save(&path).unwrap();
+        let state = State {
+            path: Some(path.clone()),
+            doc: Some(Document::load(&path).unwrap()),
+            ..State::default()
+        };
+        (state, path)
+    }
+
+    #[test]
+    fn undoing_reloads_rather_than_keeping_what_was_on_screen() {
+        // What is in memory is the version being undone. Drawing it over the
+        // restored file would put the mistake straight back the next time
+        // anything was saved.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, path) = a_document(dir.path());
+
+        let mut doc = state.doc.clone().unwrap();
+        doc.remove(1).unwrap();
+        doc.save(&path).unwrap();
+        state.doc = Some(doc);
+        assert_eq!(state.doc.as_ref().unwrap().items.len(), 0);
+
+        undo_last(&mut state);
+        assert_eq!(
+            state.doc.as_ref().unwrap().items.len(),
+            1,
+            "the screen still shows the version that was undone"
+        );
+        assert_eq!(Document::load(&path).unwrap().items.len(), 1);
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
+    fn undoing_with_nothing_to_go_back_to_says_so_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = a_document(dir.path());
+        undo_last(&mut state);
+        assert!(state.save_error.is_some(), "no complaint was made");
+        assert_eq!(state.doc.as_ref().unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn the_page_being_looked_at_survives_a_document_that_shrank() {
+        // The version that comes back may have fewer pages than the one on
+        // screen, and page four of a two-page document is nowhere.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, path) = a_document(dir.path());
+        let mut doc = state.doc.clone().unwrap();
+        doc.pages = 4;
+        doc.save(&path).unwrap();
+        state.doc = Some(doc);
+        state.page = 4;
+
+        undo_last(&mut state);
+        let pages = state.doc.as_ref().unwrap().pages;
+        assert!(state.page >= 1 && state.page <= pages, "{} of {pages}", state.page);
     }
 }
