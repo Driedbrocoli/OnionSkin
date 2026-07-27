@@ -348,7 +348,7 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
                 .on_disabled_hover_text("Nothing has changed since this was opened")
                 .clicked()
             {
-                undo_last(state);
+                undo_last(state, doc);
             }
         }
         if ui.button("Add a blank page").clicked() {
@@ -832,21 +832,25 @@ fn save(state: &mut State, doc: &Document) {
 /// The document on screen has to be re-read afterwards rather than kept: what
 /// is in memory is the version being undone, and drawing it over the restored
 /// file would put the mistake straight back the next time anything was saved.
-fn undo_last(state: &mut State) {
+///
+/// The restored document goes into `doc` — the one the caller took out of
+/// `state` for the frame — and *not* into `state.doc`. Writing it to
+/// `state.doc` looks right and is not: `show` puts its own `doc` back when
+/// this returns, which would quietly overwrite the restored version with the
+/// mistake and undo the undo.
+fn undo_last(state: &mut State, doc: &mut Document) {
     let Some(path) = state.path.clone() else {
         return;
     };
     match onionskin::document::undo(&path) {
         Ok(()) => match Document::load(&path) {
-            Ok(document) => {
-                state.doc = Some(document);
+            Ok(restored) => {
+                *doc = restored;
                 state.save_error = None;
                 deselect(state);
                 // The page being looked at may not exist in the version that
                 // came back.
-                if let Some(doc) = &state.doc {
-                    state.page = state.page.clamp(1, doc.pages.max(1));
-                }
+                state.page = state.page.clamp(1, doc.pages.max(1));
             }
             Err(e) => state.save_error = Some(e.to_string()),
         },
@@ -1635,6 +1639,20 @@ mod undo_tests {
         (state, path)
     }
 
+    /// Run `undo_last` the way `show` really runs it: on the document taken
+    /// out of `state` for the frame, and put back into `state` afterwards.
+    ///
+    /// The first version of this test called `undo_last(&mut state)` and
+    /// asserted on `state.doc`. It passed, and the button was still broken —
+    /// `show` put its own copy back over the restored one the moment the
+    /// frame ended, so the file went back and the screen did not. Anything
+    /// testing this has to go through the same take-and-put-back.
+    fn undo_as_the_button_does(state: &mut State) {
+        let mut doc = state.doc.take().expect("a document is open");
+        undo_last(state, &mut doc);
+        state.doc = Some(doc);
+    }
+
     #[test]
     fn undoing_reloads_rather_than_keeping_what_was_on_screen() {
         // What is in memory is the version being undone. Drawing it over the
@@ -1649,7 +1667,7 @@ mod undo_tests {
         state.doc = Some(doc);
         assert_eq!(state.doc.as_ref().unwrap().items.len(), 0);
 
-        undo_last(&mut state);
+        undo_as_the_button_does(&mut state);
         assert_eq!(
             state.doc.as_ref().unwrap().items.len(),
             1,
@@ -1663,7 +1681,7 @@ mod undo_tests {
     fn undoing_with_nothing_to_go_back_to_says_so_and_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let (mut state, _) = a_document(dir.path());
-        undo_last(&mut state);
+        undo_as_the_button_does(&mut state);
         assert!(state.save_error.is_some(), "no complaint was made");
         assert_eq!(state.doc.as_ref().unwrap().items.len(), 1);
     }
@@ -1680,8 +1698,32 @@ mod undo_tests {
         state.doc = Some(doc);
         state.page = 4;
 
-        undo_last(&mut state);
+        undo_as_the_button_does(&mut state);
         let pages = state.doc.as_ref().unwrap().pages;
         assert!(state.page >= 1 && state.page <= pages, "{} of {pages}", state.page);
+    }
+
+    #[test]
+    fn what_is_on_screen_after_an_undo_is_what_a_save_would_write() {
+        // The bug this closes: the file went back, the window did not, and
+        // the next save wrote the undone mistake straight back to disk. The
+        // round trip is the only assertion that catches it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, path) = a_document(dir.path());
+
+        let mut doc = state.doc.clone().unwrap();
+        doc.remove(1).unwrap();
+        doc.save(&path).unwrap();
+        state.doc = Some(doc);
+
+        undo_as_the_button_does(&mut state);
+
+        // Save what the window is holding, exactly as any later edit would.
+        state.doc.as_ref().unwrap().save(&path).unwrap();
+        assert_eq!(
+            Document::load(&path).unwrap().items.len(),
+            1,
+            "saving after an undo put the mistake back"
+        );
     }
 }

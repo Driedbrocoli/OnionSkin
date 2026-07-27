@@ -194,6 +194,19 @@ fn show_editor(state: &mut State, doc: &mut Document, room: &mut Room) -> bool {
             state.page += 1;
             state.drafting = None;
         }
+        // Removing a shape is one click in the list below, so a way back
+        // belongs here for the same reason it does on the document screen.
+        if let Some(path) = &state.path {
+            let can = onionskin::document::can_undo(path);
+            if ui
+                .add_enabled(can, egui::Button::new("Undo"))
+                .on_hover_text("Put the document back as it was before the last change")
+                .on_disabled_hover_text("Nothing has changed since this was opened")
+                .clicked()
+            {
+                undo_last(state, doc);
+            }
+        }
     });
     room.ui.add_space(8.0);
 
@@ -520,6 +533,30 @@ fn show_shape_list(state: &mut State, doc: &mut Document, room: &mut Room) {
     }
 }
 
+/// Put the document back as it was before the last change, and show it.
+///
+/// The restored document goes into `doc` — the one `show` took out of `state`
+/// for the frame — and not into `state.doc`, which `show` would overwrite
+/// with the version being undone the moment this returns. See
+/// [`super::document::undo_last`], which this mirrors.
+fn undo_last(state: &mut State, doc: &mut Document) {
+    let Some(path) = state.path.clone() else {
+        return;
+    };
+    match onionskin::document::undo(&path) {
+        Ok(()) => match Document::load(&path) {
+            Ok(restored) => {
+                *doc = restored;
+                state.save_error = None;
+                state.drafting = None;
+                state.page = state.page.clamp(1, doc.pages.max(1));
+            }
+            Err(e) => state.save_error = Some(e.to_string()),
+        },
+        Err(e) => state.save_error = Some(e.to_string()),
+    }
+}
+
 /// Write the document back to disk. There is no separate Save button — see
 /// `document::save` for why that is right rather than merely convenient.
 fn save(state: &mut State, doc: &Document) {
@@ -825,5 +862,90 @@ mod tests {
         };
         commit(&mut state, &mut doc, &real);
         assert_eq!(doc.shapes.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod undo_tests {
+    use super::*;
+
+    fn temp_path() -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "onionskin-desktop-test-draw-undo-{}-{n}.onionskin",
+            std::process::id()
+        ))
+    }
+
+    /// Run `undo_last` the way `show` really runs it — taken out of `state`
+    /// for the frame and put back after. Asserting on `state.doc` without
+    /// this passes while the button is broken; see `document`'s tests.
+    fn undo_as_the_button_does(state: &mut State) {
+        let mut doc = state.doc.take().expect("a document is open");
+        undo_last(state, &mut doc);
+        state.doc = Some(doc);
+    }
+
+    fn a_drawn_document() -> (State, PathBuf) {
+        let path = temp_path();
+        let mut doc = Document::blank(
+            onionskin::geometry::PageSize {
+                width_mm: 210.0,
+                height_mm: 297.0,
+            },
+            1,
+        );
+        doc.draw(Shape {
+            id: 0,
+            page: 1,
+            kind: ShapeKind::Line {
+                x1_mm: 20.0,
+                y1_mm: 100.0,
+                x2_mm: 190.0,
+                y2_mm: 100.0,
+            },
+            stroke: Some("black".into()),
+            fill: None,
+            width_mm: 0.4,
+            dash_mm: None,
+        })
+        .unwrap();
+        doc.save(&path).unwrap();
+        let state = State {
+            path: Some(path.clone()),
+            doc: Some(Document::load(&path).unwrap()),
+            ..State::default()
+        };
+        (state, path)
+    }
+
+    #[test]
+    fn a_shape_removed_by_mistake_comes_back() {
+        // Removing a shape is one click, so there has to be a way back.
+        let (mut state, path) = a_drawn_document();
+        let mut doc = state.doc.clone().unwrap();
+        doc.erase_shape(1).unwrap();
+        doc.save(&path).unwrap();
+        state.doc = Some(doc);
+        assert_eq!(state.doc.as_ref().unwrap().shapes.len(), 0);
+
+        undo_as_the_button_does(&mut state);
+        assert_eq!(state.doc.as_ref().unwrap().shapes.len(), 1);
+        assert_eq!(Document::load(&path).unwrap().shapes.len(), 1);
+
+        // And what is on screen is what a later save would write.
+        state.doc.as_ref().unwrap().save(&path).unwrap();
+        assert_eq!(Document::load(&path).unwrap().shapes.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn undoing_with_nothing_to_go_back_to_says_so() {
+        let (mut state, path) = a_drawn_document();
+        undo_as_the_button_does(&mut state);
+        assert!(state.save_error.is_some(), "no complaint was made");
+        assert_eq!(state.doc.as_ref().unwrap().shapes.len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 }
