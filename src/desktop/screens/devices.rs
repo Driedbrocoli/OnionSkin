@@ -311,7 +311,6 @@ pub fn show(state: &mut State, room: &mut Room) {
                         device: Some(uri.clone()),
                         resolution: request.resolution,
                         colour: request.colour,
-                        ..Default::default()
                     },
                     &target,
                 )
