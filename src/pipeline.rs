@@ -544,6 +544,19 @@ pub(crate) struct Sheet {
     pub images: Vec<crate::pdf::PlacedImage>,
 }
 
+impl Sheet {
+    /// Whether anything at all is going onto this sheet.
+    ///
+    /// A sheet with nothing on it needs no drawing, no reading back and no
+    /// looking at the page underneath: the delta page was written from this
+    /// same empty list a moment ago, so it is blank by construction. Asking
+    /// anyway made the work grow with the length of the document instead of
+    /// with the size of the edit.
+    pub fn has_anything(&self) -> bool {
+        !self.items.is_empty() || !self.shapes.is_empty() || !self.images.is_empty()
+    }
+}
+
 pub(crate) fn compose_onto(
     source: &Path,
     plan: Plan<'_>,
@@ -622,19 +635,26 @@ pub(crate) fn compose_onto(
     // drawing it two hundred times to ask the same question would be absurd.
     let mut beneath: std::collections::BTreeMap<usize, (Vec<u8>, usize)> =
         std::collections::BTreeMap::new();
-    for sheet in sheets {
+    // Only the sheets something is going onto. A forty-page document with one
+    // change has thirty-nine pages nobody is asking a question about, and
+    // drawing them to answer it anyway made the work grow with the length of
+    // the document rather than with the size of the edit.
+    let want_every_page = options.preview_dir.is_some();
+    for sheet in sheets.iter().filter(|s| want_every_page || s.has_anything()) {
         if let std::collections::btree_map::Entry::Vacant(slot) = beneath.entry(sheet.from) {
             let small = doc.render(sheet.from, safety::BENEATH_DPI)?;
             slot.insert((small.gray, small.width));
         }
     }
 
-    // What printing these pages whole would cost in ink, summed over every
-    // sheet — which for a batch means the same page two hundred times, and
-    // rightly so: printing them whole would mean printing it two hundred
-    // times. Counted off the same small rendering, so it is free.
+    // What printing those pages whole would cost in ink, summed over every
+    // sheet that carries something — which for a batch means the same page
+    // two hundred times, and rightly so: printing them whole would mean
+    // printing it two hundred times. Counted off the same small rendering,
+    // so it is free.
     let whole_page_ink_mm2 = sheets
         .iter()
+        .filter(|s| s.has_anything())
         .filter_map(|sheet| beneath.get(&sheet.from))
         .map(|(gray, width)| {
             ink_area_mm2(gray, *width, safety::BENEATH_DPI, options.diff.ink_threshold)
@@ -642,6 +662,19 @@ pub(crate) fn compose_onto(
         .sum();
 
     for (index, size) in sizes.iter().enumerate() {
+        // A sheet nothing was put on cannot have ink on it: the delta page was
+        // written from this same empty list a moment ago. Drawing it at
+        // printing resolution to discover that costs fifteen million pixels
+        // to learn nothing, and a forty-page document with one change was
+        // paying it thirty-nine times.
+        // …unless proofs were asked for, in which case every page gets one,
+        // because somebody who asked to see all forty pages asked to see all
+        // forty pages.
+        if !sheets[index].has_anything() && options.preview_dir.is_none() {
+            diffs.push(PageDiff::blank(*size, options.dpi, index));
+            continue;
+        }
+
         let drawn = composed.render(index, options.dpi)?;
         let added = crate::diff::ink_mask(
             &drawn.gray,
