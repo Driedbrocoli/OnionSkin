@@ -1888,6 +1888,11 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
+    // Recorded like any other delta, because it is one — and of all of them
+    // this is the one worth being able to look up. A sheet that went out of
+    // the building with somebody's salary blacked out is exactly the sheet
+    // somebody asks about later, and `history` promises every delta is in it.
+    note_the_delta(&args.document, &output, shapes.len(), outcome.pages.len());
     println!(
         "\nWhat this does, and what it does not\n  \
          Printing this lays solid toner over those areas. It hides them from \
