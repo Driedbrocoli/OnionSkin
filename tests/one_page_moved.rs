@@ -188,10 +188,12 @@ fn the_instructions_name_both_files_and_both_sets_of_sheets() {
     assert!(said.contains("feed sheets 1, 3 and 4 back in"), "{said}");
     assert!(said.contains("print sheet 2 on fresh paper"), "{said}");
     // The summary counts what the delta carries, not what the edit changed —
-    // page two's additions were blanked along with the rest of it.
+    // page two's additions were blanked along with the rest of it. Written the
+    // way the instructions above write it: the same three sheets named twice in
+    // one answer, "1, 3 and 4" both times.
     assert!(
-        said.contains("3 additions on pages 1, 3, 4"),
-        "the summary counted a blanked page: {said}"
+        said.contains("3 additions on pages 1, 3 and 4"),
+        "the summary counted a blanked page, or spelled the list its own way: {said}"
     );
     // And it is no longer a blocker, because there is something worth printing.
     assert!(!said.contains("BLOCKER"), "{said}");
@@ -347,4 +349,161 @@ fn the_fresh_pages_cannot_be_written_over_an_input() {
         assert!(!refused.ok, "writing over the {name} was allowed");
         assert!(refused.stderr.contains("refusing"), "{}", refused.said());
     }
+}
+
+/// A document that also lost a page is not printable onto the sheets somebody
+/// has, whichever pages come out of it. Splitting it anyway would write a file
+/// called "print these fresh" for a job nobody should print — which reads as a
+/// plan, and is not one.
+#[test]
+fn a_job_blocked_by_more_than_moved_text_is_not_split() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    // Four pages, printed.
+    let four = dir.path().join("four.osk").to_string_lossy().into_owned();
+    assert!(run(&home, &["new", &four, "--page", "a4"]).ok);
+    for page in 1..=4 {
+        let at = format!("20,30:Report page {page}");
+        assert!(
+            run(
+                &home,
+                &["write", &four, "--at", &at, "--page", &page.to_string()]
+            )
+            .ok
+        );
+        let at = format!("20,60:A paragraph on page {page}.");
+        assert!(
+            run(
+                &home,
+                &["write", &four, "--at", &at, "--page", &page.to_string()]
+            )
+            .ok
+        );
+    }
+    let before = dir.path().join("before.pdf");
+    assert!(run(&home, &["print", &four, "-o", &before.to_string_lossy()]).ok);
+
+    // The edit: three pages, and page two's paragraph moved as well. Either
+    // fault on its own would be one thing; together, only the second is one a
+    // split can answer.
+    let three = dir.path().join("three.osk").to_string_lossy().into_owned();
+    assert!(run(&home, &["new", &three, "--page", "a4"]).ok);
+    for page in 1..=3 {
+        let at = format!("20,30:Report page {page}");
+        assert!(
+            run(
+                &home,
+                &["write", &three, "--at", &at, "--page", &page.to_string()]
+            )
+            .ok
+        );
+        let down = if page == 2 { 75 } else { 60 };
+        let at = format!("20,{down}:A paragraph on page {page}.");
+        assert!(
+            run(
+                &home,
+                &["write", &three, "--at", &at, "--page", &page.to_string()]
+            )
+            .ok
+        );
+    }
+    let after = dir.path().join("after.pdf");
+    assert!(run(&home, &["print", &three, "-o", &after.to_string_lossy()]).ok);
+
+    let delta = dir.path().join("delta.pdf");
+    let fresh = dir.path().join("fresh.pdf");
+    let refused = run(
+        &home,
+        &[
+            "delta",
+            &before.to_string_lossy(),
+            &after.to_string_lossy(),
+            "-o",
+            &delta.to_string_lossy(),
+            "--fresh",
+            &fresh.to_string_lossy(),
+        ],
+    );
+    assert!(
+        !refused.ok,
+        "a document a page shorter was let through: {}",
+        refused.said()
+    );
+    assert!(
+        refused.said().contains("fewer pages"),
+        "the reason given was not the page count: {}",
+        refused.said()
+    );
+    assert!(
+        !fresh.exists(),
+        "'fresh pages' were written for a job that cannot be printed at all: {}",
+        refused.said()
+    );
+}
+
+/// When every page's text moved, the whole document goes to the fresh file and
+/// the delta is blank. Counting what is left produces "0 additions on pages ."
+/// — a sentence with a hole in it where the page numbers should be — so it has
+/// to say what actually happened instead.
+#[test]
+fn a_delta_with_every_page_split_out_says_so_in_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let document = dir.path().join("one.osk").to_string_lossy().into_owned();
+    assert!(run(&home, &["new", &document, "--page", "a4"]).ok);
+    assert!(
+        run(
+            &home,
+            &[
+                "write",
+                &document,
+                "--at",
+                "20,40:A paragraph that will move."
+            ]
+        )
+        .ok
+    );
+    let before = dir.path().join("before.pdf");
+    assert!(
+        run(
+            &home,
+            &["print", &document, "-o", &before.to_string_lossy()]
+        )
+        .ok
+    );
+
+    // The only page's only text moves, and something is added as well, so the
+    // job is not empty — it is entirely un-overprintable.
+    assert!(run(&home, &["edit", &document, "1", "--at", "20,70"]).ok);
+    assert!(run(&home, &["write", &document, "--at", "120,20:APPROVED"]).ok);
+    let after = dir.path().join("after.pdf");
+    assert!(run(&home, &["print", &document, "-o", &after.to_string_lossy()]).ok);
+
+    let delta = dir.path().join("delta.pdf");
+    let fresh = dir.path().join("fresh.pdf");
+    let split = run(
+        &home,
+        &[
+            "delta",
+            &before.to_string_lossy(),
+            &after.to_string_lossy(),
+            "-o",
+            &delta.to_string_lossy(),
+            "--fresh",
+            &fresh.to_string_lossy(),
+        ],
+    );
+    assert!(split.ok, "{}", split.said());
+    assert!(fresh.is_file(), "{}", split.said());
+    assert!(
+        !split.said().contains("on pages ."),
+        "the page list came out empty and the sentence kept the full stop: {}",
+        split.said()
+    );
+    assert!(
+        split.said().contains("blank"),
+        "a delta with nothing in it did not say so: {}",
+        split.said()
+    );
 }

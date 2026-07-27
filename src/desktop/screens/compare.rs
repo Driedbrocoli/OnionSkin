@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use eframe::egui;
 
-use super::Room;
+use super::{beside, same_file, Room};
 use crate::job::Outcome;
 use crate::widgets;
 use onionskin::pipeline;
@@ -30,6 +30,13 @@ pub struct State {
     /// folder. Off, because most deltas are printed once and never wanted
     /// again — see [`onionskin::delta::scratch_path`].
     keep_beside: bool,
+    /// Split the job when the edit moved text that is already on the paper,
+    /// instead of refusing the whole of it.
+    ///
+    /// On, because the alternative is that one moved line on page seven holds
+    /// back thirty-nine pages that would have overprinted perfectly, and
+    /// somebody reprints the lot. Nothing extra is written when nothing moved.
+    split_moved: bool,
     /// How the comparison itself is made. Held apart from the rest because
     /// nothing here needs touching to get a result, and a wrong value here
     /// produces a delta that looks plausible and is not.
@@ -66,6 +73,7 @@ impl Default for State {
             outline: false,
             outline_colour: 0,
             keep_beside: false,
+            split_moved: true,
             expert: onionskin::diff::DiffOptions::default(),
             pad_mm: pipeline::Options::default().pad_mm,
         }
@@ -126,6 +134,23 @@ pub fn show(state: &mut State, room: &mut Room) {
             widgets::hint(ui, "the box is printed onto the paper too");
         });
     }
+    room.ui.checkbox(
+        &mut state.split_moved,
+        "If a page's text moved, print that page fresh and overprint the rest",
+    );
+    room.ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        widgets::hint(
+            ui,
+            if state.split_moved {
+                "one moved line on one page will not hold back the pages that \
+                 would have overprinted perfectly — nothing extra is written \
+                 unless something moved"
+            } else {
+                "the whole job is refused if any page's text moved"
+            },
+        );
+    });
     room.ui.checkbox(
         &mut state.keep_beside,
         "Save the delta next to the edited document",
@@ -309,6 +334,10 @@ fn start(state: &mut State, room: &mut Room) {
             onionskin::delta::scratch_path(&name)
         }
     };
+    // Beside the delta and named after it, so the two halves of one job stay
+    // together and nobody has to answer a second "where shall I put it?" for a
+    // file that most runs never produce.
+    let fresh = state.split_moved.then(|| beside(&output, "-fresh"));
     // Anything left from a previous run goes now, keeping the one about to be
     // written. Tidying when the program closes never happens to a program that
     // is killed.
@@ -326,14 +355,34 @@ fn start(state: &mut State, room: &mut Room) {
         diff: state.expert,
         pad_mm: state.pad_mm,
         preview_dir: None,
-        // The window has nowhere yet to put the pages that cannot be
-        // overprinted, so it still reports the blocker rather than splitting.
-        fresh: None,
+        fresh,
     };
 
     room.previews.forget(&output);
     let target = output.clone();
     room.jobs.start("Making the delta", move |report| {
+        // The fresh file's name is worked out rather than chosen, so nobody
+        // gets the chance to point it at something. That is not the same as it
+        // being safe: with the delta kept beside the edited copy, a document
+        // that happens to be called NAME-fresh.pdf sits exactly where the fresh
+        // pages are about to be written, and it would be overwritten by its own
+        // comparison. The command line refuses this; so does the window.
+        if let Some(fresh) = &options.fresh {
+            for (path, what) in [
+                (&original, "document as it was printed"),
+                (&edited, "edited copy"),
+            ] {
+                if same_file(fresh, path) {
+                    return Outcome::refused(format!(
+                        "The pages that need fresh paper would be written over \
+                         the {what}, '{}'.\n\nUntick \"Save the delta next to the \
+                         edited document\", or rename that file.",
+                        path.display()
+                    ));
+                }
+            }
+        }
+
         // The pipeline says where it has got to, and a hundred-page delta
         // takes minutes — long enough that a still spinner reads as a program
         // that has stopped.
@@ -354,29 +403,72 @@ fn start(state: &mut State, room: &mut Room) {
                         .filter(|c| c.severity == onionskin::safety::Severity::Blocker)
                         .map(describe)
                         .collect();
+                    // What to say next comes from what is actually in the way,
+                    // not from the checkbox. With splitting on, a page whose
+                    // text moved never reaches here — so anything that does is
+                    // an objection a split cannot answer, and offering one
+                    // would send somebody down a road with no end.
+                    let advice = if onionskin::safety::only_moved_text_blocks(&outcome.checks) {
+                        "Tick \"If a page's text moved, print that page fresh and \
+                         overprint the rest\" above, and the pages that did not \
+                         move can still go onto the paper you have."
+                    } else {
+                        "Splitting the job cannot fix this one. Print the \
+                         document fresh."
+                    };
                     return Outcome::refused(format!(
-                        "The edit moved ink that is already on the paper, so this \
-                         cannot be printed onto the sheet you have.\n\n{}\n\nPrint \
-                         the whole page fresh instead.",
-                        why.join("\n\n")
+                        "This cannot be printed onto the sheets you already \
+                         have.\n\n{}\n\n{advice}",
+                        why.join("\n\n"),
                     ));
                 }
 
-                let additions = outcome.total_regions();
-                let pages = outcome.pages_with_additions();
+                // What the delta as written carries, which after a split is not
+                // what the edit changed: the pages whose text moved have been
+                // blanked, and naming them here would send somebody to feed a
+                // sheet that comes back out unchanged.
+                let additions = outcome.regions_in_the_delta();
+                let pages = outcome.pages_in_the_delta();
                 let notes: Vec<String> = outcome.checks.iter().map(describe).collect();
-                Outcome::Done {
-                    message: format!(
+                let mut wrote = vec![target];
+                let mut message = if pages.is_empty() {
+                    "Nothing on this job can be overprinted — every page's text \
+                     moved. The delta is blank."
+                        .to_string()
+                } else {
+                    format!(
                         "{additions} addition{} to print, on page{} {}.",
                         if additions == 1 { "" } else { "s" },
                         if pages.len() == 1 { "" } else { "s" },
-                        pages
-                            .iter()
-                            .map(|p| p.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    wrote: vec![target],
+                        onionskin::split::sheets(&pages)
+                    )
+                };
+                // The split is the difference between reprinting one sheet and
+                // reprinting forty, so it goes in the message rather than among
+                // the notes, where it would be one line of several.
+                if let Some(fresh) = &outcome.fresh {
+                    message.push_str(&format!(
+                        "\n\nPage{} {} could not be overprinted — the text there \
+                         moved — so {} been blanked in the delta and written whole \
+                         to '{}'. Print that on new paper.",
+                        if outcome.reprinted.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        onionskin::split::sheets(&outcome.reprinted),
+                        if outcome.reprinted.len() == 1 {
+                            "it has"
+                        } else {
+                            "they have"
+                        },
+                        fresh.display()
+                    ));
+                    wrote.push(fresh.clone());
+                }
+                Outcome::Done {
+                    message,
+                    wrote,
                     notes,
                 }
             }
@@ -396,4 +488,49 @@ fn describe(check: &onionskin::safety::Check) -> String {
         said.push_str(&check.detail);
     }
     said
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The split has to be on for somebody who touches nothing. One moved line
+    /// on page seven holding back thirty-nine good pages is the exact cost this
+    /// program exists to avoid, and a default-off checkbox is one nobody finds.
+    #[test]
+    fn the_job_is_split_unless_somebody_turns_it_off() {
+        assert!(State::default().split_moved);
+    }
+
+    /// The two halves of one job land beside each other under one name, so
+    /// nobody has to hunt for the pages they still have to print.
+    #[test]
+    fn the_fresh_pages_land_beside_the_delta() {
+        assert_eq!(
+            beside(std::path::Path::new("/tmp/invoice-delta.pdf"), "-fresh"),
+            std::path::Path::new("/tmp/invoice-delta-fresh.pdf")
+        );
+    }
+
+    /// The split blanks pages in the delta and writes the whole ones to the
+    /// fresh file. If those two were ever the same path it would blank the
+    /// document and then overwrite it, and the delta would be gone — so the
+    /// name must differ whatever the delta was called, including the awkward
+    /// cases of no extension and a delta already ending in "-fresh".
+    #[test]
+    fn the_fresh_pages_can_never_land_on_top_of_the_delta() {
+        for name in [
+            "/tmp/delta.pdf",
+            "/tmp/delta",
+            "/tmp/delta-fresh.pdf",
+            "delta.pdf",
+        ] {
+            let delta = std::path::Path::new(name);
+            assert_ne!(
+                beside(delta, "-fresh"),
+                delta,
+                "'{name}' would have written its fresh pages over itself"
+            );
+        }
+    }
 }

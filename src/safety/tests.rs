@@ -432,3 +432,45 @@ fn margins_are_written_the_way_a_person_writes_them() {
     assert_eq!(trim_number(4.5), "4.5");
     assert_eq!(trim_number(0.0), "0");
 }
+
+/// A job whose only complaint is that some text moved is one a split can
+/// rescue: those pages come out and the rest are still an overlay.
+#[test]
+fn moved_text_on_its_own_can_be_split_around() {
+    let checks = vec![
+        Check::new(Severity::Blocker, "reflow", "moved".into()).on_page(2),
+        Check::new(Severity::Warning, "near_edge", "close".into()),
+    ];
+    assert!(only_moved_text_blocks(&checks));
+}
+
+/// Nothing at all in the way is trivially something a split does not have to
+/// rescue — and the helper must not read an empty list as "there is a problem".
+#[test]
+fn a_clean_job_is_not_reported_as_blocked_by_something_else() {
+    assert!(only_moved_text_blocks(&[]));
+    assert!(only_moved_text_blocks(&[Check::new(
+        Severity::Note,
+        "anything",
+        "fine".into()
+    )]));
+}
+
+/// A document that lost a page is not printable onto the sheets somebody has,
+/// whichever pages are taken out of it. Splitting it would write a file called
+/// "print these fresh" for a job nobody should print.
+#[test]
+fn a_second_blocker_means_a_split_would_not_rescue_the_job() {
+    let checks = vec![
+        Check::new(Severity::Blocker, "reflow", "moved".into()).on_page(2),
+        Check::new(Severity::Blocker, "pages_removed", "fewer pages".into()),
+    ];
+    assert!(!only_moved_text_blocks(&checks));
+
+    let reversed = vec![Check::new(
+        Severity::Blocker,
+        "documents_reversed",
+        "wrong way round".into(),
+    )];
+    assert!(!only_moved_text_blocks(&reversed));
+}

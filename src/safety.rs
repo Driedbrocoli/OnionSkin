@@ -221,6 +221,21 @@ pub fn pages_that_moved(checks: &[Check]) -> Vec<usize> {
         .collect()
 }
 
+/// Whether moved text is the only thing standing in the way.
+///
+/// Splitting the job answers exactly one objection: that some of these pages
+/// cannot be overprinted. It answers none of the others. A document that lost a
+/// page, or changed paper size, or was handed over the wrong way round, is not
+/// printable onto the sheets somebody has whichever pages are taken out of it —
+/// and splitting it anyway writes a "print these fresh" file for a job that
+/// nobody should print, which reads as a plan and is not one.
+pub fn only_moved_text_blocks(checks: &[Check]) -> bool {
+    checks
+        .iter()
+        .filter(|check| check.severity == Severity::Blocker)
+        .all(|check| check.code == "reflow")
+}
+
 /// The reflow blockers, once those pages have been taken out of the delta and
 /// written out to be printed fresh instead.
 ///
@@ -238,11 +253,10 @@ pub fn reflow_is_handled(checks: &mut Vec<Check>, detail: String) {
         return;
     }
     checks.retain(|check| check.code != "reflow");
-    let pages = moved
-        .iter()
-        .map(|page| page.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    // The one spelling of a page list, so this warning and the instructions
+    // sitting directly beneath it do not say "2, 4" and "2 and 4" about the
+    // same two sheets.
+    let pages = crate::split::sheets(&moved);
     checks.push(
         Check::new(
             Severity::Warning,

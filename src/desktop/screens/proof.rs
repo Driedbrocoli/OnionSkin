@@ -11,7 +11,7 @@
 
 use eframe::egui;
 
-use super::Room;
+use super::{beside, same_file, Room};
 use crate::job::Outcome;
 use crate::widgets;
 
@@ -175,26 +175,6 @@ fn make(state: &mut State, room: &mut Room) {
             Err(e) => Outcome::refused(e.to_string()),
         }
     });
-}
-
-/// A name beside another file, which is where somebody looks for what came out.
-fn beside(source: &std::path::Path, tail: &str) -> std::path::PathBuf {
-    let stem = source
-        .file_stem()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "onionskin".to_string());
-    source
-        .parent()
-        .unwrap_or(std::path::Path::new(""))
-        .join(format!("{stem}{tail}.pdf"))
-}
-
-/// The same file, whatever it has been called on the way there.
-fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
 }
 
 #[cfg(test)]

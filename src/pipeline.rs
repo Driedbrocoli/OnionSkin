@@ -1251,7 +1251,11 @@ fn compare_documents(
     let mut reprinted: Vec<usize> = Vec::new();
     if let Some(wanted) = &options.fresh {
         let reprint = split.reprint();
-        if !reprint.is_empty() {
+        // Not where something else blocks the job as well. A split answers one
+        // objection — that these pages moved — and leaving the others standing
+        // while writing a file called "fresh pages" tells somebody to print
+        // paper for a job that is going nowhere.
+        if !reprint.is_empty() && safety::only_moved_text_blocks(&checks) {
             // Blanked first. If writing the fresh pages then fails, the delta
             // is still safe to feed; the other way round would leave ink in it
             // that lands on a sheet nobody should be feeding.

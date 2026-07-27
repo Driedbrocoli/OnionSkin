@@ -3927,17 +3927,25 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
     // as what the edit added — the pages whose text moved have been blanked.
     let pages = outcome.pages_in_the_delta();
     let carried = outcome.regions_in_the_delta();
-    println!(
-        "\n{}: {carried} addition{} on page{} {}.",
-        output.display(),
-        if carried == 1 { "" } else { "s" },
-        if pages.len() == 1 { "" } else { "s" },
-        pages
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    if pages.is_empty() {
+        // Every page went to the fresh file, so the delta is blank. Saying
+        // "0 additions on pages ." — which is what counting produced — reads
+        // as a program that lost its place, and the trailing full stop after
+        // nothing is the tell.
+        println!(
+            "\n{}: blank. Every page's existing text moved, so there is nothing \
+             to overprint.",
+            output.display()
+        );
+    } else {
+        println!(
+            "\n{}: {carried} addition{} on page{} {}.",
+            output.display(),
+            if carried == 1 { "" } else { "s" },
+            if pages.len() == 1 { "" } else { "s" },
+            describe_sheets(&pages)
+        );
+    }
     report_saving(&outcome);
     report_sheets_to_feed(&outcome);
     if let Some(fresh) = &outcome.fresh {

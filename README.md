@@ -774,6 +774,17 @@ whole scheme is that page *n* is fed the printed sheet *n*.
 Without `--fresh` the job is still refused, but the refusal now says how to get
 the pages that are fine rather than leaving you to reprint everything.
 
+In the window this is on by default, under "Compare two documents": *If a page's
+text moved, print that page fresh and overprint the rest*. The fresh pages land
+beside the delta, named after it, and nothing extra is written unless something
+moved. Untick it to have the whole job refused instead.
+
+The split answers exactly one objection — that some of these pages cannot be
+overprinted. Where something else is also wrong — the edited document lost a
+page, the paper size changed, the two files were handed over the wrong way round
+— the job is refused whole and no fresh file is written, because none of those
+are fixed by taking pages out.
+
 ### Several deltas, one pass through the printer
 
 A day's work on one document arrives as more than one delta. The paid stamp is a

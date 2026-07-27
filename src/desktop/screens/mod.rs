@@ -41,6 +41,34 @@ pub struct Room<'a> {
     pub dropped: &'a mut Vec<std::path::PathBuf>,
 }
 
+/// A name beside another file, which is where somebody looks for what came out.
+///
+/// Here rather than in each screen because four of them want it and three had
+/// already written it out identically. Two spellings of "beside" is how one
+/// screen comes to put its answer somewhere the person is not looking.
+pub fn beside(source: &std::path::Path, tail: &str) -> std::path::PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "onionskin".to_string());
+    source
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join(format!("{stem}{tail}.pdf"))
+}
+
+/// The same file, whatever it has been called on the way there.
+///
+/// Falls back to comparing the paths as written when either cannot be resolved,
+/// which is the case that matters: a file about to be created has no canonical
+/// form yet, and that is exactly when a screen is asking.
+pub fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Which screen the window is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
