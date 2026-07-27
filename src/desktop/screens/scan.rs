@@ -42,6 +42,9 @@ pub struct State {
     output: Option<PathBuf>,
     /// What the last look at the page said it was set in, if it was asked.
     matched: Option<String>,
+    /// How far to turn the words, degrees clockwise on the page. For a form
+    /// with a sideways box on it, or a note down the margin.
+    rotation_deg: f64,
 }
 
 impl Default for State {
@@ -56,6 +59,7 @@ impl Default for State {
             placements: Vec::new(),
             output: None,
             matched: None,
+            rotation_deg: 0.0,
         }
     }
 }
@@ -162,6 +166,20 @@ pub fn show(state: &mut State, room: &mut Room) {
         ui.horizontal(|ui| {
             ui.label("Colour");
             ui.color_edit_button_srgb(&mut state.colour);
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Turn the words");
+            ui.add(
+                egui::DragValue::new(&mut state.rotation_deg)
+                    .range(-360.0..=360.0)
+                    .speed(1.0)
+                    .suffix("°"),
+            );
+            widgets::hint(ui, "clockwise — for a sideways box, or a note down the margin");
+            if state.rotation_deg != 0.0 && ui.button("Straight again").clicked() {
+                state.rotation_deg = 0.0;
+            }
         });
     });
 
@@ -343,7 +361,7 @@ fn start(state: &mut State, room: &mut Room) {
             y_mm: p.y_mm,
             size_pt: state.size_pt,
             font: line_font,
-            rotation_deg: 0.0,
+            rotation_deg: state.rotation_deg,
             colour,
         })
         .collect();
