@@ -496,6 +496,32 @@ Commas and line breaks inside a value are fine as long as the value is
 quoted, which every spreadsheet does for you — `"Smith, John"` stays one name,
 and an address typed across two lines of one cell stays one address.
 
+**A picture each, too.** The file name can name a column, so everybody's sheet
+gets their own signature, photograph or seal:
+
+```bash
+onionskin batch pass.pdf --from people.csv \
+  --at '30,60:{name}' \
+  --image 'photos/{name}.jpg:120,40:35'
+```
+
+A mistyped column in the file name is caught in the same breath as one in a
+line of text — before a single sheet is made, rather than at the two hundredth.
+
+### Envelopes, cards and postcards
+
+`--page` knows them by name, so nobody has to look up that a DL is 110 by 220:
+
+```bash
+onionskin write envelope.pdf --page dl --at '20,60:Mrs A Wickham'
+onionskin write card.pdf --page business-card --at '5,20:14 Mill Lane'
+```
+
+`dl`, `c4`, `c5`, `c6`, `monarch` and `comm10` for envelopes; `postcard`,
+`index-card`, `business-card` and `a7` for cards. Alongside the paper sizes that
+were already there — `onionskin write --help` lists them all, and any size at
+all still works as `--page 100x150`.
+
 ### A signature, a stamp, or a logo
 
 The commonest thing anybody adds to a document that is already printed:

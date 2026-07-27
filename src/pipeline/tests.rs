@@ -857,3 +857,62 @@ fn a_saving_is_only_reported_where_it_was_measured() {
     };
     assert!(outcome.saving().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// A picture of somebody's own, on their own sheet
+// ---------------------------------------------------------------------------
+
+fn a_picture() -> crate::pdf::PlacedImage {
+    crate::pdf::PlacedImage {
+        picture: crate::picture::Picture::Samples {
+            width: 2,
+            height: 2,
+            rgb: vec![0; 2 * 2 * 3],
+            alpha: None,
+        },
+        x_mm: 10.0,
+        y_mm: 20.0,
+        width_mm: 30.0,
+        height_mm: 30.0,
+        rotation_deg: 0.0,
+    }
+}
+
+/// A signature each, on a stack of certificates: sheet two gets the second
+/// picture and not the first.
+#[test]
+fn each_sheet_in_a_stack_takes_its_own_picture() {
+    let per_sheet = vec![Vec::new(), Vec::new(), Vec::new()];
+    let mut second = a_picture();
+    second.x_mm = 99.0;
+    let pictures = vec![vec![a_picture()], vec![second], Vec::new()];
+
+    let plan = Plan::Repeat {
+        from_page: 1,
+        per_sheet: &per_sheet,
+        pictures_per_sheet: &pictures,
+    };
+    let sheets = plan.sheets(1).unwrap();
+    assert_eq!(sheets.len(), 3);
+    assert_eq!(sheets[0].images.len(), 1);
+    assert_eq!(sheets[1].images[0].x_mm, 99.0);
+    // The third asked for none, and gets none rather than somebody else's.
+    assert!(sheets[2].images.is_empty());
+}
+
+/// Nobody having a picture is the ordinary case and must not be an error, and
+/// a list that runs out early must not take the rest of the stack with it.
+#[test]
+fn a_stack_with_no_pictures_at_all_is_perfectly_ordinary() {
+    let per_sheet = vec![Vec::new(), Vec::new()];
+    for pictures in [Vec::new(), vec![vec![a_picture()]]] {
+        let plan = Plan::Repeat {
+            from_page: 1,
+            per_sheet: &per_sheet,
+            pictures_per_sheet: &pictures,
+        };
+        let sheets = plan.sheets(1).expect("a short picture list is not an error");
+        assert_eq!(sheets.len(), 2, "a sheet went missing");
+        assert!(sheets[1].images.is_empty());
+    }
+}

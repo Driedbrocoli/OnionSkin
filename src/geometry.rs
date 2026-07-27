@@ -109,16 +109,36 @@ fn named_size(size: &PageSize) -> Option<&'static str> {
 /// A printer it has never heard of is still fine — a size may be given as
 /// `WIDTHxHEIGHT` in millimetres.
 pub const PAGE_PRESETS: &[(&str, f64, f64)] = &[
-    ("a3", 297.0, 420.0),
+    // Commonest first. The order is not arbitrary: when a scan is the wrong
+    // shape for the page it was given, the first name of that shape is the one
+    // suggested, and "try --page a3" to somebody who scanned A4 is worse advice
+    // than no advice.
     ("a4", 210.0, 297.0),
+    ("letter", 215.9, 279.4),
     ("a5", 148.0, 210.0),
+    ("legal", 215.9, 355.6),
+    ("a3", 297.0, 420.0),
     ("a6", 105.0, 148.0),
     ("b5", 176.0, 250.0),
-    ("letter", 215.9, 279.4),
-    ("legal", 215.9, 355.6),
     ("tabloid", 279.4, 431.8),
     ("executive", 184.15, 266.7),
     ("statement", 139.7, 215.9),
+    // Envelopes. Adding a line to one is the same job as adding a line to a
+    // sheet — a name, a return address, a franking mark — and asking somebody
+    // to look up that a DL is 110 by 220 is asking them to go and find out
+    // something the program could have known.
+    ("dl", 110.0, 220.0),
+    ("c4", 229.0, 324.0),
+    ("c5", 162.0, 229.0),
+    ("c6", 114.0, 162.0),
+    ("monarch", 98.4, 190.5),
+    ("comm10", 104.8, 241.3),
+    // Cards, which are mostly wider than they are tall — see the note on
+    // [`pages_shaped_like`] about why that is allowed to be true here.
+    ("postcard", 148.0, 105.0),
+    ("index-card", 127.0, 76.2),
+    ("business-card", 85.0, 55.0),
+    ("a7", 74.0, 105.0),
 ];
 
 /// Which named paper sizes are this shape, longest side down.
@@ -144,7 +164,12 @@ pub fn pages_shaped_like(aspect: f64, tolerance: f64) -> Vec<&'static str> {
     PAGE_PRESETS
         .iter()
         .filter(|(_, width, height)| {
-            let theirs = height / width;
+            // Long side over short, for the preset as well as for the scan.
+            // Most of these are taller than they are wide and a few — the
+            // cards — are not, and a sheet on a scanner does not know which
+            // way up it was meant to be either. Comparing `height / width`
+            // directly would quietly never match anything landscape.
+            let theirs = (height / width).max(width / height);
             (theirs - aspect).abs() / theirs <= tolerance
         })
         .map(|(name, _, _)| *name)
@@ -751,6 +776,73 @@ mod tests {
         assert!(fits.contains(&"a4"), "{fits:?}");
         assert!(fits.contains(&"a5"), "{fits:?}");
         assert!(fits.contains(&"a3"), "{fits:?}");
+    }
+
+    /// The first name of a matching shape is the one suggested, so it had
+    /// better be the one somebody is most likely to have meant. "Try --page
+    /// a3" to somebody who scanned A4 is worse advice than none.
+    #[test]
+    fn the_commonest_paper_of_a_shape_is_the_one_suggested() {
+        let a4 = 297.0 / 210.0;
+        assert_eq!(pages_shaped_like(a4, 0.012)[0], "a4");
+        let letter = 279.4 / 215.9;
+        assert_eq!(pages_shaped_like(letter, 0.012)[0], "letter");
+    }
+
+    /// A card is wider than it is tall, and a sheet on a scanner does not know
+    /// which way up it was meant to be. Comparing height over width directly
+    /// would quietly never match anything landscape.
+    #[test]
+    fn a_size_wider_than_it_is_tall_is_still_matched_by_its_shape() {
+        let card = parse_page("business-card").unwrap();
+        assert!(card.width_mm > card.height_mm, "{card:?}");
+        let shape = card.width_mm / card.height_mm;
+        assert!(
+            pages_shaped_like(shape, 0.012).contains(&"business-card"),
+            "{:?}",
+            pages_shaped_like(shape, 0.012)
+        );
+    }
+
+    /// Adding a line to an envelope is the same job as adding one to a sheet,
+    /// and looking up that a DL is 110 by 220 is a thing the program can know.
+    #[test]
+    fn envelopes_and_cards_are_known_by_name() {
+        for (name, width, height) in [
+            ("dl", 110.0, 220.0),
+            ("c5", 162.0, 229.0),
+            ("c6", 114.0, 162.0),
+            ("comm10", 104.8, 241.3),
+            ("postcard", 148.0, 105.0),
+            ("business-card", 85.0, 55.0),
+        ] {
+            let page = parse_page(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!((page.width_mm - width).abs() < 0.01, "{name}: {page:?}");
+            assert!((page.height_mm - height).abs() < 0.01, "{name}: {page:?}");
+        }
+    }
+
+    /// Every preset has to be a real piece of paper, and every name has to be
+    /// one somebody can type without a shift key or a guess.
+    #[test]
+    fn every_preset_is_a_usable_size_under_a_usable_name() {
+        for (name, width, height) in PAGE_PRESETS {
+            assert!(*width > 0.0 && *height > 0.0, "{name}");
+            assert!(*width < 2000.0 && *height < 2000.0, "{name}");
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{name} is not something to type"
+            );
+            // And it resolves to itself, which is the whole reason it is here.
+            let page = parse_page(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!((page.width_mm - width).abs() < 0.01, "{name}");
+        }
+        // No two share a name, or one of them can never be asked for.
+        let mut names: Vec<&str> = PAGE_PRESETS.iter().map(|(name, _, _)| *name).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "two presets share a name");
     }
 
     #[test]

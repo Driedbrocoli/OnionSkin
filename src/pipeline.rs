@@ -395,6 +395,9 @@ pub(crate) enum Plan<'a> {
         /// Counted from 1, as a person would say it.
         from_page: usize,
         per_sheet: &'a [Vec<crate::document::Item>],
+        /// A picture list per sheet, the same length as `per_sheet` or empty:
+        /// everybody's own signature, or their own photograph.
+        pictures_per_sheet: &'a [Vec<crate::pdf::PlacedImage>],
     },
 }
 
@@ -447,6 +450,7 @@ impl Plan<'_> {
             Plan::Repeat {
                 from_page,
                 per_sheet,
+                pictures_per_sheet,
             } => {
                 let from = from_page.saturating_sub(1);
                 if from >= pages {
@@ -454,11 +458,14 @@ impl Plan<'_> {
                 }
                 Ok(per_sheet
                     .iter()
-                    .map(|items| Sheet {
+                    .enumerate()
+                    .map(|(n, items)| Sheet {
                         from,
                         items: items.clone(),
                         shapes: Vec::new(),
-                        images: Vec::new(),
+                        // Empty means nobody has a picture, which is the
+                        // ordinary case and must not be an error.
+                        images: pictures_per_sheet.get(n).cloned().unwrap_or_default(),
                     })
                     .collect())
             }
@@ -510,6 +517,23 @@ pub fn compose_sheets(
     font: Option<&crate::font::EmbeddedFont>,
     options: &Options,
 ) -> Result<Outcome, PipelineError> {
+    compose_sheets_with_pictures(source, from_page, per_sheet, &[], output, font, options)
+}
+
+/// The same, with a picture list for each sheet.
+///
+/// A stack of certificates where everybody signs their own, or a set of passes
+/// each carrying its holder's photograph: the words differ per sheet already,
+/// and there is no reason a picture should not.
+pub fn compose_sheets_with_pictures(
+    source: &Path,
+    from_page: usize,
+    per_sheet: &[Vec<crate::document::Item>],
+    pictures_per_sheet: &[Vec<crate::pdf::PlacedImage>],
+    output: &Path,
+    font: Option<&crate::font::EmbeddedFont>,
+    options: &Options,
+) -> Result<Outcome, PipelineError> {
     if per_sheet.is_empty() {
         return Err(PipelineError::Invalid(
             "there are no sheets to make".to_string(),
@@ -520,6 +544,7 @@ pub fn compose_sheets(
         Plan::Repeat {
             from_page,
             per_sheet,
+            pictures_per_sheet,
         },
         output,
         font,

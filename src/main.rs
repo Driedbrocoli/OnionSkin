@@ -750,6 +750,10 @@ struct BatchArgs {
     /// One line below it: 'Name:{name}'.
     #[arg(long = "below", value_name = "ANCHOR:WORDS", allow_hyphen_values = true)]
     below: Vec<String>,
+    /// A picture on every sheet, its file name able to name a column so that
+    /// each one gets its own: 'signatures/{name}.png:120,240:40'.
+    #[arg(long = "image", value_name = "FILE:X,Y:SIZE")]
+    images: Vec<String>,
     /// Which page of the sheet, counted from 1.
     #[arg(long, default_value_t = 1)]
     page: usize,
@@ -1719,11 +1723,13 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
 }
 
 fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
-    if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() {
+    if args.at.is_empty() && args.after.is_empty() && args.below.is_empty() && args.images.is_empty()
+    {
         return Err(
             "nothing to put on them. Say where the words go, with {column} \
              standing for each person's own:\n    \
-             --after 'Awarded to:{name}'\n    --at '60,120:{name}'"
+             --after 'Awarded to:{name}'\n    --at '60,120:{name}'\n    \
+             --image 'signatures/{name}.png:120,240:40'"
                 .into(),
         );
     }
@@ -1737,6 +1743,10 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         .iter()
         .chain(args.after.iter())
         .chain(args.below.iter())
+        // The picture paths too: "signatures/{nmae}.png" is the same mistake
+        // as "{nmae}" in a line of text, and is worth finding in the same
+        // breath rather than at the two hundredth sheet.
+        .chain(args.images.iter())
         .cloned()
         .collect();
     let unknown = onionskin::rows::unknown_columns(&templates, &list);
@@ -1781,6 +1791,7 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     }
 
     let mut per_sheet: Vec<Vec<Item>> = Vec::with_capacity(wanted);
+    let mut pictures_per_sheet: Vec<Vec<PlacedImage>> = Vec::with_capacity(wanted);
     for row in list.rows.iter().take(wanted) {
         let mut items = Vec::new();
         for placement in &args.at {
@@ -1792,13 +1803,32 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
             items.push(batch_item(&args, *x_mm, *y_mm, unescape(&text)));
         }
         per_sheet.push(items);
+
+        // Each row's own picture, if the file name named a column. Loaded
+        // here rather than shared, because for a signature per person they
+        // are all different files — and if they are all the same file, one
+        // read of a signature is not worth arranging around.
+        let filled: Vec<String> = args
+            .images
+            .iter()
+            .map(|spec| onionskin::rows::fill(spec, row))
+            .collect();
+        let mine = placed_images(&filled, args.page).map_err(|e| {
+            format!(
+                "{e}\n    (making the sheet for row {} of {})",
+                row.number,
+                list.rows.len()
+            )
+        })?;
+        pictures_per_sheet.push(mine.into_iter().map(|(_, image)| image).collect());
     }
 
     let options = options_from_settings(args.preview.clone(), &args.tuning)?;
-    let outcome = pipeline::compose_sheets(
+    let outcome = pipeline::compose_sheets_with_pictures(
         &args.document,
         args.page,
         &per_sheet,
+        &pictures_per_sheet,
         &output,
         None,
         &options,
