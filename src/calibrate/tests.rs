@@ -409,11 +409,11 @@ fn the_prose_keeps_clear_of_the_middle_crosshair() {
     let inset = default_inset(A4);
     let middle = fiducials(A4, inset)[4];
     let lowest = prose_y(A4) + 4.0 + 7.0 * 3.4 + 2.5;
+    let label = middle.1 - ARM_MM - 2.5;
 
     assert!(
-        lowest < middle.1 - ARM_MM - 4.5,
-        "the prose reaches {lowest} mm, and P5's label starts at {} mm",
-        middle.1 - ARM_MM - 4.5
+        lowest < label - 5.0,
+        "the prose reaches {lowest} mm and P5's label is at {label} mm"
     );
     // And it must not run into the crosshairs along the top of the sheet.
     assert!(prose_y(A4) - 3.0 > inset + RULER_REACH_MM + 8.0);
@@ -547,6 +547,13 @@ fn a_reading_off_a_printed_target_becomes_a_correction_that_undoes_it() {
 /// not that amount is the measurement's own error — which is a stricter check
 /// than a real sheet could ever give, because on paper nobody knows the true
 /// answer to compare against.
+///
+/// It is a stand-in and not a copy. The lines here are laid down a third of a
+/// millimetre wide, where the target itself draws a third of a *point*, which
+/// is a third as much again — so these sheets have heavier ink than any real
+/// one, which is the harder case for telling a ring from a diamond. The one
+/// test that reads the genuine article, rendered by the renderer, is
+/// `a_target_printed_twice_and_scanned_gives_back_the_offset`.
 struct Sheet {
     image: GrayImage,
     registration: ScanRegistration,
@@ -701,22 +708,23 @@ impl Sheet {
         self.line((x, y - ARM_MM), (x, y - ARM_GAP_MM), 0.35);
         self.line((x, y + ARM_GAP_MM), (x, y + ARM_MM), 0.35);
 
+        let scale = SCALE_OFFSET_MM;
         self.line(
-            (x - RULER_REACH_MM, y + 7.0),
-            (x + RULER_REACH_MM, y + 7.0),
+            (x - RULER_REACH_MM, y + scale),
+            (x + RULER_REACH_MM, y + scale),
             0.25,
         );
         self.line(
-            (x - 7.0, y - RULER_REACH_MM),
-            (x - 7.0, y + RULER_REACH_MM),
+            (x - scale, y - RULER_REACH_MM),
+            (x - scale, y + RULER_REACH_MM),
             0.25,
         );
         let steps = (RULER_REACH_MM / RULER_STEP_MM) as i64;
         for step in -steps..=steps {
             let offset = step as f64 * RULER_STEP_MM;
             let tick = tick_length(offset);
-            self.line((x + offset, y + 7.0), (x + offset, y + 7.0 + tick), 0.2);
-            self.line((x - 7.0, y + offset), (x - 7.0 - tick, y + offset), 0.2);
+            self.line((x + offset, y + scale), (x + offset, y + scale + tick), 0.2);
+            self.line((x - scale, y + offset), (x - scale - tick, y + offset), 0.2);
         }
         for mark in [-4.0f64, -2.0, 0.0, 2.0, 4.0] {
             self.blot((x + mark, y + 10.9), 1.5, 1.3);
@@ -744,7 +752,12 @@ impl Sheet {
     }
 
     /// The second pass, landing wherever `printer` puts each crosshair.
-    fn second_pass(&mut self, page: PageSize, inset: f64, printer: impl Fn((f64, f64)) -> (f64, f64)) {
+    fn second_pass(
+        &mut self,
+        page: PageSize,
+        inset: f64,
+        printer: impl Fn((f64, f64)) -> (f64, f64),
+    ) {
         for at in fiducials(page, inset) {
             self.second_pass_at(printer(at));
         }
@@ -761,6 +774,65 @@ fn printed_twice(page: PageSize, dpi: f64, skew_deg: f64, offset: (f64, f64)) ->
 }
 
 #[test]
+fn the_reading_window_takes_in_the_two_marks_and_nothing_else() {
+    // Every number checked here is a measurement off the target, and this test
+    // exists because moving any one of them a couple of millimetres would put a
+    // printed ruler or a crosshair's label inside the window — where it would
+    // arrive as a shape to be argued with, and where a printed "0" is close
+    // enough to a small ring to cost the fiducial its reading.
+    let window = Window::around((0.0, 0.0));
+
+    assert!(
+        window.y1 < SCALE_OFFSET_MM,
+        "the x scale below the crosshair is inside the window"
+    );
+    assert!(
+        window.x0 > -SCALE_OFFSET_MM,
+        "the y scale to its left is inside the window"
+    );
+    assert!(
+        window.y0 > -(ARM_MM + 2.5),
+        "the 'P1  25, 25' label above it is inside the window"
+    );
+
+    // And both marks are inside it, with a couple of millimetres to spare for
+    // a printer that is out and a scanner that found the paper's edge roughly.
+    assert!(window.holds((RING_MM + 2.5, RING_MM + 2.5)));
+    assert!(window.holds((-(RING_MM + 2.5), -(RING_MM + 2.5))));
+    let reach = DIAMOND_OFFSET_MM + DIAMOND_MM + MAX_OFFSET_MM * 0.8;
+    assert!(
+        window.holds((reach, -reach)),
+        "a diamond {MAX_OFFSET_MM} mm out would run off the edge of the window"
+    );
+}
+
+#[test]
+fn the_two_marks_stand_clear_of_the_crosshair_and_of_each_other() {
+    // The whole design rests on this. Two shapes that touch are one shape, and
+    // one shape has one middle, so a reading whose marks ran together would be
+    // lost — which is why the diamond sits out on the diagonal rather than over
+    // the point it is measuring.
+    let stroke = 0.35;
+
+    // The ring stands free of its own arms, or there would be nothing on the
+    // first pass small enough to measure.
+    assert!(
+        ARM_GAP_MM - RING_MM - stroke > 1.0,
+        "the ring is welded to its arms"
+    );
+    // The diamond keeps clear of the arms it sits between, and of the ring,
+    // for as far out as a reading is accepted at all.
+    assert!(
+        DIAMOND_OFFSET_MM - DIAMOND_MM - stroke >= 2.0,
+        "the diamond touches an arm before the printer is even 2 mm out"
+    );
+    assert!(
+        DIAMOND_OFFSET_MM * 2f64.sqrt() - DIAMOND_MM - RING_MM - stroke >= 2.0,
+        "the diamond touches the ring before the printer is even 2 mm out"
+    );
+}
+
+#[test]
 fn a_known_offset_is_recovered_from_a_scan_of_the_sheet() {
     // Including offsets that are negative in one axis and positive in the
     // other, because a sign the wrong way round is the failure the two
@@ -774,8 +846,7 @@ fn a_known_offset_is_recovered_from_a_scan_of_the_sheet() {
         (-1.10, -0.80),
     ] {
         let sheet = printed_twice(A4, 300.0, 0.0, offset);
-        let readings =
-            measure_from_scan(&sheet.image, &sheet.registration, A4, None).unwrap();
+        let readings = measure_from_scan(&sheet.image, &sheet.registration, A4, None).unwrap();
 
         assert_eq!(readings.len(), 5, "offset {offset:?}");
         for reading in &readings {
@@ -787,7 +858,7 @@ fn a_known_offset_is_recovered_from_a_scan_of_the_sheet() {
                 reading.dy_mm
             );
             assert!(
-                reading.confidence > 0.6,
+                reading.confidence > 0.75,
                 "P{} was only {:.0}% sure of a clean sheet",
                 reading.index,
                 reading.confidence * 100.0
@@ -954,13 +1025,19 @@ fn speckle_and_dirt_do_not_derail_a_reading() {
             .wrapping_add(1442695040888963407);
         (seed >> 11) as f64 / (1u64 << 53) as f64
     };
+    // Two hundred flecks in every window, up to a fifth of a millimetre across
+    // — heavier than any scan of a sheet somebody meant to keep. A fleck that
+    // lands touching a mark becomes part of it and there is no answer to that,
+    // so what is being asked here is that the marks still be found, that the
+    // dirt be recognised as dirt, and that what comes back still be better than
+    // the quarter-millimetre a person can read off the printed ruler.
     for at in fiducials(A4, default_inset(A4)) {
-        for _ in 0..140 {
+        for _ in 0..200 {
             let spot = (
                 at.0 - WINDOW_NEAR_MM + next() * (WINDOW_NEAR_MM + WINDOW_FAR_MM),
                 at.1 - WINDOW_FAR_MM + next() * (WINDOW_NEAR_MM + WINDOW_FAR_MM),
             );
-            sheet.dot(spot, 0.05 + next() * 0.12);
+            sheet.dot(spot, 0.03 + next() * 0.07);
         }
     }
 
@@ -1046,19 +1123,14 @@ fn a_reading_that_had_to_work_for_it_says_so_in_its_confidence() {
     let clean = printed_twice(A4, 300.0, 0.0, (0.4, -0.2));
     let clean = measure_from_scan(&clean.image, &clean.registration, A4, None).unwrap();
 
-    // The same sheet, but the second pass landed three millimetres out — far
-    // enough to be doubted, not far enough to be refused.
-    let far = printed_twice(A4, 300.0, 0.0, (2.6, 1.4));
+    // The same sheet, but the second pass landed two and a half millimetres
+    // out — far enough to be doubted, not far enough to be refused.
+    let far = printed_twice(A4, 300.0, 0.0, (2.2, 1.2));
     let far = measure_from_scan(&far.image, &far.registration, A4, None).unwrap();
 
     assert_eq!(clean.len(), 5);
     assert_eq!(far.len(), 5);
-    let best = |readings: &[Reading]| {
-        readings
-            .iter()
-            .map(|r| r.confidence)
-            .fold(0.0f64, f64::max)
-    };
+    let best = |readings: &[Reading]| readings.iter().map(|r| r.confidence).fold(0.0f64, f64::max);
     assert!(
         best(&far) < best(&clean) - 0.2,
         "{:.2} against {:.2}",
@@ -1083,28 +1155,71 @@ fn a_reading_describes_itself_the_way_the_sheet_is_labelled() {
 }
 
 #[test]
-fn diagnostic_blob_shapes() {
-    let offset = (0.40, -0.20);
-    let sheet = printed_twice(A4, 300.0, 0.0, offset);
-    let mapping = sheet.registration.mapping();
-    let inset = default_inset(A4);
-    let points = fiducials(A4, inset);
-    let windows: Vec<Window> = points.iter().map(|p| Window::around(*p)).collect();
-    let threshold = ink_threshold(&sheet.image, &mapping, &windows);
-    println!("threshold {threshold}");
-    let centre = points[0];
-    for blob in ink_blobs(&sheet.image, &mapping, sheet.registration.px_per_mm, threshold, &windows[0]) {
-        println!(
-            "at ({:+.3},{:+.3}) near {:.3} far {:.3} round {:.3} area {:.2} clipped {} ring {:.3} diamond {:.3}",
-            blob.centre_mm.0 - centre.0,
-            blob.centre_mm.1 - centre.1,
-            blob.near_mm,
-            blob.far_mm,
-            blob.roundness(),
-            blob.area_mm2,
-            blob.clipped,
-            blob.resembles(RING_SPAN_MM, RING_ROUNDNESS),
-            blob.resembles(DIAMOND_SPAN_MM, DIAMOND_ROUNDNESS),
+fn a_target_printed_twice_and_scanned_gives_back_the_offset() {
+    // The one test that reads the target Onionskin really writes, rather than
+    // a drawing of it made here. The two pages go through the same renderer
+    // that draws every preview, one is laid over the other a known distance
+    // away, and the result is measured. Anything that quietly broke the shapes
+    // on the page — a diamond stroked as four separate lines and coming apart
+    // at the corners, an arm gap narrow enough to weld the ring to its arms —
+    // would show up here and nowhere else.
+    let Ok(engine) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("target.pdf");
+    make_target(&path, A4, None).unwrap();
+
+    let dpi = 300.0;
+    let px_per_mm = dpi / crate::geometry::MM_PER_INCH;
+    let document = engine.open(&path).unwrap();
+    assert_eq!(document.len(), 2);
+    let first = document.render(0, dpi).unwrap();
+    let second = document.render(1, dpi).unwrap();
+    assert_eq!((first.width, first.height), (second.width, second.height));
+
+    // A whole number of pixels, so that what the printer "did" is known
+    // exactly rather than to within a rounding.
+    let (shift_x, shift_y) = (5i64, -3i64);
+    let mut sheet =
+        GrayImage::from_raw(first.width as u32, first.height as u32, first.gray.clone()).unwrap();
+    for y in 0..second.height {
+        for x in 0..second.width {
+            let level = second.gray[y * second.width + x];
+            if level >= 250 {
+                continue;
+            }
+            let (nx, ny) = (x as i64 + shift_x, y as i64 + shift_y);
+            if nx < 0 || ny < 0 || nx >= first.width as i64 || ny >= first.height as i64 {
+                continue;
+            }
+            if level < sheet.get_pixel(nx as u32, ny as u32).0[0] {
+                sheet.put_pixel(nx as u32, ny as u32, Luma([level]));
+            }
+        }
+    }
+
+    let registration = ScanRegistration {
+        page: A4,
+        px_per_mm,
+        skew_deg: 0.0,
+        origin_px: (0.0, 0.0),
+    };
+    let readings = measure_from_scan(&sheet, &registration, A4, None).unwrap();
+    let truth = (shift_x as f64 / px_per_mm, shift_y as f64 / px_per_mm);
+
+    assert_eq!(readings.len(), 5, "{readings:?}");
+    for reading in &readings {
+        assert!(
+            (reading.dx_mm - truth.0).abs() < 0.05 && (reading.dy_mm - truth.1).abs() < 0.05,
+            "P{} read {:+.3}, {:+.3} off a real target shifted by {:+.3}, {:+.3}",
+            reading.index,
+            reading.dx_mm,
+            reading.dy_mm,
+            truth.0,
+            truth.1
         );
+        // A clean sheet read off the real target should be all but certain.
+        assert!(reading.confidence > 0.85, "{}", reading.describe());
     }
 }

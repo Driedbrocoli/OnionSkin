@@ -91,6 +91,37 @@ enum Command {
     Uninstall(InstallArgs),
     /// Build the archive people download. For making a release.
     Package(PackageArgs),
+    /// Build an apt repository, so `apt install onionskin` works from your
+    /// own server. For making a release.
+    AptRepo(AptRepoArgs),
+}
+
+#[derive(clap::Args)]
+struct AptRepoArgs {
+    /// The .deb files to put in it. At least one.
+    #[arg(long = "deb", value_name = "FILE", required = true)]
+    debs: Vec<PathBuf>,
+    /// The folder to build the repository in. Serve this folder over HTTPS.
+    #[arg(long, default_value = "apt")]
+    out: PathBuf,
+    /// The address the repository will be served from, for the instructions.
+    #[arg(long, default_value = "https://example.com/apt")]
+    url: String,
+    /// The suite name, which is the word in the sources line.
+    #[arg(long, default_value = "stable")]
+    suite: String,
+    /// The component name.
+    #[arg(long, default_value = "main")]
+    component: String,
+    /// Who publishes it.
+    #[arg(long, default_value = "Onionskin")]
+    origin: String,
+    /// A short label for it.
+    #[arg(long, default_value = "Onionskin")]
+    label: String,
+    /// A sentence describing it.
+    #[arg(long, default_value = "Onionskin packages")]
+    description: String,
 }
 
 #[derive(clap::Args)]
@@ -317,7 +348,9 @@ struct CompareArgs {
 enum CalibrateCommand {
     /// Write the two-pass target to print twice on one sheet.
     Target(TargetArgs),
-    /// Turn the readings off that sheet into a stored profile.
+    /// Measure the printed sheet from a scan of it, and save the profile.
+    Measure(MeasureArgs),
+    /// Turn readings you took by hand into a stored profile.
     Solve(SolveArgs),
     /// List the profiles on this machine.
     List,
@@ -325,6 +358,33 @@ enum CalibrateCommand {
     Show(ProfileName),
     /// Delete a profile.
     Delete(ProfileName),
+}
+
+#[derive(clap::Args)]
+struct MeasureArgs {
+    /// A scan of the sheet with both passes printed on it.
+    scan: PathBuf,
+    /// What to call this printer.
+    #[arg(long)]
+    name: String,
+    /// The paper the target was printed on.
+    #[arg(long, default_value = "a4")]
+    page: String,
+    /// The inset the target was drawn with, if it was not the default.
+    #[arg(long)]
+    inset: Option<f64>,
+    /// Anything worth remembering about this printer.
+    #[arg(long, default_value = "")]
+    notes: String,
+    /// The image is exactly the sheet: skip finding the paper's edges.
+    #[arg(long)]
+    cropped: bool,
+    /// Do not look for skew; take the sheet as square to the scan.
+    #[arg(long)]
+    square: bool,
+    /// Show what was measured and what it works out to, and save nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -855,6 +915,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Install(args) => cmd_install(args),
         Command::Uninstall(args) => cmd_uninstall(args),
         Command::Package(args) => cmd_package(args),
+        Command::AptRepo(args) => cmd_apt_repo(args),
     }
 }
 
@@ -2477,6 +2538,121 @@ fn add_to_document(args: AddArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Build an apt repository from one or more .deb files.
+///
+/// `sudo apt install onionskin` cannot be made to work without one: apt does
+/// not install from a URL, it installs from an archive with an index and a
+/// signature. Being in Debian's own archive means a sponsor and months of
+/// waiting; hosting the same thing yourself takes a directory and two lines
+/// typed once by whoever wants it.
+///
+/// The signing is left to `gpg` on purpose. Everything else here is Rust down
+/// to the SHA-256, but key custody is not a thing to hand-roll, and the
+/// private key should live where its owner already keeps their keys.
+fn cmd_apt_repo(args: AptRepoArgs) -> Result<ExitCode, String> {
+    for deb in &args.debs {
+        if !deb.is_file() {
+            return Err(format!("there is no file at {}", deb.display()));
+        }
+    }
+    let options = onionskin::apt::RepoOptions {
+        suite: args.suite.clone(),
+        component: args.component.clone(),
+        origin: args.origin.clone(),
+        label: args.label.clone(),
+        description: args.description.clone(),
+    };
+    let built = onionskin::apt::build(
+        &args.debs,
+        &args.out,
+        &options,
+        std::time::SystemTime::now(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("Built an apt repository in {}", built.root.display());
+    println!(
+        "  {} package{}, for {}",
+        built.packages.len(),
+        if built.packages.len() == 1 { "" } else { "s" },
+        built.architectures.join(", ")
+    );
+    for package in &built.packages {
+        println!("    {package}");
+    }
+    println!("  index:   {}", built.release.display());
+    println!("\n{}", onionskin::apt::instructions(&options, &args.url));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Measure a printed calibration sheet from a scan of it.
+///
+/// The part of calibration that was a chore. Reading eight offsets off paper
+/// with a ruler, in tenths of a millimetre, is unpleasant to do and easy to do
+/// badly — and the numbers it produces are the ones every later delta is
+/// placed by. The scanner can read them instead, and it reads them better.
+fn cmd_calibrate_measure(args: MeasureArgs) -> Result<ExitCode, String> {
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+    let image = image::open(&args.scan)
+        .map_err(|e| format!("could not read '{}': {e}", args.scan.display()))?;
+    let registration = register(
+        &image,
+        ScanOptions {
+            page,
+            assume_cropped: args.cropped,
+            assume_square: args.square,
+            ..ScanOptions::new(page)
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("{}", registration.describe());
+
+    let gray = image.to_luma8();
+    let (profile, readings) = calibrate::calibrate_from_scan(
+        &gray,
+        &registration,
+        page,
+        args.inset,
+        &args.name,
+        &args.notes,
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("\nMeasured off the sheet:");
+    for reading in &readings {
+        println!(
+            "  P{:<2} {:+.2}, {:+.2} mm{}",
+            reading.index,
+            reading.dx_mm,
+            reading.dy_mm,
+            if reading.confidence < 0.6 {
+                "   (less sure of this one)"
+            } else {
+                ""
+            }
+        );
+    }
+
+    println!("\n{}", profile.correction().describe());
+    if let Some(rms) = profile.rms_residual_mm {
+        println!("  the fit misses each crosshair by {rms:.2} mm on average");
+    }
+    if let Some(worst) = profile.max_residual_mm {
+        println!("  and by {worst:.2} mm at worst");
+    }
+
+    if args.dry_run {
+        println!("\nNothing was saved — this was --dry-run.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let path = calibrate::save_profile(&profile).map_err(|e| e.to_string())?;
+    println!("\nSaved as '{}' in {}", profile.name, path.display());
+    println!("Use it with:  onionskin delta a.pdf b.pdf -o delta.pdf --profile {}", profile.name);
+    Ok(ExitCode::SUCCESS)
+}
+
 /// Write words on a document Onionskin did not make: a Word file, a PDF, a scan.
 ///
 /// The source is opened and measured, never altered. What comes out is a delta
@@ -2589,18 +2765,29 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
             check_writable(&args.output, "target")?;
             calibrate::make_target(&args.output, page, args.inset).map_err(|e| e.to_string())?;
 
-            println!("{}: a {} target.", args.output.display(), page.describe());
             println!(
-                "\n1. Print it on BLANK paper at 100% / \"Actual size\", with \"Fit to \
-                 page\" off.\n2. Put that same sheet back in the tray, the same way \
-                 up, and print it AGAIN.\n3. Each crosshair now has two impressions. \
-                 Read where the second one's arms\n   cross the printed scales — right \
-                 and down are positive.\n4. onionskin calibrate solve --name office \
-                 --point 'P1:+0.40,-0.15' ..."
+                "{}: a {} target, two pages.",
+                args.output.display(),
+                page.describe()
+            );
+            println!(
+                "\n1. Print PAGE 1 on blank paper at 100% / \"Actual size\", with \
+                 \"Fit to page\" off.\n\
+                 2. Put that same sheet back in the tray, the same way up, and print \
+                 PAGE 2\n   onto it. Each crosshair now has a cross from the first \
+                 pass and a diamond\n   from the second, and the gap between them is \
+                 the printer's error.\n\
+                 3. Scan the sheet, and let Onionskin read it:\n\
+                 \x20     onionskin calibrate measure sheet.png --name office\n\n\
+                 Or read the offsets off the printed scales yourself — right and down \
+                 positive —\nand type them in:\n\
+                 \x20     onionskin calibrate solve --name office --point 'P1:+0.40,-0.15' ..."
             );
             open_if_asked(args.open, &args.output);
             Ok(ExitCode::SUCCESS)
         }
+
+        CalibrateCommand::Measure(args) => cmd_calibrate_measure(args),
 
         CalibrateCommand::Solve(args) => {
             if args.points.len() < 2 {

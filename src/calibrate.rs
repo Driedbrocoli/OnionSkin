@@ -759,10 +759,11 @@ fn second_pass(page: PageSize, inset: f64) -> String {
 /// Well above the middle. It used to sit 22 mm above the centre of the sheet,
 /// which put six lines of prose straight across the middle crosshair and its
 /// label — P5 was unreadable, by eye or by scan, on every target Onionskin has
-/// ever written. The block is about 27 mm deep and a fiducial reaches 17 mm
-/// above its centre, so it starts far enough up to clear both.
+/// ever written. The block is about 31 mm deep and a fiducial reaches 17 mm
+/// above its centre, so it starts far enough up to leave a clear band of paper
+/// between the last line and the label below it.
 fn prose_y(page: PageSize) -> f64 {
-    page.height_mm / 2.0 - 48.0
+    page.height_mm / 2.0 - 53.0
 }
 
 /// Where the one line a small sheet gets goes.
@@ -919,9 +920,12 @@ const WINDOW_FAR_MM: f64 = 10.5;
 /// The coarsest scan worth trying to measure, in pixels per millimetre — about
 /// 140 dpi.
 ///
-/// The marks are drawn a third of a millimetre thick. Below this the line is
-/// under two pixels wide, which is thin enough for the threshold to break it
-/// into beads, and a broken ring is a ring whose middle is somewhere else.
+/// The target is drawn in hairlines: a third of a *point*, which is an eighth
+/// of a millimetre, so even a good scan has barely a pixel and a half across a
+/// mark. It survives that because the ink is weighed rather than counted, but
+/// below about this the line stops being continuous at all — the threshold
+/// breaks it into beads — and a broken ring is a ring whose middle is somewhere
+/// else. Refusing is better than measuring the gaps.
 const MIN_PX_PER_MM: f64 = 5.5;
 
 /// The radius nine tenths of a mark's ink lies inside, for each mark.
@@ -937,14 +941,15 @@ const DIAMOND_SPAN_MM: f64 = DIAMOND_MM * 0.95;
 ///
 /// A ratio, so that it says the same thing at 200 dpi as at 600, and so that a
 /// scan of a sheet the printer shrank by half a percent still reads as the
-/// shape it is. A ring would score 1 were its line infinitely thin; a printed
-/// line has width, and a measured ring comes in around 0.85. A diamond's ink
-/// reaches from 1/√2 of the half-diagonal at the middle of each edge out to the
-/// full distance at the corners, which lands near 0.7. Those two numbers are
-/// what the shapes were chosen to make different, and the gap between them is
-/// what the confidence is scaled against.
-const RING_ROUNDNESS: f64 = 0.85;
-const DIAMOND_ROUNDNESS: f64 = 0.70;
+/// shape it is. A ring would score 1 were its line infinitely thin; a real one
+/// measures between about 0.84 and 0.94, the fatter the ink the lower. A
+/// diamond's ink reaches from 1/√2 of the half-diagonal at the middle of each
+/// edge out to the full distance at the corners, and measures around 0.73
+/// however heavily it printed. Those two numbers are what the shapes were
+/// chosen to make different, and the gap between them is what the confidence is
+/// scaled against.
+const RING_ROUNDNESS: f64 = 0.90;
+const DIAMOND_ROUNDNESS: f64 = 0.73;
 
 /// How much better a shape must match one mark than the other before the
 /// reading is credited in full.
@@ -954,19 +959,31 @@ const SHAPE_MARGIN: f64 = 0.35;
 const MIN_SHAPE_SCORE: f64 = 0.20;
 
 /// Ink smaller than this is dirt, not a mark, and not worth doubting a reading
-/// over. A ring lays down about 3.5 mm² of ink and a diamond about 5 mm².
-const SPECK_MM2: f64 = 0.8;
+/// over.
+///
+/// Well under what a mark lays down — a ring is 1.2 to 1.7 mm² of ink depending
+/// on how thickly it printed and how coarsely it was scanned, a diamond half as
+/// much again. The margin is deliberate and it points this way on purpose: dirt
+/// counted as a mark costs a little confidence, while a mark dismissed as dirt
+/// costs the whole fiducial.
+const SPECK_MM2: f64 = 0.35;
 
 /// An offset up to this is an ordinary printer being an ordinary printer, and
 /// costs a reading nothing.
 const PLAUSIBLE_OFFSET_MM: f64 = 1.5;
 
-/// An offset beyond this is not a re-feed error. A sheet-fed printer that was
-/// four millimetres out would be visibly chewing the paper, so a number that
-/// large is far likelier to be two marks paired up wrongly — and a wrong pair
-/// fitted with a straight face is the failure this whole module exists to
-/// avoid. Refuse it and let the fit run on the fiducials that made sense.
-const MAX_OFFSET_MM: f64 = 4.0;
+/// An offset beyond this is not a re-feed error. A sheet-fed printer three
+/// millimetres out would be visibly chewing the paper, so a number that large
+/// is far likelier to be two marks paired up wrongly — and a wrong pair fitted
+/// with a straight face is the failure this whole module exists to avoid.
+/// Refuse it and let the fit run on the fiducials that made sense.
+///
+/// The window has the same say in this from the other direction: a diamond
+/// further out than about three millimetres runs into the edge of it, and
+/// anything touching that edge is thrown away unread. The two limits are set to
+/// agree so that a reading is never refused for one reason while looking as
+/// though it were refused for the other.
+const MAX_OFFSET_MM: f64 = 3.0;
 
 /// Below this a reading is not a reading, and is dropped rather than reported.
 const MIN_CONFIDENCE: f64 = 0.25;
@@ -1079,15 +1096,12 @@ struct Blob {
 }
 
 impl Blob {
-    fn new(points: &[(f64, f64)], px_per_mm: f64, clipped: bool) -> Blob {
-        let count = points.len() as f64;
-        let centre = (
-            points.iter().map(|p| p.0).sum::<f64>() / count,
-            points.iter().map(|p| p.1).sum::<f64>() / count,
-        );
+    /// `points` are the pixels that came out darker than the threshold;
+    /// `centre_mm` is the middle of the ink, weighed rather than counted.
+    fn new(points: &[(f64, f64)], centre_mm: (f64, f64), px_per_mm: f64, clipped: bool) -> Blob {
         let mut radii: Vec<f64> = points
             .iter()
-            .map(|p| (p.0 - centre.0).hypot(p.1 - centre.1))
+            .map(|p| (p.0 - centre_mm.0).hypot(p.1 - centre_mm.1))
             .collect();
         radii.sort_by(f64::total_cmp);
         let at = |fraction: f64| {
@@ -1095,10 +1109,10 @@ impl Blob {
             radii[((last as f64 * fraction).round() as usize).min(last)]
         };
         Blob {
-            centre_mm: centre,
+            centre_mm,
             near_mm: at(0.10),
             far_mm: at(0.90),
-            area_mm2: count / (px_per_mm * px_per_mm),
+            area_mm2: points.len() as f64 / (px_per_mm * px_per_mm),
             clipped,
         }
     }
@@ -1123,7 +1137,7 @@ impl Blob {
         if self.clipped || self.area_mm2 < SPECK_MM2 {
             return 0.0;
         }
-        nearness(self.far_mm, span_mm, span_mm * 0.30) * nearness(self.roundness(), roundness, 0.09)
+        nearness(self.far_mm, span_mm, span_mm * 0.30) * nearness(self.roundness(), roundness, 0.10)
     }
 }
 
@@ -1138,17 +1152,25 @@ fn nearness(value: f64, want: f64, tolerance: f64) -> f64 {
     (-0.5 * off * off).exp()
 }
 
+/// The two grey levels a window is read against: what counts as ink, and what
+/// the bare paper came out at.
+#[derive(Debug, Clone, Copy)]
+struct Levels {
+    ink: u8,
+    paper: u8,
+}
+
 /// The grey level that separates ink from paper, taken from the windows alone.
 ///
 /// Not from the whole scan, because a flatbed's dark backing around the sheet
 /// is a third cluster of greys and drags the split away from the one that
 /// matters. The windows are all well inside the paper, so what is in the tally
 /// is ink and paper and nothing else.
-fn ink_threshold(
+fn ink_levels(
     image: &image::GrayImage,
     mapping: &crate::scan::Mapping,
     windows: &[Window],
-) -> u8 {
+) -> Levels {
     let mut histogram = [0u64; 256];
     for window in windows {
         window.walk(image, mapping, |_, level| {
@@ -1157,11 +1179,8 @@ fn ink_threshold(
     }
     let split = crate::scan::otsu_of_histogram(&histogram);
 
-    // Otsu always finds a split, even in a picture of blank paper — where the
-    // best one available is somewhere in the middle of the paper's own noise,
-    // and half the sheet then reads as ink. Insisting that ink be markedly
-    // darker than the paper turns that case into "no marks here", which is the
-    // truth, rather than into a window full of enormous shapes.
+    // Nine tenths of what is in a window is bare paper, so the level nine
+    // tenths of the pixels are lighter than is the paper itself.
     let total: u64 = histogram.iter().sum();
     let mut seen = 0u64;
     let mut paper = 255u8;
@@ -1172,7 +1191,16 @@ fn ink_threshold(
             break;
         }
     }
-    split.min(paper.saturating_sub(45))
+
+    // Otsu always finds a split, even in a picture of blank paper — where the
+    // best one available is somewhere in the middle of the paper's own noise,
+    // and half the sheet then reads as ink. Insisting that ink be markedly
+    // darker than the paper turns that case into "no marks here", which is the
+    // truth, rather than into a window full of enormous shapes.
+    Levels {
+        ink: split.min(paper.saturating_sub(45)),
+        paper,
+    }
 }
 
 /// Every connected patch of ink in one window.
@@ -1180,11 +1208,22 @@ fn ink_threshold(
 /// Eight-way connected, not four: the diamond's edges run at 45°, and a
 /// diagonal line of pixels touching only at their corners is one stroke to the
 /// eye and four hundred separate specks to a four-way search.
+///
+/// The middle of each patch is weighed rather than counted: every pixel in and
+/// around it counts for as much as it is darker than the paper. Counting whole
+/// pixels instead sounds harmless and is not. A printed line is a couple of
+/// pixels wide, no edge of it lands neatly on a pixel boundary, and where a
+/// threshold falls decides whether the last row of pixels along an edge is in
+/// or out — so one side of a diamond comes out a pixel fatter than the other,
+/// and the middle of the ink moves half a pixel with it. Half a pixel at 300
+/// dpi is 0.04 mm, which is most of the accuracy this whole exercise was for.
+/// Weighing by how much ink each pixel holds puts the edge back where the ink
+/// really stops, between the pixels.
 fn ink_blobs(
     image: &image::GrayImage,
     mapping: &crate::scan::Mapping,
     px_per_mm: f64,
-    threshold: u8,
+    levels: Levels,
     window: &Window,
 ) -> Vec<Blob> {
     let Some((x0, y0, x1, y1)) = window.pixel_bounds(image, mapping) else {
@@ -1204,14 +1243,25 @@ fn ink_blobs(
             }
             let cell = row * width + column;
             inside[cell] = true;
-            ink[cell] = image.get_pixel(px, py).0[0] < threshold;
+            ink[cell] = image.get_pixel(px, py).0[0] < levels.ink;
         }
     }
 
+    // Where a pixel is, in millimetres on the sheet.
+    let place = |cell: usize| {
+        mapping.pixel_to_page_mm((
+            (x0 + (cell % width) as u32) as f64 + 0.5,
+            (y0 + (cell / width) as u32) as f64 + 0.5,
+        ))
+    };
+
     let mut taken = vec![false; width * height];
-    let mut blobs = Vec::new();
+    // Which patch each pixel has already been weighed for, so that the fringe
+    // of one is not counted twice. Numbered from one, since zero means never.
+    let mut weighed = vec![0u32; width * height];
+    let mut blobs: Vec<Blob> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
-    let mut points: Vec<(f64, f64)> = Vec::new();
+    let mut cells: Vec<usize> = Vec::new();
 
     for seed in 0..width * height {
         if !ink[seed] || taken[seed] {
@@ -1219,16 +1269,13 @@ fn ink_blobs(
         }
         taken[seed] = true;
         stack.clear();
-        points.clear();
+        cells.clear();
         stack.push(seed);
         let mut clipped = false;
 
         while let Some(cell) = stack.pop() {
+            cells.push(cell);
             let (row, column) = (cell / width, cell % width);
-            points.push(mapping.pixel_to_page_mm((
-                (x0 + column as u32) as f64 + 0.5,
-                (y0 + row as u32) as f64 + 0.5,
-            )));
             for step_y in -1i64..=1 {
                 for step_x in -1i64..=1 {
                     if step_x == 0 && step_y == 0 {
@@ -1254,7 +1301,47 @@ fn ink_blobs(
                 }
             }
         }
-        blobs.push(Blob::new(&points, px_per_mm, clipped));
+
+        // Weigh the patch and the ring of half-inked pixels around it, each
+        // pixel counting for as much as it is darker than the paper.
+        let patch = blobs.len() as u32 + 1;
+        let (mut weight, mut sum_x, mut sum_y) = (0.0f64, 0.0f64, 0.0f64);
+        for &cell in &cells {
+            let (row, column) = (cell / width, cell % width);
+            for step_y in -1i64..=1 {
+                for step_x in -1i64..=1 {
+                    let (nx, ny) = (column as i64 + step_x, row as i64 + step_y);
+                    if nx < 0 || ny < 0 || nx >= width as i64 || ny >= height as i64 {
+                        continue;
+                    }
+                    let next = ny as usize * width + nx as usize;
+                    if !inside[next] || weighed[next] == patch {
+                        continue;
+                    }
+                    weighed[next] = patch;
+                    let level = image.get_pixel(x0 + nx as u32, y0 + ny as u32).0[0];
+                    let darkness = (levels.paper as f64 - level as f64).max(0.0);
+                    if darkness <= 0.0 {
+                        continue;
+                    }
+                    let mm = place(next);
+                    weight += darkness;
+                    sum_x += darkness * mm.0;
+                    sum_y += darkness * mm.1;
+                }
+            }
+        }
+
+        let points: Vec<(f64, f64)> = cells.iter().map(|cell| place(*cell)).collect();
+        let centre = if weight > 0.0 {
+            (sum_x / weight, sum_y / weight)
+        } else {
+            (
+                points.iter().map(|p| p.0).sum::<f64>() / points.len() as f64,
+                points.iter().map(|p| p.1).sum::<f64>() / points.len() as f64,
+            )
+        };
+        blobs.push(Blob::new(&points, centre, px_per_mm, clipped));
     }
     blobs
 }
@@ -1265,12 +1352,12 @@ fn read_fiducial(
     image: &image::GrayImage,
     mapping: &crate::scan::Mapping,
     px_per_mm: f64,
-    threshold: u8,
+    levels: Levels,
     index: usize,
     centre_mm: (f64, f64),
 ) -> Option<Reading> {
     let window = Window::around(centre_mm);
-    let blobs = ink_blobs(image, mapping, px_per_mm, threshold, &window);
+    let blobs = ink_blobs(image, mapping, px_per_mm, levels, &window);
 
     let (mut ring, mut ring_score, mut ring_as_diamond) = (None, 0.0f64, 0.0f64);
     let (mut diamond, mut diamond_score, mut diamond_as_ring) = (None, 0.0f64, 0.0f64);
@@ -1318,7 +1405,7 @@ fn read_fiducial(
     let dx_mm = diamond.centre_mm.0 - DIAMOND_OFFSET_MM - ring.centre_mm.0;
     let dy_mm = diamond.centre_mm.1 + DIAMOND_OFFSET_MM - ring.centre_mm.1;
     let apart = dx_mm.hypot(dy_mm);
-    if !(apart <= MAX_OFFSET_MM) {
+    if !apart.is_finite() || apart > MAX_OFFSET_MM {
         return None;
     }
 
@@ -1332,7 +1419,7 @@ fn read_fiducial(
             * ((apart - PLAUSIBLE_OFFSET_MM) / (MAX_OFFSET_MM - PLAUSIBLE_OFFSET_MM))
                 .clamp(0.0, 1.0);
     let confidence = quality * separation * crowding * plausibility;
-    if !(confidence >= MIN_CONFIDENCE) {
+    if !confidence.is_finite() || confidence < MIN_CONFIDENCE {
         return None;
     }
 
@@ -1376,8 +1463,9 @@ pub fn measure_from_scan(
     }
     if px_per_mm < MIN_PX_PER_MM {
         return Err(CalibrateError::Invalid(format!(
-            "this scan is only {:.0} dpi. The marks on a calibration sheet are a third \
-             of a millimetre thick, so scan it again at 300 dpi or more.",
+            "this scan is only {:.0} dpi. The marks on a calibration sheet are drawn in \
+             hairlines, about an eighth of a millimetre thick, so scan it again at 300 \
+             dpi or more.",
             registration.dpi()
         )));
     }
@@ -1400,18 +1488,12 @@ pub fn measure_from_scan(
     let mapping = registration.mapping();
     let points = fiducials(page, inset);
     let windows: Vec<Window> = points.iter().map(|p| Window::around(*p)).collect();
-    let threshold = ink_threshold(image, &mapping, &windows);
+    let levels = ink_levels(image, &mapping, &windows);
 
     let mut readings = Vec::new();
     for (index, centre) in points.into_iter().enumerate() {
-        if let Some(reading) = read_fiducial(
-            image,
-            &mapping,
-            px_per_mm,
-            threshold,
-            index + 1,
-            centre,
-        ) {
+        if let Some(reading) = read_fiducial(image, &mapping, px_per_mm, levels, index + 1, centre)
+        {
             readings.push(reading);
         }
     }

@@ -531,6 +531,64 @@ name, and the promise on the sidebar was rewritten to match rather than left to
 drift. A promise that is nearly true is worth less than a smaller one that is
 exactly true.
 
+## Measuring a printer instead of asking somebody to
+
+`src/calibrate.rs`. Calibration was always the part that made Onionskin
+accurate and always the part nobody did, because it ended in reading eight
+offsets off paper with a ruler, in tenths of a millimetre, and typing them into
+a command with an awkward syntax. Those numbers are what every later delta is
+placed by, so the least reliable step in the whole program was a person
+squinting at a printed scale.
+
+The target is two pages now, and that change is what makes the rest possible.
+Both passes used to print the same file, so on the sheet the two impressions
+were identical crosshairs and nothing could tell which was which — an automatic
+measurement would have got the offset's sign ambiguous. Page one prints crosses
+and page two prints diamonds, so the vector from cross to diamond is
+unambiguous and is exactly the registration error.
+
+Then `measure_from_scan` takes a window around each expected crosshair, finds
+the connected components in it, classifies each as cross or diamond by shape,
+and takes the difference of their centroids. A window with the wrong number of
+marks in it lowers that reading's confidence; a crosshair that cannot be read at
+all is left out rather than guessed at, and `solve_from_offsets` was always
+happy with a subset. Fewer than three readable ones is refused, because two
+points and a similarity is four numbers through four numbers — it passes exactly
+through both readings and says nothing about whether either was any good.
+
+On a synthetic sheet with a known 0.76 mm offset, the five crosshairs come back
+within 0.05 mm on average. A ruler and a good eye do perhaps ten times worse.
+
+## Publishing an apt repository
+
+`src/apt.rs`. `sudo apt install onionskin` cannot be made to work by hosting a
+file: apt installs from an archive with an index and a signature, and being in
+Debian's own archive means a sponsor and months of waiting. Hosting the same
+thing yourself takes a directory and two lines typed once by whoever wants it,
+and that directory is what this builds — `pool/`, `Packages`, `Packages.gz`,
+`Release`, with SHA-256 throughout and no MD5 or SHA-1, both of which have been
+broken for years and unnecessary since 2016.
+
+SHA-256 is written out here by hand, like the CRC-32, the tar, the zip and the
+`ar` archive next door. That is the house style and it is not merely stylistic:
+it is one fewer dependency in the trust path of the thing that says these
+packages came from you.
+
+Signing is the one part deliberately left to `gpg`. Everything else is Rust down
+to the hash, but key custody is not a thing to hand-roll, and the private key
+belongs wherever its owner already keeps their keys. What is generated instead
+is the exact commands, including both `InRelease` and the detached
+`Release.gpg`, and the `signed-by=` form of the sources line, which trusts one
+key for one repository — `apt-key add` trusted a key for the whole machine,
+including the operating system, and has been deprecated since apt 2.2.
+
+Two details worth writing down because both produce a repository that looks
+right and does not work. Packages of architecture `all` must be copied into
+*every* `binary-<arch>/Packages`, not only `binary-all`, or apt never sees them
+and says there is no such package. And an epoch in a version (`1:0.1.0`) must be
+stripped from the pool filename and kept in the `Version:` field, because a
+colon is reserved in URLs and illegal in a filename on Windows.
+
 ## Getting it onto somebody's machine
 
 The `package` module writes the archives and `install` unpacks itself into a

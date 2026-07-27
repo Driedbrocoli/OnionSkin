@@ -62,9 +62,27 @@ curl -fL -O https://github.com/Driedbrocoli/OnionSkin/releases/latest/download/o
 sudo apt install ./onionskin-linux-x64.deb
 ```
 
-**`sudo apt install onionskin` does not work**, and will not for a long while:
-that means being in Debian's own archive, which takes a sponsor and months. The
-`.deb` above is the same package, installed from a file instead of a mirror.
+**`sudo apt install onionskin` does not work from here**, and will not for a
+long while: that means being in Debian's own archive, which takes a sponsor and
+months. The `.deb` above is the same package, installed from a file instead of a
+mirror.
+
+If you have a web server, you can host the archive yourself and then it does
+work. `onionskin apt-repo` builds the whole thing — pool, `Packages`, `Release`,
+the hashes — from your `.deb` files, and prints the `gpg` commands to sign it
+and the two lines your users type:
+
+```bash
+onionskin apt-repo --deb onionskin_0.1.0_amd64.deb --out apt \
+  --url https://packages.example.com/apt
+```
+
+Signing is left to `gpg` on purpose: everything else is Rust down to the
+SHA-256, but key custody is not a thing to hand-roll, and the private key
+belongs wherever you already keep your keys. The instructions it prints use
+`signed-by=`, which trusts that one key for that one repository — not
+`apt-key add`, which trusted a key for the whole machine and has been
+deprecated since apt 2.2.
 
 That copies both programs and the PDF renderer into your own account, puts
 `onionskin` on your path, and — on Linux and Windows — adds a menu entry that
@@ -467,7 +485,7 @@ script. `--force` overrides.
 
 Uncalibrated, a second pass through a sheet-fed printer lands within about
 **±2 mm**. That is fine for a signature and useless for filling a pre-printed
-box. Calibration gets it under **±0.5 mm**, and needs no scanner.
+box. Calibration gets it under **±0.5 mm**.
 
 ```bash
 onionskin calibrate target -o target.pdf                 # A4 by default
@@ -475,12 +493,36 @@ onionskin calibrate target -o target.pdf --page legal    # or a5, a3, tabloid…
 onionskin calibrate target -o target.pdf --page 100x150  # or any size in mm
 ```
 
-1. Print `target.pdf` on **blank** paper at 100%.
-2. Put that same sheet back in the tray and print the same file **again**.
-3. Each crosshair now has two impressions. Read how far the second landed from
-   the first — right is `+x`, down is `+y` — against the ruler printed beside
-   it.
-4. Feed those readings back:
+The target is two pages. Print **page 1** on blank paper at 100%, put that same
+sheet back in the tray, and print **page 2** onto it. Each crosshair now carries
+a cross from the first pass and a diamond from the second, and the gap between
+them is the printer's error.
+
+Then scan the sheet and let Onionskin read it:
+
+```bash
+onionskin calibrate measure sheet.png --name office
+```
+
+```
+Measured off the sheet:
+  P1  +0.75, -0.40 mm
+  P2  +0.74, -0.47 mm
+  P3  +0.77, -0.43 mm
+  P4  +0.80, -0.37 mm
+  P5  +0.67, -0.42 mm
+
+shift -0.74, +0.42 mm, rotate +0.008° cw, scale 0.99989 (-0.011%)
+  the fit misses each crosshair by 0.05 mm on average
+```
+
+That is the whole of it. `--dry-run` shows the numbers without saving anything.
+A crosshair the scan cannot resolve is left out rather than guessed at, and
+fewer than three readable ones is refused — two points and a similarity is not a
+fit, it is four numbers through four numbers.
+
+**No scanner?** The rulers are still printed beside every crosshair. Read the
+offsets off them by eye — right is `+x`, down is `+y` — and type them in:
 
 ```bash
 onionskin calibrate solve --name office \
@@ -488,7 +530,7 @@ onionskin calibrate solve --name office \
   --point 'P3:+0.45,-0.10' --point 'P4:+0.40,-0.15'
 ```
 
-That fits shift, rotation and scale — the full space of error a paper path can
+Either route fits shift, rotation and scale — the full space of error a paper path can
 introduce — and stores it in `~/.onionskin/profiles/`. Every later run applies
 the inverse:
 

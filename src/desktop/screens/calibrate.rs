@@ -23,6 +23,8 @@ pub struct State {
     target_to: Option<std::path::PathBuf>,
     /// What was measured off the printed target, one line per mark.
     measurements: String,
+    /// A scan of the printed sheet, for the route that needs no ruler.
+    sheet: Option<std::path::PathBuf>,
 }
 
 impl Default for State {
@@ -33,6 +35,7 @@ impl Default for State {
             page: "a4".into(),
             target_to: None,
             measurements: String::new(),
+            sheet: None,
         }
     }
 }
@@ -131,9 +134,10 @@ pub fn show(state: &mut State, room: &mut Room) {
             };
             match calibrate::make_target(&target, page, None) {
                 Ok(_) => Outcome::wrote(
-                    "Print this at 100%, then put the same sheet back in the tray \
-                     and print it again. The second pass will not land exactly on \
-                     the first — that gap is what gets measured.",
+                    "Two pages. Print PAGE 1 at 100% on blank paper, put that same \
+                     sheet back in the tray, and print PAGE 2 onto it. Each mark \
+                     then carries a cross from the first pass and a diamond from \
+                     the second, and the gap between them is what gets measured.",
                     vec![target],
                 ),
                 Err(e) => Outcome::refused(e.to_string()),
@@ -148,12 +152,49 @@ pub fn show(state: &mut State, room: &mut Room) {
     // ------------------------------------------------------------ the answer
     room.ui
         .label(egui::RichText::new("Step 2 — measure and save").strong());
+
+    // The route that needs no ruler, offered first because it is the one
+    // worth taking: a scanner reads tenths of a millimetre about ten times
+    // better than a person squinting at a printed scale, and the numbers it
+    // produces are what every later delta is placed by.
     widgets::hint(
         room.ui,
-        "For each mark, measure how far the second pass landed from the first, \
-         in millimetres, right and down. One per line, as P<mark>:<right>,<down> \
-         — left and up are negative.",
+        "Scan the printed sheet and let Onionskin read it — this is both easier \
+         and more accurate than reading the scales by eye.",
     );
+    widgets::file_row(
+        room.ui,
+        room.picker,
+        "A scan of the printed sheet",
+        &mut state.sheet,
+        &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+        room.dropped,
+    );
+    let can_measure = state.sheet.is_some() && !state.name.trim().is_empty();
+    let go = room
+        .ui
+        .add_enabled(
+            can_measure && !room.jobs.busy(),
+            egui::Button::new(egui::RichText::new("Read the sheet and save").strong()),
+        )
+        .clicked();
+    if state.sheet.is_some() && state.name.trim().is_empty() {
+        widgets::hint(room.ui, "Give it a name below first.");
+    }
+    if go {
+        measure_from_sheet(state, room);
+    }
+
+    room.ui.add_space(10.0);
+    room.ui
+        .collapsing("Or read the scales by eye instead", |ui| {
+            widgets::hint(
+                ui,
+                "For each mark, measure how far the diamond landed from the cross, \
+                 in millimetres, right and down. One per line, as \
+                 P<mark>:<right>,<down> — left and up are negative.",
+            );
+        });
     room.ui.add(
         egui::TextEdit::multiline(&mut state.measurements)
             .desired_rows(5)
@@ -189,6 +230,61 @@ pub fn show(state: &mut State, room: &mut Room) {
             state.profiles = calibrate::list_profiles().ok();
         }
     }
+}
+
+/// Read the printed sheet from a scan of it, and save the profile.
+///
+/// The part of calibration that used to be a chore. Reading eight offsets off
+/// paper with a ruler, in tenths of a millimetre, is unpleasant to do and easy
+/// to do badly — and those numbers are what every later delta is placed by, so
+/// the least reliable step in the program was somebody squinting at a scale.
+fn measure_from_sheet(state: &mut State, room: &mut Room) {
+    let Some(sheet) = state.sheet.clone() else {
+        return;
+    };
+    let name = state.name.trim().to_string();
+    let page_text = state.page.clone();
+    state.profiles = None;
+
+    room.jobs.start("Reading the sheet", move |report| {
+        let page = match onionskin::geometry::parse_page(&page_text) {
+            Ok(page) => page,
+            Err(e) => return Outcome::refused(e.to_string()),
+        };
+        report.saying("Opening the scan…");
+        let image = match image::open(&sheet) {
+            Ok(image) => image,
+            Err(e) => return Outcome::refused(format!("could not read that scan: {e}")),
+        };
+        report.saying("Finding the sheet on the glass…");
+        let registration = match onionskin::scan::register(
+            &image,
+            onionskin::scan::ScanOptions::new(page),
+        ) {
+            Ok(registration) => registration,
+            Err(e) => return Outcome::refused(e.to_string()),
+        };
+
+        report.saying("Measuring each mark…");
+        let gray = image.to_luma8();
+        let (profile, readings) =
+            match calibrate::calibrate_from_scan(&gray, &registration, page, None, &name, "") {
+                Ok(found) => found,
+                Err(e) => return Outcome::refused(e.to_string()),
+            };
+
+        let measured: Vec<String> = readings.iter().map(|r| r.describe()).collect();
+        match calibrate::save_profile(&profile) {
+            Ok(_) => Outcome::done(format!(
+                "Saved as '{}'.\n\n{}\n\n{}\n\nUse it by naming it in the \
+                 comparing screen's Settings.",
+                profile.name,
+                measured.join("\n"),
+                profile.correction().describe(),
+            )),
+            Err(e) => Outcome::refused(e.to_string()),
+        }
+    });
 }
 
 fn solve(state: &mut State, room: &mut Room) {
