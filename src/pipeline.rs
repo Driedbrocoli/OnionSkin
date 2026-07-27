@@ -722,6 +722,16 @@ pub(crate) fn compose_onto(
                 safety::BENEATH_DPI,
                 options.diff.ink_threshold,
             ));
+            // Whether the printer being out by a couple of millimetres matters
+            // for this particular job, which the calibration note below cannot
+            // know and this page can answer.
+            checks.extend(safety::check_slack(
+                diff,
+                gray,
+                *width,
+                safety::BENEATH_DPI,
+                options.diff.ink_threshold,
+            ));
         }
     }
     checks.extend(safety::check_empty(&diffs));

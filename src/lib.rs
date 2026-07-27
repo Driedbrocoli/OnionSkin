@@ -1,6 +1,7 @@
 pub mod acquire;
 pub mod anchor;
 pub mod apt;
+pub mod blanks;
 pub mod calibrate;
 pub mod delta;
 pub mod diff;
@@ -16,6 +17,7 @@ pub mod pdf;
 pub mod picture;
 pub mod pipeline;
 pub mod printer;
+pub mod proof;
 pub mod render;
 pub mod rows;
 pub mod safety;

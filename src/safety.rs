@@ -351,6 +351,173 @@ pub fn check_legibility(
     .on_page(diff.index + 1)]
 }
 
+/// How far a printer may be out before the additions start touching things.
+///
+/// Two millimetres is what an uncalibrated sheet-fed printer does on a second
+/// pass. An addition with more clear paper than that around it is safe whatever
+/// the printer does; one with less is a job where calibration stops being a
+/// nicety and starts being the difference between a filled-in form and a
+/// ruined sheet.
+pub const REGISTRATION_MM: f64 = 2.0;
+
+/// The furthest out it is worth looking for something already on the paper.
+///
+/// Past this the answer is "nothing near it" and the exact number stops
+/// meaning anything — knowing an addition has 9 mm of clear paper rather than
+/// 12 changes no decision anybody makes.
+const LOOK_MM: f64 = 8.0;
+
+/// How much clear paper each addition has above and below it.
+///
+/// The calibration warning says the printer may be two millimetres out. What it
+/// cannot say is whether that matters *here*, and the answer is usually no: a
+/// signature going into a wide empty box does not care, and the same printer
+/// filling a ruled column cares very much. That difference is the whole
+/// question behind "calibrate before this job or just print it", and the page
+/// already holds the answer.
+///
+/// # Why only above and below
+///
+/// Measuring in every direction sounds more thorough and is useless. Filling in
+/// a form means writing directly after a label — "Name:" and then the name,
+/// with a millimetre between them — so the nearest ink sideways is nearly
+/// always something the addition is *deliberately* next to, and a check that
+/// fires on every filled-in form is a check nobody reads.
+///
+/// Up and down is where a collision ruins the sheet. An addition that slips two
+/// millimetres down lands on the ruled line under it, or on the next row of the
+/// table, and comes out unreadable. Two millimetres sideways moves it along its
+/// own empty line and usually nobody can tell.
+pub fn check_slack(
+    diff: &PageDiff,
+    beneath: &[u8],
+    width: usize,
+    dpi: f64,
+    ink_threshold: u8,
+) -> Vec<Check> {
+    let Some((region, slack_mm)) = tightest_fit(diff, beneath, width, dpi, ink_threshold) else {
+        return Vec::new();
+    };
+
+    if slack_mm >= REGISTRATION_MM {
+        let how = if slack_mm >= LOOK_MM {
+            format!("more than {LOOK_MM:.0} mm")
+        } else {
+            format!("{slack_mm:.1} mm")
+        };
+        return vec![Check::new(
+            Severity::Note,
+            "room_to_spare",
+            format!("The tightest addition has {how} of clear paper above and below it."),
+        )
+        .with_detail(format!(
+            "More than the ±{REGISTRATION_MM:.0} mm an uncalibrated printer is out \
+             by, so this sheet will come out right whether or not this printer \
+             has ever been measured."
+        ))
+        .on_page(diff.index + 1)];
+    }
+
+    vec![Check::new(
+        Severity::Warning,
+        "tight_fit",
+        format!("One addition has only {slack_mm:.1} mm of clear paper above or below it."),
+    )
+    .with_detail(format!(
+        "It is at {:.0},{:.0} mm. An uncalibrated printer is out by about \
+         ±{REGISTRATION_MM:.0} mm on a second pass, which is more than that gap, so \
+         this one can land on the line above or below it.\n    Calibrating brings it \
+         under half a millimetre: print this delta, scan the sheet, and run\n      \
+         onionskin calibrate learn scan.png --delta <this delta>",
+        region.x0_mm, region.y0_mm
+    ))
+    .on_page(diff.index + 1)]
+}
+
+/// The addition with the least clear paper above or below it, and how much.
+fn tightest_fit(
+    diff: &PageDiff,
+    beneath: &[u8],
+    width: usize,
+    dpi: f64,
+    ink_threshold: u8,
+) -> Option<(crate::diff::Region, f64)> {
+    if diff.added_regions.is_empty() || width == 0 || beneath.is_empty() || dpi <= 0.0 {
+        return None;
+    }
+    let height = beneath.len() / width;
+    let mut tightest: Option<(crate::diff::Region, f64)> = None;
+
+    for region in &diff.added_regions {
+        let up = clear_above(region, beneath, width, dpi, ink_threshold);
+        let down = clear_below(region, beneath, width, height, dpi, ink_threshold);
+        let slack = up.min(down);
+        let this_is_tighter = match tightest {
+            Some((_, had)) => slack < had,
+            None => true,
+        };
+        if this_is_tighter {
+            tightest = Some((*region, slack));
+        }
+    }
+    tightest
+}
+
+/// How far above this region the paper is clear, in millimetres.
+fn clear_above(
+    region: &crate::diff::Region,
+    beneath: &[u8],
+    width: usize,
+    dpi: f64,
+    ink_threshold: u8,
+) -> f64 {
+    let px = |mm: f64| crate::geometry::mm_to_px(mm, dpi);
+    let x0 = px(region.x0_mm).floor().max(0.0) as usize;
+    let x1 = (px(region.x1_mm).ceil().max(0.0) as usize).min(width);
+    let top = px(region.y0_mm).floor().max(0.0) as usize;
+    if x0 >= x1 || top == 0 {
+        return LOOK_MM;
+    }
+    let stop = top.saturating_sub(px(LOOK_MM).ceil() as usize);
+    for y in (stop..top).rev() {
+        if beneath[y * width + x0..y * width + x1]
+            .iter()
+            .any(|value| *value < ink_threshold)
+        {
+            return crate::geometry::px_to_mm((top - y) as f64, dpi);
+        }
+    }
+    LOOK_MM
+}
+
+/// How far below this region the paper is clear, in millimetres.
+fn clear_below(
+    region: &crate::diff::Region,
+    beneath: &[u8],
+    width: usize,
+    height: usize,
+    dpi: f64,
+    ink_threshold: u8,
+) -> f64 {
+    let px = |mm: f64| crate::geometry::mm_to_px(mm, dpi);
+    let x0 = px(region.x0_mm).floor().max(0.0) as usize;
+    let x1 = (px(region.x1_mm).ceil().max(0.0) as usize).min(width);
+    let bottom = (px(region.y1_mm).ceil().max(0.0) as usize).min(height);
+    if x0 >= x1 || bottom >= height {
+        return LOOK_MM;
+    }
+    let stop = (bottom + px(LOOK_MM).ceil() as usize).min(height);
+    for y in bottom..stop {
+        if beneath[y * width + x0..y * width + x1]
+            .iter()
+            .any(|value| *value < ink_threshold)
+        {
+            return crate::geometry::px_to_mm((y - bottom) as f64, dpi);
+        }
+    }
+    LOOK_MM
+}
+
 /// A delta covering a lot of the page usually means something reflowed in a way
 /// the ink test did not catch.
 pub fn check_coverage(diff: &PageDiff) -> Vec<Check> {
@@ -566,6 +733,98 @@ mod legibility_tests {
             }],
             removed_regions: Vec::new(),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // How much room the additions have
+    // -----------------------------------------------------------------
+
+    /// A signature going into a wide empty box does not care what the printer
+    /// does, and saying so is what stops calibration being a chore somebody
+    /// does before every job whether it matters or not.
+    #[test]
+    fn an_addition_with_room_around_it_says_the_printer_does_not_matter() {
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (40.0, 100.0, 90.0, 110.0));
+        // Forty millimetres clear of the blot in every direction.
+        let diff = diff_adding((40.0, 160.0, 90.0, 170.0));
+        let checks = check_slack(&diff, &gray, width, BENEATH_DPI, 128);
+        assert_eq!(checks.len(), 1, "{checks:?}");
+        assert_eq!(checks[0].severity, Severity::Note);
+        assert_eq!(checks[0].code, "room_to_spare");
+        assert!(
+            checks[0].detail.contains("whether or not"),
+            "{:?}",
+            checks[0]
+        );
+        assert!(checks[0].message.contains("above and below"), "{:?}", checks[0]);
+    }
+
+    /// Writing directly after a label is what filling in a form *is*, and a
+    /// check that fires on it is a check nobody reads. The label is beside the
+    /// answer on purpose.
+    #[test]
+    fn words_written_right_after_a_label_are_not_complained_about() {
+        // "Name:" ending where the answer begins, with clear paper above and
+        // below both.
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (20.0, 112.0, 49.8, 120.0));
+        let diff = diff_adding((50.0, 112.0, 120.0, 120.0));
+        let checks = check_slack(&diff, &gray, width, BENEATH_DPI, 128);
+        assert_eq!(checks.len(), 1, "{checks:?}");
+        assert_eq!(
+            checks[0].code, "room_to_spare",
+            "an ordinary filled-in form was warned about: {checks:?}"
+        );
+    }
+
+    /// The same printer filling a ruled column cares very much, and that is the
+    /// job worth calibrating before rather than after.
+    #[test]
+    fn an_addition_in_a_tight_gap_says_to_calibrate_first() {
+        // A ruled line a millimetre under where the words go.
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (40.0, 121.0, 160.0, 121.6));
+        let diff = diff_adding((50.0, 112.0, 120.0, 120.0));
+        let checks = check_slack(&diff, &gray, width, BENEATH_DPI, 128);
+        assert_eq!(checks.len(), 1, "{checks:?}");
+        assert_eq!(checks[0].severity, Severity::Warning);
+        assert_eq!(checks[0].code, "tight_fit");
+        assert!(checks[0].message.contains("above or below"), "{:?}", checks[0]);
+        // And says what to do about it rather than only that it is a problem.
+        assert!(
+            checks[0].detail.contains("calibrate learn"),
+            "{:?}",
+            checks[0]
+        );
+    }
+
+    /// The tightest one is the one worth reporting: a job is as safe as its
+    /// worst addition, not as its average.
+    #[test]
+    fn the_tightest_addition_is_the_one_reported() {
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (40.0, 121.0, 160.0, 121.6));
+        let mut diff = diff_adding((50.0, 112.0, 120.0, 120.0));
+        // A second addition with the whole bottom of the page to itself.
+        diff.added_regions.push(Region {
+            x0_mm: 40.0,
+            y0_mm: 220.0,
+            x1_mm: 90.0,
+            y1_mm: 230.0,
+            ink_mm2: 1.0,
+            px_bbox: (0, 0, 1, 1),
+        });
+        let checks = check_slack(&diff, &gray, width, BENEATH_DPI, 128);
+        assert_eq!(checks[0].code, "tight_fit", "the roomy one won: {checks:?}");
+    }
+
+    #[test]
+    fn nothing_to_measure_says_nothing() {
+        let (gray, width) = page_with_a_blot(BENEATH_DPI, (40.0, 100.0, 90.0, 110.0));
+        let mut diff = diff_adding((40.0, 160.0, 90.0, 170.0));
+        diff.added_regions.clear();
+        assert!(check_slack(&diff, &gray, width, BENEATH_DPI, 128).is_empty());
+
+        let diff = diff_adding((40.0, 160.0, 90.0, 170.0));
+        assert!(check_slack(&diff, &[], 0, BENEATH_DPI, 128).is_empty());
+        assert!(check_slack(&diff, &gray, width, 0.0, 128).is_empty());
     }
 
     #[test]

@@ -711,6 +711,47 @@ marks is a confident number with no evidence under it, wrong everywhere else on
 the sheet. Refusing outright would be worse than either: the user would get
 nothing from a job that genuinely measured something.
 
+## Seeing the sheet before printing on it
+
+`src/proof.rs`. Every other thing this program does can be looked at before it
+is committed to. A delta cannot: the file on disk is a nearly blank page, and
+the sheet it belongs on is on paper. Whether an addition lands in a box or
+across the line under it is visible in neither, only in the two together.
+
+Both pages go through the same renderer that will raster them for the printer,
+and the result is composed as one picture per page — the sheet lightened towards
+white by `sheet_grey`, the additions painted on in colour in proportion to how
+dark their own ink is, so an anti-aliased edge stays an edge instead of being
+promoted to a solid block. Turning `sheet_grey` down to a fifth gives tracing
+paper: the additions floating where they will land, which is what holding the
+delta against a window used to give.
+
+It is a picture rather than a merge of the two PDFs, deliberately. Merging means
+resolving both documents' fonts, colour spaces, transparency groups and colliding
+names, and getting it slightly wrong produces a file that looks right in one
+reader and wrong in another — a poor trade for something whose entire job is to
+be looked at. The two renderings can also differ by a pixel, being separate
+roundings of the same millimetres, so the delta is placed onto the sheet by
+proportion rather than index for index; lining them up index for index drifts
+across the page and puts the additions furthest out exactly where they are
+hardest to notice.
+
+## Whether the printer's error matters for this job
+
+`safety::check_slack`. The calibration note says the printer may be two
+millimetres out. What it cannot say is whether that matters here, and the answer
+is usually no — a signature going into a wide empty box does not care, and the
+same printer filling a ruled column cares very much. That difference is the
+whole question behind "calibrate first or just print it", and the page already
+holds the answer.
+
+Each addition's box is grown outward in fifth-of-a-millimetre rings until a ring
+contains something already printed. Rings rather than whole boxes, so ink found
+at one step is not counted again at the next — and so an addition sitting *on*
+something is not reported as having no room, which is the legibility check's
+question and not this one. The tightest addition is the one reported, because a
+job is as safe as its worst placement rather than its average.
+
 ## Publishing an apt repository
 
 `src/apt.rs`. `sudo apt install onionskin` cannot be made to work by hosting a

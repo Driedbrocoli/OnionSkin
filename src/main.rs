@@ -91,6 +91,10 @@ enum Command {
     Compare(CompareArgs),
     /// Check a printed sheet came out the way the delta asked.
     Verify(VerifyArgs),
+    /// See the sheet with the delta on it, before printing either.
+    Proof(ProofArgs),
+    /// Find the places on a form where something can be written.
+    Blanks(BlanksArgs),
     /// Measure a printer's second-pass registration, once per printer.
     #[command(subcommand)]
     Calibrate(CalibrateCommand),
@@ -479,6 +483,77 @@ struct VerifyArgs {
     /// Also teach the profile of this name from what was measured.
     #[arg(long, value_name = "NAME")]
     learn: Option<String>,
+}
+
+/// Looking at the finished sheet before committing paper to it.
+///
+/// The delta on its own tells you nothing: it is a nearly blank page, and
+/// whether "Approved" lands in the box or across the line under it is not
+/// visible in it. The sheet on its own tells you nothing either. The two
+/// together are the only honest preview, and the only way to get one used to
+/// be to print it.
+#[derive(clap::Args)]
+struct ProofArgs {
+    /// The sheet as it is now: the PDF that was printed.
+    sheet: PathBuf,
+    /// The delta that would be printed onto it.
+    #[arg(long)]
+    delta: PathBuf,
+    /// Where to write the proof. Without it, beside the delta.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Show the sheet as a faint hint, as though holding it up to the light.
+    #[arg(long)]
+    tracing: bool,
+    /// What colour to draw the additions in.
+    #[arg(long, default_value = "red")]
+    colour: String,
+    /// How finely to draw it.
+    #[arg(long, default_value_t = 150.0)]
+    dpi: f64,
+    /// Open it when it is written.
+    #[arg(long)]
+    open: bool,
+    /// Write over a file Onionskin did not make, instead of stopping.
+    #[arg(long)]
+    overwrite: bool,
+}
+
+/// Working out where on a form there is room to write.
+///
+/// The commonest thing anybody does with this program is fill in a printed
+/// form, and the first thing they have to do is find the coordinates — with a
+/// ruler against the paper, or by reading pixels off the scan in an image
+/// editor and converting them, for every box on the page. The page can be asked
+/// instead, and what comes back pastes straight into `--at`.
+#[derive(clap::Args)]
+struct BlanksArgs {
+    /// The form: a PDF, or a scan of one.
+    form: PathBuf,
+    /// The paper it is on.
+    #[arg(long, default_value_t = default_page())]
+    page: String,
+    /// The narrowest gap worth reporting, in millimetres.
+    #[arg(long, default_value_t = 20.0)]
+    min_width: f64,
+    /// The shortest clear band worth reporting, in millimetres.
+    #[arg(long, default_value_t = 3.5)]
+    min_height: f64,
+    /// How far to stay from the paper's edge.
+    #[arg(long, default_value_t = onionskin::safety::DEFAULT_MARGIN_MM)]
+    margin: f64,
+    /// How dark a pixel has to be to count as something already printed.
+    #[arg(long, default_value_t = 128)]
+    ink_threshold: u8,
+    /// The scan is already cropped to the sheet.
+    #[arg(long)]
+    cropped: bool,
+    /// Do not look for skew; take the sheet as square to the scan.
+    #[arg(long)]
+    square: bool,
+    /// Report them as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1267,6 +1342,9 @@ fn describe_sheets(pages: &[usize]) -> String {
 
 const PRINT_INSTRUCTIONS: &str = "\
 Printing the delta
+  0. Look at it first, if you like — the sheet with the additions on it, in a
+     PDF, before any paper is involved:
+       onionskin proof <the sheet> --delta <the delta>
   1. Put the scanned sheet back in the tray. Check which way up and which end
      goes first — a page printed upside down is the usual first mistake.
   2. Print at 100% / \"Actual size\". Turn OFF \"Fit to page\"; it scales by a few
@@ -1341,6 +1419,8 @@ fn run() -> Result<ExitCode, String> {
         Command::Delta(args) => cmd_delta(args),
         Command::Compare(args) => cmd_compare(args),
         Command::Verify(args) => cmd_verify(args),
+        Command::Proof(args) => cmd_proof(args),
+        Command::Blanks(args) => cmd_blanks(args),
         Command::Calibrate(command) => cmd_calibrate(command),
         Command::Doctor => cmd_doctor(),
         Command::Serve(args) => {
@@ -4471,6 +4551,165 @@ fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     } else {
         ExitCode::from(2)
     })
+}
+
+/// Say where on a form there is room to write.
+fn cmd_blanks(args: BlanksArgs) -> Result<ExitCode, String> {
+    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
+    let options = onionskin::blanks::BlankOptions {
+        ink_threshold: args.ink_threshold,
+        min_width_mm: args.min_width,
+        min_height_mm: args.min_height,
+        margin_mm: args.margin,
+    };
+
+    // A PDF is rendered; anything else is a picture of a sheet and has to be
+    // found on its glass first. Both end up as the same thing: a page of grey
+    // at a known number of pixels to the millimetre.
+    let (gray, width, dpi, page) = page_in_grey(&args.form, page, args.cropped, args.square)?;
+    let found = onionskin::blanks::find(&gray, width, dpi, page, &options);
+
+    if args.json {
+        let listed: Vec<serde_json::Value> = found
+            .iter()
+            .map(|blank| {
+                serde_json::json!({
+                    "x_mm": blank.x_mm,
+                    "y_mm": blank.y_mm,
+                    "width_mm": blank.width_mm,
+                    "height_mm": blank.height_mm,
+                    "beside_text": blank.beside_text,
+                    "fits_pt": blank.fits_pt(),
+                    "fits_characters": blank.fits_characters(),
+                    "at": blank.placement(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&listed).map_err(|e| e.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if found.is_empty() {
+        println!(
+            "Nothing on {} is clear enough to write in at these settings.\n  \
+             Try --min-width 10 for narrower boxes, or --margin 3 if the form \
+             runs close to the edge.",
+            args.form.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Beside a label first, because those are the places the form is asking
+    // about, and the empty half of the page is only ever a guess.
+    println!(
+        "{} place(s) to write on {}:\n",
+        found.len(),
+        args.form.display()
+    );
+    for blank in &found {
+        println!("  {}", blank.describe());
+    }
+    let best = &found[0];
+    println!(
+        "\nUse one by pasting its millimetres in:\n  onionskin write {} --at '{}:Your words' --size {:.0}",
+        args.form.display(),
+        best.placement(),
+        best.fits_pt()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A page of grey at a known resolution, from a PDF or from a scan of paper.
+fn page_in_grey(
+    path: &Path,
+    page: PageSize,
+    cropped: bool,
+    square: bool,
+) -> Result<(Vec<u8>, usize, f64, PageSize), String> {
+    let looks_like_a_picture = matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "gif" | "webp")
+    );
+
+    if looks_like_a_picture {
+        let image = image::open(path)
+            .map_err(|e| format!("could not read '{}': {e}", path.display()))?;
+        let registration = register(
+            &image,
+            ScanOptions {
+                page,
+                assume_cropped: cropped,
+                assume_square: square,
+                ..ScanOptions::new(page)
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        println!("{}", registration.describe());
+
+        // Straightened onto the paper's own grid, so a millimetre in the
+        // answer is a millimetre on the sheet however crookedly it was
+        // scanned.
+        // Coarse on purpose: this is looking for empty regions several
+        // millimetres across, which a thumbnail settles.
+        let dpi = 100.0;
+        let flat = registration.flatten(&image.to_luma8(), dpi);
+        let width = flat.width() as usize;
+        return Ok((flat.into_raw(), width, dpi, page));
+    }
+
+    let engine = onionskin::render::engine().map_err(|e| e.to_string())?;
+    let doc = engine.open(path).map_err(|e| e.to_string())?;
+    let dpi = 100.0;
+    let drawn = doc.render_gray(0, dpi).map_err(|e| e.to_string())?;
+    Ok((drawn.gray, drawn.width, dpi, drawn.size))
+}
+
+/// Draw the sheet with the delta on it, so it can be looked at.
+fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.delta, "-proof", "pdf"));
+    refuse_to_clobber(
+        &output,
+        "proof",
+        &[(&args.sheet, "sheet"), (&args.delta, "delta")],
+    )?;
+    check_writable(&output, "proof")?;
+
+    let added = parse_colour(&args.colour).map_err(|e| format!("--colour {}: {e}", args.colour))?;
+    let mut options = onionskin::proof::ProofOptions {
+        dpi: args.dpi,
+        added: [
+            (added.0 * 255.0).round() as u8,
+            (added.1 * 255.0).round() as u8,
+            (added.2 * 255.0).round() as u8,
+        ],
+        ..Default::default()
+    };
+    if args.tracing {
+        options = options.tracing();
+    }
+
+    let pages = onionskin::proof::write_proof(&args.sheet, &args.delta, &output, &options)
+        .map_err(|e| e.to_string())?;
+
+    println!(
+        "{}: {pages} page(s), the sheet in grey and what would be added in {}.",
+        output.display(),
+        args.colour
+    );
+    println!(
+        "Look at it before you print the delta. Nothing here goes near the printer."
+    );
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Learn the printer's error from a job that was printed anyway.

@@ -99,6 +99,46 @@ impl ScanRegistration {
         self.px_per_mm * crate::geometry::MM_PER_INCH
     }
 
+    /// The sheet alone, straightened onto the paper's own grid.
+    ///
+    /// Everything measured on a page is measured in millimetres from the
+    /// corner of the paper, and a crooked scan makes that a different piece of
+    /// arithmetic for every pixel. Sampling the scan once into a picture that
+    /// *is* the paper turns it back into index-by-millimetre, which anything
+    /// downstream can then treat as an ordinary page — the scanner's backing,
+    /// the margin round the sheet and the half-degree it sat at are all gone.
+    ///
+    /// Nearest neighbour, deliberately. The callers of this are looking for
+    /// where the ink is and where it is not, at a scale of millimetres;
+    /// interpolating would soften every edge to answer a question nobody
+    /// asked, and cost four times the arithmetic to do it.
+    pub fn flatten(&self, gray: &image::GrayImage, dpi: f64) -> image::GrayImage {
+        let px_per_mm = dpi / crate::geometry::MM_PER_INCH;
+        let width = (self.page.width_mm * px_per_mm).round().max(1.0) as u32;
+        let height = (self.page.height_mm * px_per_mm).round().max(1.0) as u32;
+        let (from_width, from_height) = gray.dimensions();
+
+        let mut flat = image::GrayImage::from_pixel(width, height, image::Luma([255]));
+        for y in 0..height {
+            let y_mm = (y as f64 + 0.5) / px_per_mm;
+            for x in 0..width {
+                let x_mm = (x as f64 + 0.5) / px_per_mm;
+                let (sx, sy) = self.page_mm_to_pixel((x_mm, y_mm));
+                // Off the edge of the scan is paper nobody photographed, and
+                // white is the honest answer: there is certainly no ink there.
+                if sx < 0.0 || sy < 0.0 {
+                    continue;
+                }
+                let (sx, sy) = (sx as u32, sy as u32);
+                if sx >= from_width || sy >= from_height {
+                    continue;
+                }
+                flat.put_pixel(x, y, *gray.get_pixel(sx, sy));
+            }
+        }
+        flat
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "{} at {:.0} dpi, sheet turned {:+.2}°, top-left at ({:.0}, {:.0}) px",

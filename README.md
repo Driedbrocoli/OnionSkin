@@ -561,6 +561,94 @@ and works back to millimetres on the physical sheet. Across 360 combinations of
 page size, resolution, skew, margin and position, a point picked on the scan
 lands within **0.30 mm** of where it belongs on the paper.
 
+### Ask the form where there is room
+
+Filling in a printed form means finding the coordinates first, and that has
+always meant a ruler against the paper, or opening the scan in an image editor
+and reading pixels off it and converting — for every box on the page. The page
+can be asked instead:
+
+```bash
+onionskin blanks form.pdf
+```
+
+```
+7 place(s) to write on form.pdf, roomiest first:
+
+   50,65 mm    145 mm wide, about 52 characters at 11 pt
+   50,82 mm    145 mm wide, about 52 characters at 11 pt
+   20,150 mm   170 mm wide, about 61 characters at 24 pt   (open area)
+   ...
+
+Use one by pasting its millimetres in:
+  onionskin write form.pdf --at '50,65:Your words' --size 11
+```
+
+It reports two kinds of place: gaps beside words already printed — `Name:`
+followed by six centimetres of nothing — and open areas with no ink in them at
+all. Gaps on a line come back with that line's own baseline, so what you write
+sits level with the label beside it. Nothing inside the border a printer cannot
+reach is offered, and the spaces between ordinary words are not offered either,
+or a page of prose would come back with two hundred entries.
+
+It works on a scan as well as a PDF: the sheet is straightened onto the paper's
+own grid first, so a millimetre in the answer is a millimetre on the paper
+however crookedly it went on the glass.
+
+```bash
+onionskin blanks scan-of-form.png --page a4
+onionskin blanks form.pdf --min-width 10      # narrower boxes too
+onionskin blanks form.pdf --json              # for a script
+```
+
+### Look at it before you print it
+
+The delta on its own is a nearly blank page. Whether *Approved* lands in the box
+or across the line under it is not visible in it, and it is not visible in the
+sheet either — only in the two together. Until now the only way to see that was
+to print it.
+
+```bash
+onionskin proof invoice.pdf --delta delta.pdf -o proof.pdf
+```
+
+The sheet comes out in grey and what would be added on top of it in red, at the
+real size of the paper, in a PDF anybody can open. Nothing goes near a printer.
+
+```bash
+onionskin proof invoice.pdf --delta delta.pdf --tracing      # the sheet as a faint hint
+onionskin proof invoice.pdf --delta delta.pdf --colour blue  # or any colour
+```
+
+`--tracing` fades the existing page almost away, which is the same thing as
+holding the delta against a window with the original behind it — the way this
+was checked before there was a program to do it.
+
+### How much room the words actually have
+
+An uncalibrated printer is out by about ±2 mm on a second pass. Whether that
+matters depends entirely on the job, and the page knows which:
+
+```
+note: The tightest addition has more than 8 mm of clear paper around it.
+    More than the ±2 mm an uncalibrated printer is out by, so this sheet will
+    come out right whether or not this printer has ever been measured.
+```
+
+```
+WARNING: One addition has only 0.8 mm of clear paper around it.
+    It is at 50,112 mm. An uncalibrated printer is out by about ±2 mm on a
+    second pass, which is more than the gap — so this one can land on top of
+    what is already there.
+    Calibrate this printer first and it comes down to under half a millimetre:
+      onionskin calibrate learn scan.png --delta <the delta>
+```
+
+A signature going into a wide empty box does not care what the printer does; the
+same printer filling a ruled column cares very much. That is the whole question
+behind "should I calibrate before this one", and it is answered per job rather
+than left as a standing warning.
+
 ### Check the first sheet before doing sixty
 
 Overprinting is the one operation where nothing tells you it went wrong. The
