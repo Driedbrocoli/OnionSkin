@@ -93,12 +93,7 @@ impl Previews {
     }
 }
 
-fn render(
-    ctx: &egui::Context,
-    file: &Path,
-    page: usize,
-    width_px: u32,
-) -> Result<Sheet, String> {
+fn render(ctx: &egui::Context, file: &Path, page: usize, width_px: u32) -> Result<Sheet, String> {
     // An image is a page of paper too, and the commonest thing anybody has:
     // a scan. Drawing it needs no PDF renderer at all.
     if is_image(file) {
@@ -134,10 +129,7 @@ fn render(
     let dpi = (width_px as f64 / (size.width_mm / 25.4)).clamp(36.0, 400.0);
     let rendered = document.render(index, dpi).map_err(|e| e.to_string())?;
 
-    let colour = egui::ColorImage::from_rgb(
-        [rendered.width, rendered.height],
-        &rendered.rgb,
-    );
+    let colour = egui::ColorImage::from_rgb([rendered.width, rendered.height], &rendered.rgb);
     Ok(Sheet {
         texture: ctx.load_texture(
             format!("{}#{index}@{width_px}", file.display()),

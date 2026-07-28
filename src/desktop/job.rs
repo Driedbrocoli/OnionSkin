@@ -184,17 +184,17 @@ impl Jobs {
                 // A panic in the work must not take the window with it. The
                 // person gets told something went wrong and can try again,
                 // which is far better than the window vanishing.
-                let outcome =
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&reporter)))
-                    {
-                        Ok(outcome) => outcome,
-                        Err(_) => Outcome::refused(
-                            "Something went wrong inside Onionskin, and it stopped rather \
+                let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    body(&reporter)
+                })) {
+                    Ok(outcome) => outcome,
+                    Err(_) => Outcome::refused(
+                        "Something went wrong inside Onionskin, and it stopped rather \
                              than carry on with a job it could not finish.\n\nNothing was \
                              written. If it happens again with the same files, that is a \
                              bug worth reporting.",
-                        ),
-                    };
+                    ),
+                };
                 let _ = to_window.send(Message::Finished(Box::new(outcome)));
                 repaint();
             })
@@ -250,4 +250,3 @@ impl Jobs {
         self.last = None;
     }
 }
-

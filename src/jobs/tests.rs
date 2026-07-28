@@ -112,11 +112,11 @@ fn todays_date_is_filled_in_without_being_asked_for() {
 
     // 2023-11-14.
     let row = values(&BTreeMap::new(), 1_700_000_000);
+    assert_eq!(crate::rows::fill("PAID {today}", &row), "PAID 2023-11-14");
     assert_eq!(
-        crate::rows::fill("PAID {today}", &row),
-        "PAID 2023-11-14"
+        crate::rows::fill("{year}/{month}/{day}", &row),
+        "2023/11/14"
     );
-    assert_eq!(crate::rows::fill("{year}/{month}/{day}", &row), "2023/11/14");
 }
 
 /// Given wins over known, so somebody stamping yesterday's post with

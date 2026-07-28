@@ -205,7 +205,10 @@ impl Outline {
     /// Where the boxes go: each region grown by the padding, and any that then
     /// overlap merged into one.
     pub fn boxes(&self, regions: &[Region], page: PageSize) -> Vec<Region> {
-        let padded: Vec<Region> = regions.iter().map(|r| r.padded(self.pad_mm, page)).collect();
+        let padded: Vec<Region> = regions
+            .iter()
+            .map(|r| r.padded(self.pad_mm, page))
+            .collect();
         merge_touching(padded)
     }
 }

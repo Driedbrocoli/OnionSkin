@@ -442,7 +442,11 @@ fn docx_shape(shape: &Shape, page: PageSize) -> String {
                 mm(y0),
                 mm(x1 - x0),
                 mm(y1 - y0),
-                if *radius_mm > 0.0 { "v:roundrect" } else { "v:rect" }
+                if *radius_mm > 0.0 {
+                    "v:roundrect"
+                } else {
+                    "v:rect"
+                }
             )
         }
         ShapeKind::Ellipse { .. } => format!(

@@ -33,9 +33,15 @@ fn item(text: &str, x_mm: f64, y_mm: f64) -> Item {
 
 fn a_page() -> Document {
     let mut document = Document::blank(A4, 1);
-    document.add(item("PURCHASE ORDER 4471", 25.0, 40.0)).unwrap();
-    document.add(item("Two hundred widgets, black.", 25.0, 60.0)).unwrap();
-    document.add(item("Smith & Sons <Ltd>", 25.0, 80.0)).unwrap();
+    document
+        .add(item("PURCHASE ORDER 4471", 25.0, 40.0))
+        .unwrap();
+    document
+        .add(item("Two hundred widgets, black.", 25.0, 60.0))
+        .unwrap();
+    document
+        .add(item("Smith & Sons <Ltd>", 25.0, 80.0))
+        .unwrap();
     document
 }
 
@@ -411,7 +417,12 @@ fn frame_positions(html: &str) -> Vec<(f64, f64)> {
             let at = chunk.find(key)?;
             let rest = &chunk[at + key.len()..];
             let end = rest.find("in")?;
-            rest[..end].trim().trim_start_matches(':').trim().parse().ok()
+            rest[..end]
+                .trim()
+                .trim_start_matches(':')
+                .trim()
+                .parse()
+                .ok()
         };
         if let (Some(top), Some(left)) = (value("top:"), value("left:")) {
             found.push((left * 25.4, top * 25.4));

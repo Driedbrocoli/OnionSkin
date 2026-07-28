@@ -479,7 +479,8 @@ fn saving_lands_on_the_finished_name() {
 #[test]
 fn a_document_shows_in_the_list_whatever_it_was_called() {
     let at = tempfile::tempdir().unwrap();
-    let document = br#"{"page":{"width_mm":210.0,"height_mm":297.0},"pages":1,"items":[],"next_id":1}"#;
+    let document =
+        br#"{"page":{"width_mm":210.0,"height_mm":297.0},"pages":1,"items":[],"next_id":1}"#;
     std::fs::write(at.path().join("proper.onionskin"), document).unwrap();
     std::fs::write(at.path().join("misnamed.pdf"), document).unwrap();
     std::fs::write(at.path().join("theirs.pdf"), b"%PDF-1.7\n").unwrap();

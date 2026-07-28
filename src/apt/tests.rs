@@ -282,7 +282,11 @@ fn the_control_fields_come_back_out_of_the_package_they_went_into() {
         control.field("Homepage"),
         Some("https://github.com/driedbrocoli/onionskin")
     );
-    assert!(control.field("Installed-Size").unwrap().parse::<u64>().is_ok());
+    assert!(control
+        .field("Installed-Size")
+        .unwrap()
+        .parse::<u64>()
+        .is_ok());
 
     // Field names are matched without regard to case, which is what the format
     // says. A package built by hand with `installed-size` in it would otherwise
@@ -294,11 +298,17 @@ fn the_control_fields_come_back_out_of_the_package_they_went_into() {
     // `Description: {value}` has to reproduce what the package said, or apt
     // reads the second line as a field it does not know.
     let description = control.field("Description").unwrap();
-    assert!(description.starts_with("Add words to a page"), "{description}");
+    assert!(
+        description.starts_with("Add words to a page"),
+        "{description}"
+    );
     let (first, rest) = description.split_once('\n').unwrap();
     assert!(!first.is_empty());
     for line in rest.lines() {
-        assert!(line.starts_with(' '), "continuation line lost its space: {line:?}");
+        assert!(
+            line.starts_with(' '),
+            "continuation line lost its space: {line:?}"
+        );
     }
     // The paragraph break in a Debian description is a full stop on its own.
     assert!(rest.lines().any(|line| line.trim() == "."), "{description}");
@@ -313,7 +323,10 @@ fn something_that_is_not_a_package_is_refused_with_a_sentence() {
 
     // An `ar` archive with nothing in it that a .deb has.
     let mut empty = b"!<arch>\n".to_vec();
-    let mut member = format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", "notes.txt", 0, 0, 0, "100644", 5);
+    let mut member = format!(
+        "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+        "notes.txt", 0, 0, 0, "100644", 5
+    );
     member.push_str("hello");
     empty.extend_from_slice(member.as_bytes());
     let missing = control(&empty).unwrap_err();
@@ -334,8 +347,12 @@ fn a_repository_is_laid_out_where_apt_goes_looking_for_it() {
     // The four paths apt asks for, in the shapes it asks for them.
     let pool = out.join("pool/main/o/onionskin/onionskin_0.1.0_amd64.deb");
     assert!(pool.is_file(), "no package in the pool");
-    assert!(out.join("dists/stable/main/binary-amd64/Packages").is_file());
-    assert!(out.join("dists/stable/main/binary-amd64/Packages.gz").is_file());
+    assert!(out
+        .join("dists/stable/main/binary-amd64/Packages")
+        .is_file());
+    assert!(out
+        .join("dists/stable/main/binary-amd64/Packages.gz")
+        .is_file());
     assert!(out.join("dists/stable/Release").is_file());
 
     assert_eq!(built.root, out);
@@ -359,7 +376,8 @@ fn the_catalogue_names_the_file_its_size_and_its_hash() {
     let out = dir.path().join("repo");
     build(&[deb], &out, &RepoOptions::default(), at(1_785_190_200)).unwrap();
 
-    let text = std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
+    let text =
+        std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
     let found = stanzas(&text);
     assert_eq!(found.len(), 1, "{text}");
     let fields = &found[0];
@@ -375,11 +393,18 @@ fn the_catalogue_names_the_file_its_size_and_its_hash() {
     // is of something else — the file before it was copied, say — apt
     // downloads the package, finds it does not match, and reports a corrupt
     // mirror to somebody who has no way of knowing what is really wrong.
-    assert_eq!(value(fields, "Size"), Some(bytes.len().to_string().as_str()));
+    assert_eq!(
+        value(fields, "Size"),
+        Some(bytes.len().to_string().as_str())
+    );
     assert_eq!(value(fields, "SHA256"), Some(sha256_hex(&bytes).as_str()));
 
-    let pooled = std::fs::read(out.join("pool/main/o/onionskin/onionskin_0.1.0_amd64.deb")).unwrap();
-    assert_eq!(pooled, bytes, "the package changed on its way into the pool");
+    let pooled =
+        std::fs::read(out.join("pool/main/o/onionskin/onionskin_0.1.0_amd64.deb")).unwrap();
+    assert_eq!(
+        pooled, bytes,
+        "the package changed on its way into the pool"
+    );
 
     // No weaker hash offered beside the strong one.
     assert_eq!(value(fields, "MD5sum"), None, "{text}");
@@ -387,7 +412,10 @@ fn the_catalogue_names_the_file_its_size_and_its_hash() {
 
     // Description is last, because it is the one field that runs to several
     // lines and a reader that loses its place in a stanza loses the rest of it.
-    assert_eq!(fields.last().map(|(name, _)| name.as_str()), Some("Description"));
+    assert_eq!(
+        fields.last().map(|(name, _)| name.as_str()),
+        Some("Description")
+    );
     // And a blank line ends the stanza, which is what separates one package
     // from the next.
     assert!(text.ends_with("\n\n"), "{text:?}");
@@ -513,7 +541,9 @@ fn two_architectures_get_a_directory_each_and_are_both_named_in_the_release_file
         assert_eq!(found.len(), 1, "{architecture}:\n{text}");
         assert_eq!(value(&found[0], "Architecture"), Some(architecture));
         assert!(
-            value(&found[0], "Filename").unwrap().ends_with(&format!("_{architecture}.deb")),
+            value(&found[0], "Filename")
+                .unwrap()
+                .ends_with(&format!("_{architecture}.deb")),
             "{text}"
         );
         assert!(out
@@ -524,10 +554,17 @@ fn two_architectures_get_a_directory_each_and_are_both_named_in_the_release_file
     }
 
     let release = std::fs::read_to_string(&built.release).unwrap();
-    assert!(release.contains("Architectures: amd64 arm64\n"), "{release}");
+    assert!(
+        release.contains("Architectures: amd64 arm64\n"),
+        "{release}"
+    );
     // Both catalogues and both compressed twins, so four lines in the block.
     let block = release.split_once("SHA256:\n").unwrap().1;
-    assert_eq!(block.lines().filter(|l| l.starts_with(' ')).count(), 4, "{release}");
+    assert_eq!(
+        block.lines().filter(|l| l.starts_with(' ')).count(),
+        4,
+        "{release}"
+    );
 }
 
 #[test]
@@ -547,9 +584,13 @@ fn an_architecture_independent_package_is_offered_to_every_architecture() {
         at(1_785_190_200),
     )
     .unwrap();
-    assert_eq!(built.architectures, vec!["all".to_string(), "amd64".to_string()]);
+    assert_eq!(
+        built.architectures,
+        vec!["all".to_string(), "amd64".to_string()]
+    );
 
-    let text = std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
+    let text =
+        std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
     let found = stanzas(&text);
     assert_eq!(found.len(), 2, "{text}");
     let architectures: Vec<&str> = found
@@ -580,7 +621,8 @@ fn an_epoch_comes_off_the_filename_and_stays_in_the_version() {
     );
     assert!(out.join(&built.packages[0]).is_file());
 
-    let text = std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
+    let text =
+        std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
     let fields = &stanzas(&text)[0];
     assert_eq!(value(fields, "Version"), Some("1:0.1.0"));
     assert!(!value(fields, "Filename").unwrap().contains(':'), "{text}");
@@ -662,7 +704,10 @@ fn a_repository_with_nothing_in_it_is_refused() {
     .map(|_| ())
     .unwrap_err();
     assert!(error.to_string().contains("notes.txt"), "{error}");
-    assert!(error.to_string().contains("not a Debian package"), "{error}");
+    assert!(
+        error.to_string().contains("not a Debian package"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -677,7 +722,13 @@ fn building_the_same_packages_twice_writes_the_same_bytes() {
     let one = dir.path().join("one");
     let two = dir.path().join("two");
     let when = at(1_785_190_200);
-    build(std::slice::from_ref(&deb), &one, &RepoOptions::default(), when).unwrap();
+    build(
+        std::slice::from_ref(&deb),
+        &one,
+        &RepoOptions::default(),
+        when,
+    )
+    .unwrap();
     build(&[deb], &two, &RepoOptions::default(), when).unwrap();
 
     for name in [
@@ -718,7 +769,10 @@ fn their_catalogue(root: &Path) -> Option<(&'static str, String)> {
             "{program} failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        return Some((program, String::from_utf8_lossy(&output.stdout).into_owned()));
+        return Some((
+            program,
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ));
     }
     None
 }
@@ -737,12 +791,17 @@ fn the_catalogue_says_what_debians_own_tool_says_about_the_same_package() {
         eprintln!("no dpkg-scanpackages or apt-ftparchive on this machine; skipping");
         return;
     };
-    let ours = std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
+    let ours =
+        std::fs::read_to_string(out.join("dists/stable/main/binary-amd64/Packages")).unwrap();
 
     let theirs = stanzas(&theirs);
     let ours = stanzas(&ours);
     assert_eq!(ours.len(), 1);
-    assert_eq!(theirs.len(), 1, "{program} found a different number of packages");
+    assert_eq!(
+        theirs.len(),
+        1,
+        "{program} found a different number of packages"
+    );
     let (theirs, ours) = (&theirs[0], &ours[0]);
 
     // Every field written here has to say exactly what their tool says. The
@@ -755,14 +814,24 @@ fn the_catalogue_says_what_debians_own_tool_says_about_the_same_package() {
         };
         assert_eq!(mine, yours, "{name} disagrees with {program}");
     }
-    for wanted in ["Package", "Version", "Architecture", "Filename", "Size", "SHA256"] {
+    for wanted in [
+        "Package",
+        "Version",
+        "Architecture",
+        "Filename",
+        "Size",
+        "SHA256",
+    ] {
         assert!(value(ours, wanted).is_some(), "no {wanted} field: {ours:?}");
     }
 
     // Their tool also writes MD5sum and SHA1. Those are deliberately left out
     // — both are broken as collision-resistant hashes, and apt has not needed
     // either since 2016.
-    assert!(value(theirs, "MD5sum").is_some(), "{program} changed its output");
+    assert!(
+        value(theirs, "MD5sum").is_some(),
+        "{program} changed its output"
+    );
     assert_eq!(value(ours, "MD5sum"), None);
 
     // And the fields are in the order their tool puts them in. apt does not
@@ -812,21 +881,28 @@ fn the_instructions_give_the_two_lines_that_actually_work() {
     assert!(text.contains("sudo apt install onionskin"), "{text}");
 
     // The signing, which is left to gpg on purpose.
-    assert!(text.contains("--clearsign -o dists/stable/InRelease dists/stable/Release"), "{text}");
+    assert!(
+        text.contains("--clearsign -o dists/stable/InRelease dists/stable/Release"),
+        "{text}"
+    );
     assert!(
         text.contains("--detach-sign --armor -o dists/stable/Release.gpg dists/stable/Release"),
         "{text}"
     );
     assert!(text.contains("gpg --quick-generate-key"), "{text}");
-    assert!(text.contains("gpg --export KEYID > onionskin-archive-keyring.gpg"), "{text}");
+    assert!(
+        text.contains("gpg --export KEYID > onionskin-archive-keyring.gpg"),
+        "{text}"
+    );
 
     // apt-key is named only to say not to use it. A key added that way is
     // trusted for every repository on the machine, including the operating
     // system, and it has been gone from Debian since 12.
     assert!(text.contains("apt-key"), "{text}");
     assert!(
-        !text.lines().any(|line| line.trim_start().starts_with("apt-key")
-            || line.contains("sudo apt-key")),
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("apt-key") || line.contains("sudo apt-key")),
         "the instructions tell somebody to run apt-key:\n{text}"
     );
 
@@ -844,8 +920,14 @@ fn the_instructions_give_the_two_lines_that_actually_work() {
         elsewhere.contains("https://packages.example.org bookworm tools\""),
         "{elsewhere}"
     );
-    assert!(elsewhere.contains("dists/bookworm/InRelease"), "{elsewhere}");
-    assert!(elsewhere.contains("dists/bookworm/Release.gpg"), "{elsewhere}");
+    assert!(
+        elsewhere.contains("dists/bookworm/InRelease"),
+        "{elsewhere}"
+    );
+    assert!(
+        elsewhere.contains("dists/bookworm/Release.gpg"),
+        "{elsewhere}"
+    );
 }
 
 #[test]
@@ -854,7 +936,12 @@ fn the_commands_to_type_are_set_apart_from_the_prose() {
     // source line, so an indented line written the obvious way comes out flush
     // left and the command somebody is meant to type reads as another sentence.
     let text = instructions(&RepoOptions::default(), "https://example.com/apt");
-    for wanted in ["curl -fsSL", "echo \"deb ", "sudo apt install onionskin", "gpg --export"] {
+    for wanted in [
+        "curl -fsSL",
+        "echo \"deb ",
+        "sudo apt install onionskin",
+        "gpg --export",
+    ] {
         let line = text
             .lines()
             .find(|line| line.trim_start().starts_with(wanted))

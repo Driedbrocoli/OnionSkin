@@ -35,7 +35,10 @@ fn the_labels_land_where_the_stock_is_cut() {
 
     // The second is one label and one gap to the right.
     let second = grid.cell(1).unwrap();
-    assert!((second.x_mm - (7.0 + 63.5 + 2.5)).abs() < 1e-9, "{second:?}");
+    assert!(
+        (second.x_mm - (7.0 + 63.5 + 2.5)).abs() < 1e-9,
+        "{second:?}"
+    );
     assert_eq!(second.y_mm, 15.0);
 
     // The fourth begins the second row, back at the left margin.

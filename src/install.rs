@@ -35,10 +35,7 @@ pub enum InstallError {
     Refused(String),
 }
 
-fn io<'a>(
-    doing: &'static str,
-    path: &'a Path,
-) -> impl FnOnce(std::io::Error) -> InstallError + 'a {
+fn io<'a>(doing: &'static str, path: &'a Path) -> impl FnOnce(std::io::Error) -> InstallError + 'a {
     move |source| InstallError::Io {
         doing,
         path: path.to_path_buf(),
@@ -190,7 +187,10 @@ pub fn how_to_install_desktop_needs() -> &'static str {
             "zypper",
             "sudo zypper install libxkbcommon-x11-0 Mesa-libGL1 libXcursor1 libXrandr2 libXi6",
         ),
-        ("apk", "sudo apk add libxkbcommon mesa-gl libxcursor libxrandr libxi"),
+        (
+            "apk",
+            "sudo apk add libxkbcommon mesa-gl libxcursor libxrandr libxi",
+        ),
     ] {
         if which_binary(tool).is_some() {
             return command;
@@ -265,7 +265,9 @@ fn every_binary_on(path: &std::ffi::OsStr, name: &str) -> Vec<PathBuf> {
         }
         // The same directory can be on PATH twice, and ~/.local/bin and
         // /home/someone/.local/bin are the same place under two names.
-        let settled = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+        let settled = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
         if found
             .iter()
             .any(|seen| seen.canonicalize().unwrap_or_else(|_| seen.clone()) == settled)

@@ -675,7 +675,10 @@ fn every_named_colour_parses_to_its_documented_value() {
     ];
     for (name, expected) in cases {
         let got = parse_colour(name).unwrap();
-        assert_eq!(got, expected, "{name:?} parsed as {got:?}, expected {expected:?}");
+        assert_eq!(
+            got, expected,
+            "{name:?} parsed as {got:?}, expected {expected:?}"
+        );
     }
 }
 
@@ -759,10 +762,7 @@ fn text_and_drawings_draw_from_one_sequence_of_ids_with_none_repeated() {
     let ids = [t1, s1, t2, s2];
     for i in 0..ids.len() {
         for j in (i + 1)..ids.len() {
-            assert_ne!(
-                ids[i], ids[j],
-                "ids {ids:?} were not all distinct"
-            );
+            assert_ne!(ids[i], ids[j], "ids {ids:?} were not all distinct");
         }
     }
 }
@@ -908,10 +908,7 @@ fn a_document_with_one_of_every_drawing_kind_survives_a_save() {
     doc.save(&path).unwrap();
     let opened = Document::load(&path).unwrap();
 
-    assert_eq!(
-        opened, doc,
-        "a drawing changed on the way through a file"
-    );
+    assert_eq!(opened, doc, "a drawing changed on the way through a file");
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,10 +997,7 @@ fn a_drawing_with_no_outline_and_no_fill_is_refused() {
     invisible.stroke = None;
     invisible.fill = None;
     let err = doc.draw(invisible).unwrap_err().to_string();
-    assert!(
-        err.contains("neither an outline nor a fill"),
-        "{err}"
-    );
+    assert!(err.contains("neither an outline nor a fill"), "{err}");
 }
 
 #[test]
@@ -1015,7 +1009,10 @@ fn a_negative_line_width_is_refused() {
     bad.width_mm = -1.0;
     let err = doc.draw(bad).unwrap_err().to_string();
     assert!(err.contains("which is not a width"), "{err}");
-    assert!(err.contains("-1"), "the width itself should be named: {err}");
+    assert!(
+        err.contains("-1"),
+        "the width itself should be named: {err}"
+    );
 }
 
 #[test]
@@ -1338,8 +1335,14 @@ fn a_history_that_is_not_there_is_said_plainly_rather_than_guessed_at() {
     let path = a_document(dir.path(), "One");
     assert_eq!(steps_back(&path), 0);
     assert_eq!(steps_forward(&path), 0);
-    assert!(undo(&path).unwrap_err().to_string().contains("nothing to undo"));
-    assert!(redo(&path).unwrap_err().to_string().contains("nothing to redo"));
+    assert!(undo(&path)
+        .unwrap_err()
+        .to_string()
+        .contains("nothing to undo"));
+    assert!(redo(&path)
+        .unwrap_err()
+        .to_string()
+        .contains("nothing to redo"));
 }
 
 #[test]
@@ -1393,7 +1396,15 @@ fn the_kept_copy_sits_beside_the_document_it_belongs_to() {
     doc.save(&path).unwrap();
 
     let beside = dir.path().join("d.onionskin.before");
-    assert!(beside.is_file(), "{:?}", std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>());
+    assert!(
+        beside.is_file(),
+        "{:?}",
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -1403,7 +1414,13 @@ fn a_document_is_known_by_what_is_in_it_not_what_it_is_called() {
     // expecting a PDF and report it damaged — a file Onionskin wrote itself,
     // one command earlier.
     let dir = tempfile::tempdir().unwrap();
-    for name in ["letter.pdf", "letter.docx", "letter.odt", "letter", "l.onion"] {
+    for name in [
+        "letter.pdf",
+        "letter.docx",
+        "letter.odt",
+        "letter",
+        "l.onion",
+    ] {
         let path = dir.path().join(name);
         Document::blank(A4, 1).save(&path).unwrap();
         assert!(Document::is_one(&path), "{name} was not recognised");

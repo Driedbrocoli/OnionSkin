@@ -231,7 +231,11 @@ fn the_gzip_header_carries_no_clock() {
     // A timestamp from the clock would make two builds of the same input
     // differ, and then nobody can check a download against a published hash.
     let bytes = gzip(b"anything at all");
-    assert_eq!(&bytes[4..8], &[0, 0, 0, 0], "there is an mtime in the header");
+    assert_eq!(
+        &bytes[4..8],
+        &[0, 0, 0, 0],
+        "there is an mtime in the header"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +400,11 @@ fn dpkg_can_actually_install_the_package() {
     std::fs::create_dir_all(&root).unwrap();
     run(
         "dpkg-deb",
-        &["--extract", package.to_str().unwrap(), root.to_str().unwrap()],
+        &[
+            "--extract",
+            package.to_str().unwrap(),
+            root.to_str().unwrap(),
+        ],
     );
 
     assert!(root.join("usr/bin/onionskin").is_file());
@@ -598,7 +606,11 @@ fn the_window_is_called_what_install_will_go_looking_for() {
         Platform::Linux
     };
     if here != Platform::MacOs {
-        assert_eq!(here.desktop_name(), crate::install::desktop_name(), "{here:?}");
+        assert_eq!(
+            here.desktop_name(),
+            crate::install::desktop_name(),
+            "{here:?}"
+        );
     }
     assert_eq!(Platform::Windows.desktop_name(), "onionskin-desktop.exe");
     assert_eq!(Platform::Linux.desktop_name(), "onionskin-desktop");
@@ -889,8 +901,14 @@ fn building_writes_what_each_platform_expects() {
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert!(names.contains(&"onionskin-0.1.0-linux.tar.gz".to_string()), "{names:?}");
-    assert!(names.contains(&"onionskin_0.1.0_amd64.deb".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"onionskin-0.1.0-linux.tar.gz".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"onionskin_0.1.0_amd64.deb".to_string()),
+        "{names:?}"
+    );
 
     let exe = binary_for(dir.path(), Platform::Windows);
     let windows = build(Platform::Windows, &exe, None, &licence, "0.1.0", &out).unwrap();
@@ -1005,7 +1023,9 @@ fn the_mac_archive_is_an_application_bundle() {
         "Onionskin.app/Contents/MacOS/Onionskin",
     ] {
         assert!(
-            names.iter().any(|n| *n == wanted || *n == wanted.trim_end_matches('/')),
+            names
+                .iter()
+                .any(|n| *n == wanted || *n == wanted.trim_end_matches('/')),
             "{wanted} is not in the bundle: {names:?}"
         );
     }
@@ -1093,8 +1113,14 @@ fn dpkg_reads_a_package_that_has_a_window_in_it() {
     std::fs::create_dir_all(&out).unwrap();
     run(
         "dpkg-deb",
-        &["--extract", package.to_str().unwrap(), out.to_str().unwrap()],
+        &[
+            "--extract",
+            package.to_str().unwrap(),
+            out.to_str().unwrap(),
+        ],
     );
     assert!(out.join("usr/bin/onionskin-desktop").is_file());
-    assert!(out.join("usr/share/applications/onionskin.desktop").is_file());
+    assert!(out
+        .join("usr/share/applications/onionskin.desktop")
+        .is_file());
 }

@@ -650,7 +650,10 @@ fn boxes_that_would_cross_each_other_become_one_box() {
         ..Default::default()
     };
     let boxes = outline.boxes(
-        &[region(20.0, 20.0, 40.0, 24.0), region(41.0, 20.0, 60.0, 24.0)],
+        &[
+            region(20.0, 20.0, 40.0, 24.0),
+            region(41.0, 20.0, 60.0, 24.0),
+        ],
         page,
     );
     assert_eq!(boxes.len(), 1, "{boxes:?}");
@@ -659,7 +662,10 @@ fn boxes_that_would_cross_each_other_become_one_box() {
 
     // Far apart, they stay two.
     let boxes = outline.boxes(
-        &[region(20.0, 20.0, 40.0, 24.0), region(90.0, 20.0, 110.0, 24.0)],
+        &[
+            region(20.0, 20.0, 40.0, 24.0),
+            region(90.0, 20.0, 110.0, 24.0),
+        ],
         page,
     );
     assert_eq!(boxes.len(), 2, "{boxes:?}");

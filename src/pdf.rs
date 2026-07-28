@@ -945,10 +945,7 @@ impl PathBuilder {
 
     /// Page space is y-down from the top-left; PDF is y-up from the bottom.
     fn at(&self, x_mm: f64, y_mm: f64) -> (Object, Object) {
-        (
-            real(mm_to_pt(x_mm)),
-            real(self.height_pt - mm_to_pt(y_mm)),
-        )
+        (real(mm_to_pt(x_mm)), real(self.height_pt - mm_to_pt(y_mm)))
     }
 
     fn move_to(&mut self, x: f64, y: f64) {
@@ -1807,8 +1804,15 @@ mod tests {
             },
         ];
 
-        write_page_content(&path, &[a4], &[vec![line("Approved")]], &[shapes], "t", None)
-            .unwrap();
+        write_page_content(
+            &path,
+            &[a4],
+            &[vec![line("Approved")]],
+            &[shapes],
+            "t",
+            None,
+        )
+        .unwrap();
 
         let doc = Document::load(&path).unwrap();
         let pages = doc.get_pages();

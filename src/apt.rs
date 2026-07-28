@@ -226,7 +226,10 @@ pub fn build(
     // which apt reports as a hash mismatch on a package that looks perfectly
     // fine on the server.
     for (at, one) in found.iter().enumerate() {
-        if let Some(other) = found[..at].iter().find(|other| other.filename == one.filename) {
+        if let Some(other) = found[..at]
+            .iter()
+            .find(|other| other.filename == one.filename)
+        {
             if other.sha256 != one.sha256 {
                 return Err(AptError::Invalid(format!(
                     "two different packages both want to be {}: {} {} and {} {}. \
@@ -919,7 +922,11 @@ pub fn rfc1123(at: SystemTime) -> String {
 pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     // Counting from 1 March 0000 rather than 1 January 1970.
     let shifted = days + 719_468;
-    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
     let day_of_era = shifted - era * 146_097; // 0 to 146,096
     let year_of_era =
         (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
@@ -928,7 +935,11 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     // Months numbered from March, which is what lets the leap day be last.
     let shuffled = (5 * day_of_year + 2) / 153; // 0 to 11
     let day = (day_of_year - (153 * shuffled + 2) / 5 + 1) as u32;
-    let month = if shuffled < 10 { shuffled + 3 } else { shuffled - 9 };
+    let month = if shuffled < 10 {
+        shuffled + 3
+    } else {
+        shuffled - 9
+    };
     // January and February belong to the year after the one that started in
     // March.
     (year + i64::from(month <= 2), month as u32, day)

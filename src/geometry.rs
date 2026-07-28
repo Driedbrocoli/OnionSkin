@@ -830,7 +830,8 @@ mod tests {
             assert!(*width > 0.0 && *height > 0.0, "{name}");
             assert!(*width < 2000.0 && *height < 2000.0, "{name}");
             assert!(
-                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "{name} is not something to type"
             );
             // And it resolves to itself, which is the whole reason it is here.

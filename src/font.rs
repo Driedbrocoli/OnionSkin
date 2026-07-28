@@ -616,9 +616,8 @@ pub(crate) mod tests {
     fn a_font_folder_the_user_names_is_searched() {
         // The point of the setting: a face that is not where the system keeps
         // fonts — LibreOffice's own, or one somebody bought — is found anyway.
-        let _home = crate::calibrate::borrow_home(
-            &tempfile::tempdir().expect("a temporary home").keep(),
-        );
+        let _home =
+            crate::calibrate::borrow_home(&tempfile::tempdir().expect("a temporary home").keep());
         let Some(source) = dejavu_path() else {
             return;
         };
@@ -633,8 +632,9 @@ pub(crate) mod tests {
         crate::settings::add_font_folder(folder.path());
         let searched = font_folders();
         assert!(
-            searched.iter().any(|f| f.starts_with(folder.path())
-                || folder.path().starts_with(f.as_path())),
+            searched
+                .iter()
+                .any(|f| f.starts_with(folder.path()) || folder.path().starts_with(f.as_path())),
             "the added folder is not being searched: {searched:?}"
         );
     }

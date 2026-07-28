@@ -266,8 +266,10 @@ pub enum DocumentError {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
-    #[error("{path} is damaged — it is an Onionskin document, but it will not \
-             read: {source}")]
+    #[error(
+        "{path} is damaged — it is an Onionskin document, but it will not \
+             read: {source}"
+    )]
     Malformed {
         path: std::path::PathBuf,
         source: serde_json::Error,
@@ -450,7 +452,10 @@ impl Document {
                     shape.id
                 )));
             }
-            for colour in [shape.stroke.as_deref(), shape.fill.as_deref()].into_iter().flatten() {
+            for colour in [shape.stroke.as_deref(), shape.fill.as_deref()]
+                .into_iter()
+                .flatten()
+            {
                 parse_colour(colour)?;
             }
             let (x0, y0, x1, y1) = shape.bounds();

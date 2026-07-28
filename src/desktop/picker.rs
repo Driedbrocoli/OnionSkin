@@ -743,8 +743,7 @@ fn has_kind(path: &Path, kinds: &[String]) -> bool {
     if path.extension().is_some_and(|e| e == "before") {
         return false;
     }
-    kinds.iter().any(|kind| kind == "onionskin")
-        && onionskin::document::Document::is_one(path)
+    kinds.iter().any(|kind| kind == "onionskin") && onionskin::document::Document::is_one(path)
 }
 
 /// Work out what somebody meant by typing, or pasting, `input` into the path

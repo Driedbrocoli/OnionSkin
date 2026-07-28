@@ -121,9 +121,9 @@ fn tar_header(entry: &Entry) -> [u8; 512] {
     put(108, "0000000\0"); // owner: root, so it unpacks the same anywhere
     put(116, "0000000\0"); // group
     put(124, &format!("{:011o}\0", entry.bytes.len())); // size
-    // A fixed timestamp, so building the same input twice gives the same
-    // archive. A package that differs byte for byte between builds cannot be
-    // checked against a hash somebody else published.
+                                                        // A fixed timestamp, so building the same input twice gives the same
+                                                        // archive. A package that differs byte for byte between builds cannot be
+                                                        // checked against a hash somebody else published.
     put(136, "00000000000\0");
     put(156, if entry.directory { "5" } else { "0" });
     put(257, "ustar\0"); // magic
@@ -222,11 +222,15 @@ pub fn zip(entries: &[Entry]) -> Vec<u8> {
         directory.extend_from_slice(&0u16.to_le_bytes()); // comment
         directory.extend_from_slice(&0u16.to_le_bytes()); // disk
         directory.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
-        // External attributes carry the unix mode in the top sixteen bits, so
-        // the program is still executable after a round trip through a zip.
-        // The low bits are MS-DOS attributes, where 0x10 marks a directory —
-        // Windows reads those and not the unix ones.
-        let kind = if entry.directory { 0o040_000 } else { 0o100_000 };
+                                                          // External attributes carry the unix mode in the top sixteen bits, so
+                                                          // the program is still executable after a round trip through a zip.
+                                                          // The low bits are MS-DOS attributes, where 0x10 marks a directory —
+                                                          // Windows reads those and not the unix ones.
+        let kind = if entry.directory {
+            0o040_000
+        } else {
+            0o100_000
+        };
         let dos = if entry.directory { 0x10u32 } else { 0 };
         directory.extend_from_slice(&(((entry.mode | kind) << 16) | dos).to_le_bytes());
         directory.extend_from_slice(&offset.to_le_bytes());
@@ -325,9 +329,9 @@ fn ar_member(out: &mut Vec<u8>, name: &str, bytes: &[u8]) {
     let header = format!(
         "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
         name,
-        0,     // a fixed timestamp, so the build is reproducible
-        0,     // owner
-        0,     // group
+        0, // a fixed timestamp, so the build is reproducible
+        0, // owner
+        0, // group
         "100644",
         bytes.len()
     );
@@ -704,7 +708,10 @@ pub fn mac_bundle(entries: &[Entry], version: &str) -> Vec<Entry> {
         Entry::directory(APP),
         Entry::directory(&format!("{APP}/MacOS")),
         Entry::directory(&format!("{APP}/Resources")),
-        Entry::file(&format!("{APP}/Info.plist"), info_plist(version).into_bytes()),
+        Entry::file(
+            &format!("{APP}/Info.plist"),
+            info_plist(version).into_bytes(),
+        ),
         // The Finder reads this to know the folder is an application even
         // before it looks at the plist.
         Entry::file(&format!("{APP}/PkgInfo"), b"APPL????".to_vec()),
