@@ -116,6 +116,8 @@ enum Command {
     Watermark(WatermarkArgs),
     /// Put a barcode or a QR code on a sheet.
     Barcode(BarcodeArgs),
+    /// Write on the back of a printed sheet.
+    Back(BackArgs),
     /// Find the places on a form where something can be written.
     Blanks(BlanksArgs),
     /// What was added to which sheet, and when.
@@ -586,6 +588,62 @@ struct VerifyArgs {
     /// waiting for two hundred.
     #[arg(long, value_name = "N")]
     first: Option<usize>,
+}
+
+/// Words on the back of a sheet that is already printed.
+///
+/// Two different jobs wear the same name, and this does both.
+///
+/// A stack printed on one side has blank backs and no page to write on. The
+/// stack goes through the printer a second time, and which way up the back comes
+/// out depends on the printer — so `--check` prints a sheet that answers that,
+/// once, and `config set feed` remembers the answer.
+///
+/// A document already printed on both sides has a page for every back: sheet
+/// three's back is page six. There `--two-sided` does the counting, and the
+/// delta has to be printed two-sided the same way round as the original.
+#[derive(clap::Args)]
+#[command(allow_negative_numbers = true)]
+struct BackArgs {
+    /// The printed document whose backs are being written on.
+    document: PathBuf,
+    /// Where the words go on the back, as you will look at it: 'X,Y:the words',
+    /// in millimetres from the top-left.
+    #[arg(long = "at", value_name = "X,Y:TEXT")]
+    at: Vec<String>,
+    /// A picture on the back: 'X,Y:file.png', or 'X,Y:WIDTHxHEIGHT:file.png'.
+    #[arg(long = "image", value_name = "X,Y:FILE")]
+    image: Vec<String>,
+    /// Which sheet, counted from 1. Without it, every sheet.
+    #[arg(long, value_name = "N")]
+    sheet: Option<usize>,
+    /// Which way up the back comes out: same, or turned. Use --check to find
+    /// out, and `config set feed` to stop being asked.
+    #[arg(long, value_name = "WHICH")]
+    feed: Option<String>,
+    /// The document is already printed on both sides, so every back is a page
+    /// of it. The delta then has to be printed two-sided too.
+    #[arg(long)]
+    two_sided: bool,
+    /// Write the sheet that answers "which way up does the back come out", and
+    /// nothing else.
+    #[arg(long)]
+    check: bool,
+    /// Type size, in points.
+    #[arg(long, default_value_t = 12.0)]
+    size: f64,
+    /// The built-in font to set the words in.
+    #[arg(long, default_value = "helvetica")]
+    font: String,
+    /// Where to write the delta.
+    #[arg(short, long, alias = "out")]
+    output: Option<PathBuf>,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 /// A barcode or a QR code, on a sheet that is otherwise already printed.
@@ -1973,6 +2031,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Join(args) => cmd_join(args),
         Command::Watermark(args) => cmd_watermark(args),
         Command::Barcode(args) => cmd_barcode(args),
+        Command::Back(args) => cmd_back(args),
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
@@ -6492,6 +6551,266 @@ fn cmd_watermark(args: WatermarkArgs) -> Result<ExitCode, String> {
 /// laser sweeps across the bars and has to resolve each one.
 const BARCODE_MODULE_MM: f64 = 0.4;
 const QR_MODULE_MM: f64 = 0.8;
+
+/// A sentence broken into lines that fit, so a paragraph in the terminal reads
+/// as a paragraph rather than as one line off the side of the window.
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        // Counted in characters rather than bytes: these sentences have dashes
+        // and accents in them, and a byte count would break them early.
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Which way up this printer's backs come out.
+///
+/// The flag, then what was remembered, then the answer most printers give. The
+/// order matters: somebody who has set it once should never be asked again, and
+/// somebody overruling it for one run has not given up the setting.
+fn which_feed(asked: Option<&str>) -> Result<onionskin::duplex::Feed, String> {
+    if let Some(said) = asked {
+        return onionskin::duplex::Feed::parse(said).ok_or_else(|| {
+            format!(
+                "'{said}' is not a way the paper comes back. It is 'same' or \
+                 'turned' —\n  run `onionskin back --check` to find out which \
+                 this printer does."
+            )
+        });
+    }
+    Ok(onionskin::settings::load()
+        .defaults
+        .feed
+        .as_deref()
+        .and_then(onionskin::duplex::Feed::parse)
+        .unwrap_or_default())
+}
+
+fn cmd_back(args: BackArgs) -> Result<ExitCode, String> {
+    let feed = which_feed(args.feed.as_deref())?;
+    let font = onionskin::pdf::Font::parse(&args.font).ok_or_else(|| {
+        format!(
+            "'{}' is not a built-in font. Try `onionskin fonts`.",
+            args.font
+        )
+    })?;
+
+    let pages = onionskin::recipe::pages_in(&args.document).unwrap_or(1);
+    let sheets = match args.two_sided {
+        true => onionskin::duplex::sheets_for(pages),
+        false => pages,
+    };
+
+    // The sheet that answers the question, and nothing else on it. Written at
+    // the paper's own size so it lands square on the stack it is for.
+    if args.check {
+        let paper = onionskin::recipe::draw_page(&args.document, 1)?.1.page;
+        let output = args
+            .output
+            .clone()
+            .unwrap_or_else(|| beside(&args.document, "-which-way-up", "pdf"));
+        refuse_to_clobber(&output, "delta", &[(&args.document, "sheet")])?;
+        check_writable(&output, "delta")?;
+        let rehearsal = Rehearsal::new(args.dry_run)?;
+        onionskin::pdf::write_delta(
+            &rehearsal.instead_of(&output),
+            &[paper],
+            &[onionskin::duplex::a_test_sheet(paper)],
+            "Onionskin: which way up",
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        if !rehearsal.pretending() {
+            println!("{}", output.display());
+        }
+        println!(
+            "  one {} sheet, with a word at each end of it.\n",
+            paper.describe()
+        );
+        println!("{}", onionskin::duplex::HOW_TO_USE_THE_TEST_SHEET);
+        rehearsal.say_nothing_was_written();
+        if !rehearsal.pretending() {
+            open_if_asked(args.open, &output);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if args.at.is_empty() && args.image.is_empty() {
+        return Err(format!(
+            "nothing to put on the back. Say where the words go, measured on \
+             the back as you\n    will look at it:\n    onionskin back {} --at \
+             '20,40:Continued overleaf'\n\n  Or find out which way up this \
+             printer's backs come out first:\n    onionskin back {} --check",
+            args.document.display(),
+            args.document.display()
+        ));
+    }
+
+    let wanted: Vec<usize> = match args.sheet {
+        Some(sheet) => vec![sheet],
+        None => (1..=sheets).collect(),
+    };
+    if let Some(past) = wanted.iter().find(|sheet| **sheet > sheets || **sheet == 0) {
+        return Err(format!(
+            "{} comes to {sheets} sheet(s){}, so there is no sheet {past}.",
+            args.document.display(),
+            match args.two_sided {
+                true => format!(" of {pages} pages printed on both sides"),
+                false => String::new(),
+            }
+        ));
+    }
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-back", "pdf"));
+    refuse_to_clobber(&output, "delta", &[(&args.document, "sheet")])?;
+    check_writable(&output, "delta")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
+
+    // A delta page for every page the printer will see. For a one-sided stack
+    // going through again that is one per sheet; for a two-sided document it is
+    // one per page, blank on all the fronts.
+    let delta_pages = match args.two_sided {
+        true => pages,
+        false => sheets,
+    };
+    let mut sizes = Vec::with_capacity(delta_pages);
+    for page in 1..=delta_pages {
+        sizes.push(onionskin::recipe::draw_page(&args.document, page)?.1.page);
+    }
+
+    let mut lines: Vec<Vec<onionskin::pdf::PlacedLine>> = vec![Vec::new(); delta_pages];
+    let mut images: Vec<Vec<onionskin::pdf::PlacedImage>> = vec![Vec::new(); delta_pages];
+    for sheet in &wanted {
+        // A two-sided document has a page for the back and the printer does the
+        // turning, so nothing here is turned. A stack going through again is
+        // turned by hand, and that is what `feed` is about.
+        let (index, turn) = match args.two_sided {
+            true => (
+                onionskin::duplex::page_of(*sheet, onionskin::duplex::Side::Back),
+                false,
+            ),
+            false => (*sheet, true),
+        };
+        if index > delta_pages {
+            // An odd last page of a two-sided document: its back is blank paper
+            // that never went through the printer, so there is nothing to add
+            // to. Said below rather than refused, because the other sheets are
+            // perfectly good.
+            continue;
+        }
+        let paper = sizes[index - 1];
+        let turning = match turn {
+            true => feed,
+            false => onionskin::duplex::Feed::SameWayUp,
+        };
+
+        for spec in &args.at {
+            let ((x_mm, y_mm), text) = onionskin::recipe::parse_placement(spec)?;
+            let (x_mm, y_mm, rotation_deg) =
+                onionskin::duplex::turn_a_placement(x_mm, y_mm, 0.0, paper, turning);
+            lines[index - 1].push(onionskin::pdf::PlacedLine {
+                text,
+                x_mm,
+                y_mm,
+                size_pt: args.size,
+                font: onionskin::pdf::LineFont::Builtin(font),
+                colour: (0.0, 0.0, 0.0),
+                rotation_deg,
+            });
+        }
+        for (_, mut picture) in onionskin::recipe::placed_images(&args.image, index)? {
+            // A picture turns about its own top-left corner, so the corner that
+            // is given is the one the far corner used to be — which is what
+            // `turn_a_placement` works out for a word, and it is the same sum.
+            let (x_mm, y_mm, rotation_deg) = onionskin::duplex::turn_a_placement(
+                picture.x_mm,
+                picture.y_mm,
+                picture.rotation_deg,
+                paper,
+                turning,
+            );
+            picture.x_mm = x_mm;
+            picture.y_mm = y_mm;
+            picture.rotation_deg = rotation_deg;
+            images[index - 1].push(picture);
+        }
+    }
+
+    let placed: usize =
+        lines.iter().map(Vec::len).sum::<usize>() + images.iter().map(Vec::len).sum::<usize>();
+    if placed == 0 {
+        return Err(
+            "nothing landed on any back. A document of one page printed on both \
+             sides has no\n  sheet whose back is a page of it."
+                .into(),
+        );
+    }
+
+    let no_shapes: Vec<Vec<onionskin::pdf::PlacedShape>> = vec![Vec::new(); delta_pages];
+    onionskin::pdf::write_page_content_with_pictures(
+        &rehearsal.instead_of(&output),
+        &sizes,
+        &lines,
+        &no_shapes,
+        &images,
+        "Onionskin back",
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if !rehearsal.pretending() {
+        println!("{}", output.display());
+    }
+    println!(
+        "  {placed} addition(s) on the back of {} sheet(s), on a {}-page delta.",
+        wanted.len(),
+        delta_pages
+    );
+
+    match args.two_sided {
+        true => println!("\n{}", onionskin::duplex::PRINT_IT_THE_SAME_WAY),
+        false => {
+            println!(
+                "\nPut the printed stack back in the tray the way you would to \
+                 print the other side,\n  and print this delta onto it."
+            );
+            println!("\n  Placed for a feed of '{}', which means:", feed.key());
+            for line in wrapped(feed.describe(), 66) {
+                println!("    {line}");
+            }
+            println!(
+                "\n  If that is not what this printer does, every sheet comes \
+                 out at the wrong end of\n  the paper. This settles it, once:\n \
+                   onionskin back {} --check",
+                args.document.display()
+            );
+        }
+    }
+
+    if !rehearsal.pretending() {
+        note_the_delta(&args.document, &output, placed, delta_pages);
+    }
+    println!("\n{PRINT_INSTRUCTIONS}");
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
+    Ok(ExitCode::SUCCESS)
+}
 
 fn cmd_barcode(args: BarcodeArgs) -> Result<ExitCode, String> {
     let (x_mm, y_mm) = parse_point(&args.at)?;

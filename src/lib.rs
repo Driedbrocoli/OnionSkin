@@ -9,6 +9,7 @@ pub mod delta;
 pub mod diff;
 pub mod discover;
 pub mod document;
+pub mod duplex;
 pub mod fits;
 pub mod font;
 pub mod geometry;

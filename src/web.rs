@@ -161,6 +161,15 @@ fn handle(mut stream: TcpStream) {
                 message.as_bytes(),
             ),
         },
+        ("POST", "/back") => match the_back_of_the_sheet(&request) {
+            Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
+            Err(message) => respond(
+                &mut stream,
+                422,
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            ),
+        },
         ("POST", "/barcode") => match barcode_sheet(&request) {
             Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
             Err(message) => respond(
@@ -590,6 +599,123 @@ fn join_files(request: &Request) -> Result<(Vec<u8>, String), String> {
     let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
     let _ = joined;
     Ok((bytes, "joined.pdf".to_string()))
+}
+
+/// Words on the blank back of a stack that has already been printed.
+///
+/// The awkward part is the same here as everywhere: which way up the back comes
+/// out depends on the printer, and nothing can work it out. So the form asks,
+/// and offers to print the sheet that answers it — the machine running this
+/// server is the machine with the printer on it, so the answer it remembers is
+/// the right one to remember.
+fn the_back_of_the_sheet(request: &Request) -> Result<(Vec<u8>, String), String> {
+    let parts = parse_multipart(&request.content_type, &request.body)?;
+    let field = |name: &str| parts.iter().find(|p| p.name == name);
+
+    let Some(sheet) = field("sheet").filter(|p| !p.data.is_empty()) else {
+        return Err("Choose the printed document whose backs are being written on.".into());
+    };
+    let checking = field("check").map(|p| p.text()).as_deref() == Some("yes");
+    let text = field("text").map(|p| p.text()).unwrap_or_default();
+    if text.is_empty() && !checking {
+        return Err(
+            "There is nothing to put on the back. Say what it should say — or \
+             ask for the sheet that finds out which way up the backs come out."
+                .into(),
+        );
+    }
+    let feed = field("feed")
+        .map(|p| p.text())
+        .and_then(|said| crate::duplex::Feed::parse(&said))
+        .unwrap_or_default();
+    let two_sided = field("two_sided").map(|p| p.text()).as_deref() == Some("yes");
+    let number = |name: &str, fallback: f64| -> f64 {
+        field(name)
+            .map(|p| p.text())
+            .and_then(|t| t.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(fallback)
+    };
+    let (x_mm, y_mm) = (number("x", 20.0), number("y", 40.0));
+    let size_pt = number("size", 12.0);
+
+    let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
+    let path = workspace.path.join(safe_name(
+        sheet.filename.as_deref().unwrap_or("sheet.pdf"),
+        "sheet.pdf",
+    ));
+    std::fs::write(&path, &sheet.data).map_err(|e| e.to_string())?;
+
+    // The sheet that answers the question, and nothing else on it.
+    if checking {
+        let paper = crate::recipe::draw_page(&path, 1)?.1.page;
+        let out = workspace.path.join("which-way-up.pdf");
+        crate::pdf::write_delta(
+            &out,
+            &[paper],
+            &[crate::duplex::a_test_sheet(paper)],
+            "Onionskin: which way up",
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
+        return Ok((bytes, "which-way-up.pdf".to_string()));
+    }
+
+    let pages = crate::recipe::pages_in(&path).unwrap_or(1);
+    let sheets = match two_sided {
+        true => crate::duplex::sheets_for(pages),
+        false => pages,
+    };
+    let delta_pages = match two_sided {
+        true => pages,
+        false => sheets,
+    };
+    let mut sizes = Vec::with_capacity(delta_pages);
+    for page in 1..=delta_pages {
+        sizes.push(crate::recipe::draw_page(&path, page)?.1.page);
+    }
+
+    let mut lines: Vec<Vec<crate::pdf::PlacedLine>> = vec![Vec::new(); delta_pages];
+    for sheet in 1..=sheets {
+        // A two-sided document has a page for the back and the printer does the
+        // turning; a stack going through again is turned by hand.
+        let (index, turning) = match two_sided {
+            true => (
+                crate::duplex::page_of(sheet, crate::duplex::Side::Back),
+                crate::duplex::Feed::SameWayUp,
+            ),
+            false => (sheet, feed),
+        };
+        if index > delta_pages {
+            continue;
+        }
+        let paper = sizes[index - 1];
+        let (x_mm, y_mm, rotation_deg) =
+            crate::duplex::turn_a_placement(x_mm, y_mm, 0.0, paper, turning);
+        lines[index - 1].push(crate::pdf::PlacedLine {
+            text: text.clone(),
+            x_mm,
+            y_mm,
+            size_pt,
+            font: crate::pdf::LineFont::Builtin(crate::pdf::Font::Helvetica),
+            colour: (0.0, 0.0, 0.0),
+            rotation_deg,
+        });
+    }
+    if lines.iter().all(Vec::is_empty) {
+        return Err(
+            "Nothing landed on any back. A document of one page printed on both \
+             sides has no sheet whose back is a page of it."
+                .into(),
+        );
+    }
+
+    let out = workspace.path.join("back.pdf");
+    crate::pdf::write_delta(&out, &sizes, &lines, "Onionskin back", None)
+        .map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
+    Ok((bytes, "back.pdf".to_string()))
 }
 
 /// A barcode or a QR code on a sheet, worked out here.
@@ -1151,6 +1277,66 @@ const PAGE_BODY: &str = r#"
   stack in that order is a stack in the wrong order. Rename them
   <code>page-01</code>, <code>page-02</code>, <code>page-10</code> and it comes
   out right by itself.
+</p>
+
+<h2>The back of the sheet</h2>
+<p>
+  Terms on the back of an invoice, an address on the reverse of a compliment slip,
+  &quot;continued overleaf&quot; on a letter. The position is measured
+  <strong>on the back as you will look at it</strong>, holding the sheet the right
+  way up.
+</p>
+
+<form method="post" action="/back" enctype="multipart/form-data">
+  <fieldset>
+    <legend>The document</legend>
+
+    <label for="bksheet">The printed document</label>
+    <input type="file" id="bksheet" name="sheet"
+      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+
+    <label for="bktext">What goes on the back</label>
+    <input type="text" id="bktext" name="text"
+      placeholder="Terms of payment overleaf" maxlength="500">
+
+    <label for="bkx">How far in from the left, in millimetres</label>
+    <input type="number" id="bkx" name="x" value="20" min="0" max="2000" step="1">
+
+    <label for="bky">How far down from the top, in millimetres</label>
+    <input type="number" id="bky" name="y" value="40" min="0" max="2000" step="1">
+
+    <label for="feed">Which way up does the back come out?</label>
+    <select id="feed" name="feed">
+      <option value="same">Same way up — turn it over like a book page and it reads upright</option>
+      <option value="turned">Turned around — the top is at the other end of the paper</option>
+    </select>
+
+    <label for="two_sided">Already printed on both sides</label>
+    <select id="two_sided" name="two_sided">
+      <option value="no">No — the backs are blank</option>
+      <option value="yes">Yes — every back is a page of it</option>
+    </select>
+  </fieldset>
+
+  <button type="submit">Write the delta</button>
+</form>
+
+<form method="post" action="/back" enctype="multipart/form-data">
+  <fieldset>
+    <legend>Or find out which way up the backs come out</legend>
+    <label for="cksheet">The printed document, for its paper size</label>
+    <input type="file" id="cksheet" name="sheet"
+      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+    <input type="hidden" name="check" value="yes">
+  </fieldset>
+  <button type="submit">Print a sheet and find out</button>
+</form>
+<p class="hint">
+  One word at each end of the paper. Print it on the back of one sheet, hold the
+  sheet with the front the right way up, and turn it over sideways like the page
+  of a book. Whichever word is now at the top is the answer. Nobody knows this
+  about their own printer, and guessing puts every sheet in the run at the wrong
+  end of the paper.
 </p>
 
 <h2>A barcode or a QR code</h2>

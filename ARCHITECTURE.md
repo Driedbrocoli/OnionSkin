@@ -27,6 +27,7 @@ went with it.
 | `pdf`      | Writing text and shapes into a PDF |
 | `watermark`| A word laid corner to corner across a sheet |
 | `barcode`  | Code 128 and QR codes, worked out rather than fetched |
+| `duplex`   | Which page is which side of which sheet, and which way up the back comes out |
 | `office`   | Reading and writing `.docx` and `.odt`, without a word processor |
 | `printer`  | Printing over IPP and scanning over eSCL, both spoken directly |
 | `acquire`  | Driving a scanner through SANE |
@@ -930,6 +931,39 @@ macOS is unsigned, and says so in the archive's README: Gatekeeper stops a
 downloaded program the first time it runs and the message it gives reads like
 the file is broken. Saying so up front is cheaper than the alternative, which
 is paying Apple for a certificate.
+
+## The one question about a printer nobody can answer
+
+Writing on the back of a stack needs one fact that is not in the PDF, not in the
+scan, not in IPP, and not in anything the person at the keyboard knows: when the
+stack goes back into the tray, does the back come out the same way up as the
+front, or with its top at the other end?
+
+It depends on whether the printer picks up face-up or face-down and delivers
+face-up or face-down, and those are not published in any form a program can read.
+Asking IPP gets you what the printer will do when *it* does the duplexing, which
+is a different question from what happens when a human carries the stack round.
+
+There is exactly one honest thing to do, and it is what `duplex` does: print a
+sheet that answers the question, and remember the answer.
+
+The sheet has one word at each end — `SAME` near one edge, `TURNED` near the
+other and upside down — so that whichever way the paper comes out, exactly one of
+them is at the top and readable. The word *is* the answer; nothing has to be
+translated into a yes or a no, which is where somebody holding a sheet of paper
+and thinking about book pages makes the mistake.
+
+Everything after that is one rotation. A word meant for 20 mm from the left and
+40 mm down, **as somebody looks at the finished back the right way up**, is
+written at the diagonally opposite point of the paper and turned half a turn.
+That is `turn_a_placement`, and it is four lines.
+
+The tests for it do not check those four lines against themselves. They draw the
+page, turn the *picture* of it the way a hand turns paper, and measure where the
+ink is: 20 mm in and 40 mm down, both ways the paper can come back. And a
+separate test insists that the wrong answer really does put the words at the
+other end of the paper — because if it did not, there would be no question worth
+asking and no reason for the check sheet to exist.
 
 ## Barcodes without a barcode library
 

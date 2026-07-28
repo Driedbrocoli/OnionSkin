@@ -99,6 +99,14 @@ pub struct Defaults {
     /// The scanner to fetch from when none is named, for the same reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scanner: Option<String>,
+    /// Which way up this printer's backs come out: "same" or "turned".
+    ///
+    /// Nobody knows this about their own printer, and there is no way to work
+    /// it out without printing one. So it is asked once — `onionskin back
+    /// --check` prints the sheet that answers it — and then never again, which
+    /// is the difference between a feature people use and one they try twice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
 }
 
 /// A number as somebody would write it: 300 rather than 300.
@@ -153,6 +161,11 @@ impl Defaults {
                 "printer",
                 self.printer.clone(),
                 "the printer to send to when none is named",
+            ),
+            (
+                "feed",
+                self.feed.clone(),
+                "which way up this printer's backs come out: same or turned",
             ),
             (
                 "scanner",
@@ -228,6 +241,25 @@ pub fn set_default(name: &str, value: Option<&str>) -> Result<(), String> {
         "page" => {
             let page = value.map(|text| text.trim().to_string());
             remember(|s| s.defaults.page = page);
+        }
+        "feed" => {
+            // Stored as the short word rather than as it was typed, so that
+            // "long-edge" and "book" and "same" all come back the same and the
+            // file says something anybody can read.
+            let feed = match value {
+                None => None,
+                Some(text) => match crate::duplex::Feed::parse(text) {
+                    Some(feed) => Some(feed.key().to_string()),
+                    None => {
+                        return Err(format!(
+                            "feed is 'same' or 'turned', not '{}'. Run \
+                             `onionskin back --check` to find out which.",
+                            text.trim()
+                        ))
+                    }
+                },
+            };
+            remember(|s| s.defaults.feed = feed);
         }
         // Addresses are kept as they were typed. `send` and `fetch` already
         // know what a usable one looks like and say so in full when it is

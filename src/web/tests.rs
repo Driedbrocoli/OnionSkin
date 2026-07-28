@@ -1166,3 +1166,113 @@ fn the_page_offers_the_barcode_and_says_it_needs_blank_paper() {
         "no such line"
     );
 }
+
+/// The back really is written on, and the words really are where somebody
+/// asked for them once the paper has been turned the way the feed turns it.
+#[test]
+fn the_browser_writes_on_the_back_either_way_the_paper_comes_back() {
+    for (feed, turned) in [("same", false), ("turned", true)] {
+        let request = posted(&[
+            ("sheet", Some("invoice.pdf"), &a_page("Invoice 2024-8817")),
+            ("text", None, b"Terms overleaf"),
+            ("feed", None, feed.as_bytes()),
+            ("x", None, b"20"),
+            ("y", None, b"40"),
+        ]);
+        let (bytes, name) = the_back_of_the_sheet(&request).expect("it should write a back");
+        assert_eq!(name, "back.pdf");
+
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("back.pdf");
+        std::fs::write(&pdf, &bytes).unwrap();
+
+        const DPI: f64 = 100.0;
+        let engine = crate::render::engine().expect("a renderer");
+        let document = engine.open(&pdf).expect("it should open");
+        let drawn = document.render_gray(0, DPI).expect("it should draw");
+        // What a hand does to the paper, done to the picture of it.
+        let seen: Vec<u8> = match turned {
+            false => drawn.gray.clone(),
+            true => drawn.gray.iter().rev().copied().collect(),
+        };
+        let mm = |pixels: usize| (pixels as f64 + 0.5) * 25.4 / DPI;
+        let spots: Vec<(f64, f64)> = (0..drawn.height)
+            .flat_map(|y| (0..drawn.width).map(move |x| (x, y)))
+            .filter(|(x, y)| seen[y * drawn.width + x] < 128)
+            .map(|(x, y)| (mm(x), mm(y)))
+            .collect();
+        assert!(!spots.is_empty(), "{feed}: the back came out blank");
+
+        let left = spots.iter().map(|s| s.0).fold(f64::MAX, f64::min);
+        let baseline = spots.iter().map(|s| s.1).fold(f64::MIN, f64::max);
+        assert!(
+            (left - 20.0).abs() < 2.0,
+            "{feed}: the words start {left:.1} mm in, not 20"
+        );
+        assert!(
+            (baseline - 40.0).abs() < 2.0,
+            "{feed}: the words sit {baseline:.1} mm down, not 40"
+        );
+    }
+}
+
+/// The sheet that answers the question can be had from the browser too, which
+/// is the point of it being here: this is the machine with the printer on it.
+#[test]
+fn the_browser_offers_the_sheet_that_answers_which_way_up() {
+    let request = posted(&[
+        ("sheet", Some("invoice.pdf"), &a_page("Invoice")),
+        ("check", None, b"yes"),
+    ]);
+    let (bytes, name) = the_back_of_the_sheet(&request).expect("it should write the sheet");
+    assert_eq!(name, "which-way-up.pdf");
+
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = dir.path().join("which.pdf");
+    std::fs::write(&pdf, &bytes).unwrap();
+    let engine = crate::render::engine().expect("a renderer");
+    let document = engine.open(&pdf).expect("it should open");
+    let drawn = document.render_gray(0, 100.0).expect("it should draw");
+    let rows: Vec<usize> = (0..drawn.height)
+        .filter(|y| (0..drawn.width).any(|x| drawn.gray[y * drawn.width + x] < 128))
+        .collect();
+    assert!(!rows.is_empty(), "the sheet came out blank");
+    // Ink at both ends, so there is a word to read whichever way it comes out.
+    let top = *rows.first().unwrap() as f64 * 25.4 / 100.0;
+    let bottom = *rows.last().unwrap() as f64 * 25.4 / 100.0;
+    assert!(top < 99.0, "nothing near the top: {top:.0} mm");
+    assert!(bottom > 198.0, "nothing near the bottom: {bottom:.0} mm");
+}
+
+/// Nothing to put on the back is a question, not a crash.
+#[test]
+fn a_back_with_nothing_on_it_is_refused() {
+    let why = the_back_of_the_sheet(&posted(&[("text", None, b"x")])).unwrap_err();
+    assert!(why.contains("Choose the printed document"), "{why}");
+
+    let why =
+        the_back_of_the_sheet(&posted(&[("sheet", Some("f.pdf"), &a_page("x"))])).unwrap_err();
+    assert!(why.contains("nothing to put on the back"), "{why}");
+}
+
+/// The page has to offer it, and has to ask the question that decides whether
+/// any of it works.
+#[test]
+fn the_page_offers_the_back_and_asks_which_way_up() {
+    assert!(
+        PAGE_BODY.contains("action=\"/back\""),
+        "the page has no back form"
+    );
+    assert!(
+        PAGE_BODY.contains("Which way up does the back come out?"),
+        "the page does not ask the one question that matters"
+    );
+    // And every feed the form offers is one the program understands.
+    for feed in ["same", "turned"] {
+        assert!(
+            PAGE_BODY.contains(&format!("value=\"{feed}\"")),
+            "the form does not offer '{feed}'"
+        );
+        assert!(crate::duplex::Feed::parse(feed).is_some());
+    }
+}

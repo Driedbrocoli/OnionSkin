@@ -36,6 +36,7 @@ pub struct Onionskin {
     cover: screens::cover::State,
     watermark: screens::watermark::State,
     barcode: screens::barcode::State,
+    back: screens::back::State,
     batch: screens::batch::State,
     labels: screens::labels::State,
     jobs_screen: screens::jobs::State,
@@ -70,6 +71,7 @@ impl Onionskin {
             cover: Default::default(),
             watermark: Default::default(),
             barcode: Default::default(),
+            back: Default::default(),
             batch: Default::default(),
             scan: Default::default(),
             document: Default::default(),
@@ -137,6 +139,7 @@ impl eframe::App for Onionskin {
                             screens::watermark::show(&mut self.watermark, &mut room)
                         }
                         Screen::Barcode => screens::barcode::show(&mut self.barcode, &mut room),
+                        Screen::Back => screens::back::show(&mut self.back, &mut room),
                         Screen::Batch => screens::batch::show(&mut self.batch, &mut room),
                         Screen::Labels => screens::labels::show(&mut self.labels, &mut room),
                         Screen::Jobs => screens::jobs::show(&mut self.jobs_screen, &mut room),

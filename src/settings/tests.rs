@@ -301,6 +301,7 @@ fn every_setting_is_listed_with_something_to_read() {
         page: Some("a4".into()),
         printer: Some("ipp://printer/ipp/print".into()),
         scanner: Some("http://printer/eSCL".into()),
+        feed: Some("same".into()),
     };
     let as_json = serde_json::to_value(&everything).expect("settings serialise");
     let fields = as_json.as_object().expect("an object").len();

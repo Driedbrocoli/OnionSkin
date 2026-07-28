@@ -1272,6 +1272,65 @@ that code comes to 214 x 23 mm, and at 20,60 it runs off an A4 sheet.
 Move it, or make the modules smaller with --module.
 ```
 
+### The back of the sheet
+
+```bash
+onionskin back invoices.pdf --at '20,40:Terms of payment overleaf'
+```
+
+Every printed sheet has two sides, and until now Onionskin could only reach one
+of them. The words go on the blank back of a stack you have already printed: the
+terms on the back of an invoice, an address block on the reverse of a compliment
+slip, "continued overleaf" on a letter.
+
+**The position is measured on the back as you will look at it**, holding the
+sheet the right way up. Onionskin works out where that is on the paper, which is
+not the same thing — because when a stack goes back through the printer for its
+second side, the back comes out one of two ways and which one depends on the
+printer.
+
+That is the whole difficulty, and Onionskin does not guess at it. It prints a
+sheet that answers it:
+
+```bash
+onionskin back invoices.pdf --check
+```
+
+One word at each end of the paper — `SAME` at one, `TURNED` at the other, upside
+down. Print it on the back of one sheet, hold the sheet with the front the right
+way up, and turn it over sideways like the page of a book. Whichever word is now
+at the top and readable is the answer. Then say so once:
+
+```bash
+onionskin config set feed same
+onionskin config set feed turned
+```
+
+and you will not be asked again. A `--feed` on any one run still overrules it.
+
+Getting this wrong is not a crooked sheet. It is every sheet in the run printed
+at the wrong end of the paper, found after the run — which is why the question
+is asked rather than assumed, and why the answer is remembered.
+
+#### A document already printed on both sides
+
+Different problem, easier one. A twenty-page report on ten sheets has a page for
+every back: sheet three's back is page six.
+
+```bash
+onionskin back report.pdf --two-sided --at '20,270:Confidential'
+```
+
+Onionskin does the counting, puts the additions on the even pages and leaves the
+odd ones blank. Which way up the paper comes back stops mattering, because the
+printer does the turning — but the delta has to be **printed two-sided, the same
+way round as the original was**. Print it one-sided and the backs land on fresh
+paper; print it the other way round and they land upside down. Onionskin says so
+every time.
+
+`--sheet 3` does one sheet instead of all of them, `--image` puts a signature or
+a logo on the back, and `--size` and `--font` set the type.
+
 ### A rehearsal, before the paper goes in
 
 Every command that writes a file takes `--dry-run`:
