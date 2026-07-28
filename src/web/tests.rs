@@ -836,3 +836,150 @@ fn the_form_takes_a_pdf_as_well_as_a_picture() {
         "the file browser will not offer PDFs: {scan_input}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Several PDFs, one after another
+// ---------------------------------------------------------------------------
+
+/// A one-page PDF, made the way the rest of the program makes one.
+fn a_page(words: &str) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("page.pdf");
+    let sizes = [crate::geometry::PageSize::new(210.0, 297.0)];
+    let lines = vec![vec![crate::pdf::PlacedLine {
+        text: words.to_string(),
+        x_mm: 20.0,
+        y_mm: 40.0,
+        size_pt: 12.0,
+        font: crate::pdf::LineFont::Builtin(crate::pdf::Font::Helvetica),
+        colour: (0.0, 0.0, 0.0),
+        rotation_deg: 0.0,
+    }]];
+    crate::pdf::write_delta(&path, &sizes, &lines, "test", None).unwrap();
+    std::fs::read(&path).unwrap()
+}
+
+/// The whole point: files in, one document out, in the order they were sent.
+#[test]
+fn several_pdfs_come_back_as_one_document_in_the_order_they_were_given() {
+    let request = posted(&[
+        ("files", Some("page-1.pdf"), &a_page("First")),
+        ("files", Some("page-2.pdf"), &a_page("Second")),
+        ("files", Some("page-3.pdf"), &a_page("Third")),
+    ]);
+    let (bytes, name) = join_files(&request).expect("three PDFs should join");
+    assert_eq!(name, "joined.pdf");
+    assert!(bytes.starts_with(b"%PDF"), "that is not a PDF");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("joined.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    let read = lopdf::Document::load(&path).unwrap();
+    let pages: Vec<u32> = read.get_pages().into_keys().collect();
+    assert_eq!(pages.len(), 3);
+    for (index, wanted) in ["First", "Second", "Third"].iter().enumerate() {
+        let text = read.extract_text(&[pages[index]]).unwrap();
+        assert!(
+            text.contains(wanted),
+            "page {} does not say {wanted}: {text:?}",
+            index + 1
+        );
+    }
+}
+
+/// One file is not a join, and the message says what to do rather than what
+/// went wrong.
+#[test]
+fn one_file_is_refused_with_something_to_do_about_it() {
+    let request = posted(&[("files", Some("only.pdf"), &a_page("Only"))]);
+    let said = join_files(&request).unwrap_err();
+    assert!(said.contains("at least two"), "{said}");
+    assert!(said.contains("several at once"), "{said}");
+
+    // And nothing at all is the same answer, not a panic.
+    assert!(join_files(&posted(&[])).is_err());
+}
+
+/// A browser sends whatever the file was called, and what it was called may be
+/// `../../etc/passwd`. Only the last part of it is kept, and only the parts of
+/// that which are plainly a name.
+#[test]
+fn a_filename_that_tries_to_climb_out_of_the_folder_does_not() {
+    for hostile in [
+        "../../../../etc/passwd",
+        "..\\..\\windows\\system32\\config",
+        "/etc/shadow",
+        "....//....//escaped.pdf",
+    ] {
+        let kept = sanitised(hostile);
+        if let Some(kept) = kept {
+            assert!(!kept.contains('/'), "{hostile} kept a slash: {kept}");
+            assert!(!kept.contains('\\'), "{hostile} kept a backslash: {kept}");
+            assert!(
+                !kept.starts_with('.'),
+                "{hostile} kept a leading dot: {kept}"
+            );
+        }
+    }
+    // An ordinary name comes through unharmed, because mangling those would
+    // make the report unreadable. A browser that sends a folder with it — some
+    // do, for a whole directory — keeps the file's own name and not a run-on of
+    // the path, which is the difference the split makes and the filter cannot.
+    assert_eq!(sanitised("page-1.pdf").as_deref(), Some("page-1.pdf"));
+    assert_eq!(sanitised("scans/page-1.pdf").as_deref(), Some("page-1.pdf"));
+    assert_eq!(
+        sanitised("C:\\Users\\me\\page-1.pdf").as_deref(),
+        Some("page-1.pdf")
+    );
+    assert_eq!(
+        sanitised("2024_invoice.PDF").as_deref(),
+        Some("2024_invoice.PDF")
+    );
+    // And a name with nothing usable left in it is no name at all.
+    assert_eq!(sanitised(""), None);
+    assert_eq!(sanitised("..."), None);
+    assert_eq!(sanitised("/"), None);
+}
+
+/// A hostile name must not stop the join working — the file is still a file,
+/// whatever the browser called it.
+#[test]
+fn a_file_with_a_hostile_name_is_still_joined() {
+    let request = posted(&[
+        (
+            "files",
+            Some("../../../../tmp/escaped.pdf"),
+            &a_page("First"),
+        ),
+        ("files", Some("page-2.pdf"), &a_page("Second")),
+    ]);
+    let (bytes, _) = join_files(&request).expect("it should still join");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("joined.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(lopdf::Document::load(&path).unwrap().get_pages().len(), 2);
+}
+
+/// The page has to offer it, or the route is unreachable from the one place
+/// this program serves.
+#[test]
+fn the_page_offers_the_join_and_says_what_it_does_not_do() {
+    assert!(
+        PAGE_BODY.contains("action=\"/join\""),
+        "the page has no join form"
+    );
+    assert!(
+        PAGE_BODY.contains("multiple"),
+        "the picker will not take more than one file"
+    );
+    // And it is honest that this page is not the whole program, with somewhere
+    // to go for the rest.
+    assert!(
+        PAGE_BODY.contains("onionskin-desktop"),
+        "the window is not mentioned"
+    );
+    assert!(
+        PAGE_BODY.contains("onionskin --help"),
+        "the command line is not mentioned"
+    );
+}

@@ -1213,11 +1213,19 @@ Either way, put the printed sheet back in the tray and print the delta **at
 
 **You never have to touch a browser.** For anyone who would rather use one
 anyway — over SSH, or on a machine with no desktop at all — `onionskin serve`
-puts the two-document workflow on `http://127.0.0.1:8737/`, reachable only from
-that machine. It is an extra command that has to be typed to happen: nothing
-opens a browser by itself, ever. Anything automated
-that posts to it with `Accept: application/pdf` gets the file straight back
-instead, as it always did.
+puts three jobs on `http://127.0.0.1:8737/`, reachable only from that machine:
+comparing two documents, turning a scan into something you can edit, and putting
+several PDFs into one. It is an extra command that has to be typed to happen:
+nothing opens a browser by itself, ever. Anything automated that posts to it
+with `Accept: application/pdf` gets the file straight back instead, as it always
+did.
+
+That page stays small on purpose — one file with nothing fetched from anywhere,
+which is what lets it promise it never touches the network — so it says plainly
+that it is not the whole program and where the rest is. Joining is on it because
+that is the one job whose absence strands the others: a machine with no desktop
+is a machine with a scanner giving one file per sheet, and no way to make the
+stack everything else wants.
 
 ## The thing that will bite you: reflow
 

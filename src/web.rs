@@ -152,6 +152,15 @@ fn handle(mut stream: TcpStream) {
                 ),
             }
         }
+        ("POST", "/join") => match join_files(&request) {
+            Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
+            Err(message) => respond(
+                &mut stream,
+                422,
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            ),
+        },
         ("POST", "/convert") => match convert_scan(&request) {
             Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
             Err(message) => respond(
@@ -426,7 +435,9 @@ fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>, std::time::Dur
         margin_mm: number("margin", crate::safety::DEFAULT_MARGIN_MM),
         profile: field("profile").map(|p| p.text()).filter(|t| !t.is_empty()),
         outline: ticked("outline").then(|| {
-            let colour = field("outline_colour").map(|p| p.text()).unwrap_or_default();
+            let colour = field("outline_colour")
+                .map(|p| p.text())
+                .unwrap_or_default();
             crate::delta::Outline {
                 colour: outline_colour(&colour),
                 ..Default::default()
@@ -514,6 +525,70 @@ fn respond_file(stream: &mut TcpStream, body: &[u8], name: &str) -> std::io::Res
 }
 
 /// Read a scan and hand back something with a cursor in it.
+/// Several PDFs, one after another.
+///
+/// The one job on this page that needs no options at all: files in, document
+/// out. It is here rather than left to the command line because the people who
+/// end up on this page are the ones whose machine will not run the window —
+/// a server, a container — and a folder of one-page scans with no way to make
+/// them into a stack is where the rest of the program stops being reachable.
+fn join_files(request: &Request) -> Result<(Vec<u8>, String), String> {
+    let parts = parse_multipart(&request.content_type, &request.body)?;
+    // Every part called `files`, in the order the browser sent them, which is
+    // the order they were chosen.
+    let given: Vec<&Part> = parts
+        .iter()
+        .filter(|part| part.name == "files" && !part.data.is_empty())
+        .collect();
+    if given.len() < 2 {
+        return Err(
+            "Choose at least two PDFs. One file is not a join — and the picker \
+             takes several at once."
+                .into(),
+        );
+    }
+
+    // On disk, because the joiner opens documents by path.
+    let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
+    let mut paths = Vec::new();
+    for (index, part) in given.iter().enumerate() {
+        // Numbered, so they keep the order they arrived in whatever they are
+        // called — and named after the original, so the report reads sensibly.
+        let named = format!(
+            "{index:03}-{}",
+            part.filename
+                .as_deref()
+                .and_then(sanitised)
+                .unwrap_or_else(|| format!("part-{index}.pdf"))
+        );
+        let path = workspace.path.join(named);
+        std::fs::write(&path, &part.data).map_err(|e| e.to_string())?;
+        paths.push(path);
+    }
+
+    let out = workspace.path.join("joined.pdf");
+    let joined =
+        crate::join::join(&paths, &out, "Onionskin joined document").map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
+    let _ = joined;
+    Ok((bytes, "joined.pdf".to_string()))
+}
+
+/// A filename safe to write into a scratch folder.
+///
+/// A browser sends whatever the file was called, and what it was called may be
+/// `../../etc/passwd`. Only the last component is kept, and only the parts of
+/// it that are plainly a name.
+fn sanitised(given: &str) -> Option<String> {
+    let last = given.rsplit(['/', '\\']).next()?;
+    let kept: String = last
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect();
+    let kept = kept.trim_matches('.').to_string();
+    (!kept.is_empty()).then_some(kept)
+}
+
 fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
     use crate::letters::{read_with_font, ReadOptions};
     use crate::office::{self, Format, Layout};
@@ -558,9 +633,8 @@ fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
         std::fs::write(&path, &scan.data).map_err(|e| e.to_string())?;
         crate::recipe::draw_page(&path, 1)?
     } else {
-        let image = image::load_from_memory(&scan.data).map_err(|e| {
-            format!("That does not look like a scan Onionskin can read: {e}")
-        })?;
+        let image = image::load_from_memory(&scan.data)
+            .map_err(|e| format!("That does not look like a scan Onionskin can read: {e}"))?;
         let registration = register(&image, ScanOptions::new(page)).map_err(|e| e.to_string())?;
         (image.to_luma8(), registration)
     };
@@ -875,6 +949,32 @@ const PAGE_BODY: &str = r#"
   <button type="submit">Read it</button>
 </form>
 
+<h2>Put several PDFs into one</h2>
+<p>
+  A flatbed gives one file per sheet, not one file for the stack. Twenty sheets
+  scanned is twenty files, and almost everything else here — and on the command
+  line — wants one document with twenty pages in it.
+</p>
+
+<form method="post" action="/join" enctype="multipart/form-data">
+  <fieldset>
+    <legend>The files</legend>
+
+    <label for="files">The PDFs, in the order their pages should come out
+      <span class="hint">— choose several at once. Mixed paper is fine: each
+      page keeps its own size.</span></label>
+    <input type="file" id="files" name="files" accept=".pdf" multiple required>
+  </fieldset>
+
+  <button type="submit">Join them</button>
+</form>
+<p class="hint">
+  A file picker sorts <code>page-10</code> before <code>page-2</code>, and a
+  stack in that order is a stack in the wrong order. Rename them
+  <code>page-01</code>, <code>page-02</code>, <code>page-10</code> and it comes
+  out right by itself.
+</p>
+
 <div class="warn">
   <strong>Print it at 100%.</strong> Put the printed sheet back in the tray, and
   turn <em>Fit to page</em> off — it scales by a few percent and nothing will
@@ -899,8 +999,14 @@ const PAGE_BODY: &str = r#"
     and contains nothing fetched from anywhere else.
   </p>
   <p>
-    For typing straight onto a page, filling a scanned form, or reading the
-    letters off a scan, use the command line: <code>onionskin --help</code>.
+    This page does three things. Onionskin does a great many more — one sheet
+    each for everybody on a spreadsheet, sheets of labels, covering something up
+    before you hand a document over, fixing a mistake on a page that is already
+    printed, checking a whole run came out right. All of them are in the window
+    (<code>onionskin-desktop</code>) and on the command line
+    (<code>onionskin --help</code>). This page stays small on purpose: it is one
+    file with nothing fetched from anywhere, which is what lets it promise it
+    never touches the network.
   </p>
 </footer>
 
