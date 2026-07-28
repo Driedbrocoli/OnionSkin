@@ -1385,3 +1385,73 @@ fn the_browser_refuses_words_placed_off_the_paper() {
     ]);
     assert!(the_back_of_the_sheet(&request).is_ok());
 }
+
+/// The feed the form asks for is the feed that is used, and leaving it unsaid
+/// falls back rather than failing.
+///
+/// `config set feed turned` means "stop asking me", so the page offers
+/// "whatever this machine was told" and the handler consults the setting when
+/// the form does not say. A page that always sent its own default would be a
+/// setting that only worked on the command line — and the cost of that is the
+/// whole run at the wrong end of the paper, by somebody who has already
+/// answered the question once.
+///
+/// The remembered case is not exercised here on purpose: reading it means
+/// pointing `ONIONSKIN_HOME` somewhere, the tests in this file share a process,
+/// and a test that reaches into the environment of the ones beside it is a
+/// worse thing than the case it covers. The command line's own tests set a home
+/// per run and check it there.
+#[test]
+fn the_feed_the_form_asks_for_is_the_one_that_is_used() {
+    let a_sheet = a_page("Invoice");
+    let asked = |feed: &[u8]| {
+        let mut parts: Vec<(&str, Option<&str>, &[u8])> = vec![
+            ("sheet", Some("letter.pdf"), a_sheet.as_slice()),
+            ("text", None, b"Terms overleaf"),
+            ("x", None, b"20"),
+            ("y", None, b"40"),
+        ];
+        if !feed.is_empty() {
+            parts.push(("feed", None, feed));
+        }
+        let (bytes, _) = the_back_of_the_sheet(&posted(&parts)).expect("it should write");
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("back.pdf");
+        std::fs::write(&pdf, &bytes).unwrap();
+        let engine = crate::render::engine().expect("a renderer");
+        let document = engine.open(&pdf).expect("it should open");
+        let drawn = document.render_gray(0, 100.0).expect("it should draw");
+        // Which half of the paper the ink is on is the whole difference.
+        (0..drawn.height)
+            .flat_map(|y| (0..drawn.width).map(move |x| (x, y)))
+            .filter(|(x, y)| drawn.gray[y * drawn.width + x] < 128)
+            .map(|(x, _)| x as f64 * 25.4 / 100.0)
+            .fold(f64::MAX, f64::min)
+    };
+
+    let same = asked(b"same");
+    let turned = asked(b"turned");
+    assert!(
+        same < 40.0,
+        "'same' did not land on the near side: {same:.0} mm"
+    );
+    assert!(
+        turned > 100.0,
+        "'turned' did not land on the far side: {turned:.0} mm"
+    );
+
+    // And the form's own "whatever this machine was told" is an empty value,
+    // which has to produce a delta rather than a refusal.
+    let unsaid = asked(b"");
+    assert!(unsaid.is_finite(), "an unsaid feed wrote nothing");
+
+    // The page offers exactly the words the parser understands, plus the empty
+    // one that means "ask the settings".
+    assert!(
+        PAGE_BODY.contains("<option value=\"\" selected>"),
+        "no fallback option"
+    );
+    for feed in ["same", "turned"] {
+        assert!(crate::duplex::Feed::parse(feed).is_some(), "{feed}");
+    }
+}

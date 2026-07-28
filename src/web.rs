@@ -706,9 +706,20 @@ fn the_back_of_the_sheet(request: &Request) -> Result<(Vec<u8>, String), String>
                 .into(),
         );
     }
+    // What was asked for, then what this machine was told, then the answer most
+    // printers give. The middle one matters: `config set feed turned` means
+    // "stop asking me", and a web page that quietly went back to asking would
+    // be a setting that only half worked.
     let feed = field("feed")
         .map(|p| p.text())
         .and_then(|said| crate::duplex::Feed::parse(&said))
+        .or_else(|| {
+            crate::settings::load()
+                .defaults
+                .feed
+                .as_deref()
+                .and_then(crate::duplex::Feed::parse)
+        })
         .unwrap_or_default();
     let two_sided = field("two_sided").map(|p| p.text()).as_deref() == Some("yes");
     let number = |name: &str, fallback: f64| -> f64 {
@@ -1440,6 +1451,7 @@ const PAGE_BODY: &str = r#"
 
     <label for="feed">Which way up does the back come out?</label>
     <select id="feed" name="feed">
+      <option value="" selected>Whatever this machine was told</option>
       <option value="same">Same way up — turn it over like a book page and it reads upright</option>
       <option value="turned">Turned around — the top is at the other end of the paper</option>
     </select>
