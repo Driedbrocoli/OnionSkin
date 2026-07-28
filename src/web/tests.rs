@@ -1465,3 +1465,71 @@ fn the_feed_the_form_asks_for_is_the_one_that_is_used() {
         assert!(crate::duplex::Feed::parse(feed).is_some(), "{feed}");
     }
 }
+
+/// The one parser in this program that a stranger can reach.
+///
+/// Everything else here is handed bytes by somebody sitting at the machine.
+/// This is handed them by whatever connected to the port, and it runs before
+/// any of the checks that come after — so it has to survive anything, including
+/// bodies that lie about their own shape.
+///
+/// None of these is a realistic request. That is the point: the realistic ones
+/// are covered by the tests above, and this is for the rest.
+#[test]
+fn nothing_sent_down_the_socket_can_break_the_multipart_parser() {
+    let boundaries = [
+        "",
+        "x",
+        "----OnionskinTestBoundary",
+        &"b".repeat(10_000),
+        "--",
+        "\u{0}",
+        "a\r\nb",
+    ];
+    let bodies: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        b"--".to_vec(),
+        b"----OnionskinTestBoundary".to_vec(),
+        b"----OnionskinTestBoundary\r\n".to_vec(),
+        // A part that promises a header and stops.
+        b"----OnionskinTestBoundary\r\nContent-Disposition: form-data; name=".to_vec(),
+        // A name that never closes its quotation.
+        b"----OnionskinTestBoundary\r\nContent-Disposition: form-data; name=\"a\r\n\r\nx\r\n"
+            .to_vec(),
+        // The end marker without a beginning.
+        b"----OnionskinTestBoundary--\r\n".to_vec(),
+        // Headers and no blank line before the data.
+        b"----OnionskinTestBoundary\r\nContent-Disposition: form-data; name=\"a\"\r\nx".to_vec(),
+        // Bytes that are not text at all.
+        (0u8..=255).collect(),
+        // A very long single part.
+        [
+            b"----OnionskinTestBoundary\r\n\r\n".to_vec(),
+            vec![b'x'; 100_000],
+        ]
+        .concat(),
+    ];
+
+    for content_type in [
+        "",
+        "multipart/form-data",
+        "multipart/form-data; boundary=",
+        "multipart/form-data; boundary=----OnionskinTestBoundary",
+        "multipart/form-data; boundary=\"----OnionskinTestBoundary\"",
+        "text/plain",
+        "multipart/form-data; boundary=--; boundary=--",
+    ] {
+        for body in &bodies {
+            // Only that it comes back rather than panicking or running away
+            // with the memory. What it decides is the business of the tests
+            // above; this is about it deciding anything at all.
+            let _ = parse_multipart(content_type, body);
+        }
+    }
+    for boundary in boundaries {
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        for body in &bodies {
+            let _ = parse_multipart(&content_type, body);
+        }
+    }
+}

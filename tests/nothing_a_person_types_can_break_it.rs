@@ -134,3 +134,47 @@ fn no_parser_panics_on_anything_a_person_could_type() {
         )
     ));
 }
+
+/// The readers that are handed a whole file rather than a typed string.
+///
+/// A spreadsheet is a zip full of XML, and a zip is a format with lengths and
+/// offsets in it that point at other parts of itself. Every one of those is a
+/// number somebody could have written down wrongly, or on purpose — so the
+/// reader is handed archives that lie about their own shape and asked only to
+/// come back.
+#[test]
+fn no_file_reader_panics_on_a_file_that_lies_about_itself() {
+    let mut files: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        b"PK".to_vec(),
+        b"PK\x03\x04".to_vec(),
+        // A local header promising more than follows it.
+        b"PK\x03\x04\xff\xff\xff\xff\xff\xff\xff\xff".to_vec(),
+        // An end-of-directory record claiming entries that are not there.
+        b"PK\x05\x06\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+            .to_vec(),
+        b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            .to_vec(),
+        (0u8..=255).collect(),
+        b"%PDF-1.4 pretending to be a spreadsheet".to_vec(),
+        b"<?xml version=\"1.0\"?><worksheet/>".to_vec(),
+    ];
+    files.push(vec![0u8; 100_000]);
+    files.push(b"PK\x03\x04".iter().copied().cycle().take(50_000).collect());
+
+    for bytes in &files {
+        let one = bytes.clone();
+        if catch_unwind(move || {
+            let _ = onionskin::sheets::is_a_spreadsheet(&one);
+            let _ = onionskin::sheets::read(&one);
+        })
+        .is_err()
+        {
+            panic!(
+                "sheets panicked on {} bytes starting {:?}",
+                bytes.len(),
+                &bytes[..bytes.len().min(8)]
+            );
+        }
+    }
+}
