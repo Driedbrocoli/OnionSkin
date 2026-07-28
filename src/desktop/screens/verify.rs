@@ -48,15 +48,19 @@ impl Default for State {
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "Check a sheet",
-        "Print one, scan it, and find out before you print sixty.",
+        "Check a sheet, or a whole run",
+        "Print one, scan it, and find out before you print sixty — or check all \
+         sixty at once.",
     );
 
     widgets::hint(
         room.ui,
         "Give the delta that was printed and a scan of the sheet it went onto. \
          Onionskin looks for each addition where it asked for it and says how \
-         close it came — including the ones that are not there at all.",
+         close it came — including the ones that are not there at all.\n\n\
+         A whole run works too: put the stack through the feeder, give the one \
+         PDF that comes back, and every sheet is checked against its own page \
+         of the delta. The ones that drifted are named.",
     );
     room.ui.add_space(10.0);
 
@@ -73,7 +77,9 @@ pub fn show(state: &mut State, room: &mut Room) {
         room.picker,
         "A scan of the sheet afterwards",
         &mut state.sheet,
-        &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+        // A PDF as well as a picture: a feeder gives a whole stack back as
+        // one, and that is how a run of two hundred gets checked at all.
+        &["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"],
         room.dropped,
     );
 
@@ -139,6 +145,65 @@ pub fn show(state: &mut State, room: &mut Room) {
     }
 }
 
+/// A whole stack, checked sheet by sheet.
+///
+/// `verify` answers "did this sheet come out right", which is the right
+/// question asked once. Two hundred certificates is two hundred chances for the
+/// paper to go in crooked, and nobody scans two hundred sheets one at a time —
+/// so nobody finds out, and the drifted ones go out in the post. A feeder gives
+/// the whole stack back as one PDF, so this takes it.
+///
+/// The measuring is [`calibrate::check_a_run`], the same one the command line
+/// uses. What is here is saying it in a window.
+fn check_a_run(
+    scan: &std::path::Path,
+    delta: &std::path::Path,
+    tolerance_mm: f64,
+    sheets: usize,
+    report: &crate::job::Reporter,
+) -> Outcome {
+    report.saying(format!("Checking {sheets} sheets…"));
+    let run = match calibrate::check_a_run(scan, delta, tolerance_mm, None, &mut |sheet, of| {
+        report.saying(format!("Sheet {sheet} of {of}…"));
+    }) {
+        Ok(run) => run,
+        Err(why) => return Outcome::refused(why.to_string()),
+    };
+
+    let message = format!(
+        "{} sheet(s), against {}.\n\n{}\n\n{}",
+        run.checked(),
+        delta
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        run.lines().join("\n"),
+        run.verdict()
+    );
+    if run.good() {
+        Outcome::Done {
+            message,
+            wrote: Vec::new(),
+            notes: Vec::new(),
+        }
+    } else {
+        // Not a refusal: nothing was asked to be written and the measuring
+        // worked perfectly. The stack is what is wrong, and the numbers are
+        // the answer — so they are shown, with the sheets to pull named.
+        Outcome::Done {
+            message,
+            wrote: Vec::new(),
+            notes: vec![format!(
+                "Pull sheet(s) {} out of the stack. A run that drifts throughout \
+                 is a printer that needs calibrating, not a stack that needs \
+                 re-doing — name a profile below and check one of those sheets on \
+                 its own to learn it.",
+                onionskin::split::sheets(&run.adrift())
+            )],
+        }
+    }
+}
+
 /// Measure the sheet and say what it says.
 fn check(state: &mut State, room: &mut Room) {
     let (Some(delta), Some(sheet)) = (state.delta.clone(), state.sheet.clone()) else {
@@ -153,6 +218,13 @@ fn check(state: &mut State, room: &mut Room) {
             Ok(page) => page,
             Err(e) => return Outcome::refused(e.to_string()),
         };
+
+        // A whole run, when the stack came back from the feeder as one PDF.
+        // One sheet is the ordinary case and goes on exactly as before.
+        let sheets = onionskin::recipe::pages_in(&sheet).unwrap_or(1);
+        if sheets > 1 {
+            return check_a_run(&sheet, &delta, tolerance, sheets, report);
+        }
 
         report.saying("Reading what the delta asked for…");
         let asked = match calibrate::marks_on_delta(&delta) {

@@ -13,6 +13,7 @@ pub mod document;
 pub mod draw;
 pub mod history;
 pub mod jobs;
+pub mod join;
 pub mod labels;
 pub mod merge;
 pub mod proof;
@@ -81,6 +82,7 @@ pub enum Screen {
     Blanks,
     Proof,
     Merge,
+    Join,
     Labels,
     Jobs,
     Verify,
@@ -102,6 +104,7 @@ impl Screen {
         Screen::Blanks,
         Screen::Proof,
         Screen::Merge,
+        Screen::Join,
         Screen::Labels,
         Screen::Jobs,
         Screen::Verify,
@@ -124,6 +127,7 @@ impl Screen {
             Screen::Blanks => "blanks",
             Screen::Proof => "proof",
             Screen::Merge => "merge",
+            Screen::Join => "join",
             Screen::Labels => "labels",
             Screen::Jobs => "jobs",
             Screen::Verify => "verify",
@@ -152,9 +156,10 @@ impl Screen {
             Screen::Blanks => "Where there is room",
             Screen::Proof => "See it before you print",
             Screen::Merge => "Merge deltas",
+            Screen::Join => "Join files",
             Screen::Labels => "Sheet of labels",
             Screen::Jobs => "Saved jobs",
-            Screen::Verify => "Check a sheet",
+            Screen::Verify => "Check a sheet or a run",
             Screen::History => "What was added",
             Screen::Devices => "Printers and scanners",
             Screen::Calibrate => "Calibration",
@@ -174,9 +179,10 @@ impl Screen {
             Screen::Blanks => "Ask the form where you can write, in millimetres",
             Screen::Proof => "The sheet and the delta together, on screen",
             Screen::Merge => "Several onto one, so the sheet goes through once",
+            Screen::Join => "Several one after another, into one document",
             Screen::Labels => "Addresses and files, one per label, from a list",
             Screen::Jobs => "The same stamp on today's document, in two clicks",
-            Screen::Verify => "Did it come out of the printer right?",
+            Screen::Verify => "Did it come out of the printer right — one sheet, or all of them?",
             Screen::History => "Have I printed this delta already?",
             Screen::Devices => "Print and scan over the network",
             Screen::Calibrate => "Measure a printer, once, for exactness",

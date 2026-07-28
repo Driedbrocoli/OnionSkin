@@ -40,6 +40,9 @@ pub struct State {
     size_pt: f64,
     /// How far in from the label's own edge the words start.
     pad_mm: f64,
+    /// The stock code chosen, where one was — so the screen can say what it
+    /// filled in, and go on saying it while somebody checks the box.
+    stock: Option<&'static onionskin::stock::Stock>,
 }
 
 impl Default for State {
@@ -62,6 +65,7 @@ impl Default for State {
             already_used: 0,
             size_pt: 10.0,
             pad_mm: 3.0,
+            stock: None,
         }
     }
 }
@@ -122,6 +126,65 @@ pub fn show(state: &mut State, room: &mut Room) {
         );
         widgets::hint(ui, "the first name goes on the next one along");
     });
+    room.ui.add_space(8.0);
+
+    // The box's own code, which is the thing somebody is holding. It fills the
+    // measurements in below rather than hiding them: a code means different
+    // sizes in different countries, and the only defence is somebody seeing the
+    // numbers it stood for.
+    room.ui
+        .label(egui::RichText::new("The label sheet").strong());
+    room.ui.horizontal(|ui| {
+        let chosen = match state.stock {
+            Some(stock) => stock.name(),
+            None => "Measurements below".to_string(),
+        };
+        egui::ComboBox::from_id_salt("label-stock")
+            .selected_text(chosen)
+            .width(260.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(state.stock.is_none(), "Measurements below")
+                    .clicked()
+                {
+                    state.stock = None;
+                }
+                for stock in onionskin::stock::KNOWN {
+                    let picked = state
+                        .stock
+                        .map(|mine| mine.code == stock.code)
+                        .unwrap_or(false);
+                    let said = format!("{} — {}", stock.name(), stock.what_for);
+                    if ui.selectable_label(picked, said).clicked() {
+                        state.stock = Some(stock);
+                        // Filled into the fields themselves, not held to one
+                        // side: everything below stays true, stays editable,
+                        // and a sheet that is a millimetre out is corrected
+                        // rather than abandoned.
+                        state.page = stock.paper.to_string();
+                        state.columns = stock.across;
+                        state.rows = stock.down;
+                        state.label_width_mm = stock.label_mm.0;
+                        state.label_height_mm = stock.label_mm.1;
+                        state.margin_x_mm = stock.margin_mm.0;
+                        state.margin_y_mm = stock.margin_mm.1;
+                        state.gap_x_mm = stock.gap_mm.0;
+                        state.gap_y_mm = stock.gap_mm.1;
+                    }
+                }
+            });
+    });
+    if let Some(stock) = state.stock {
+        widgets::hint(
+            room.ui,
+            &format!(
+                "{} — the published measurements, filled in below. The box is \
+                 the authority: print one sheet on plain paper and hold it up to \
+                 the stock before committing the box.",
+                stock.describe().lines().next().unwrap_or_default()
+            ),
+        );
+    }
     room.ui.add_space(8.0);
 
     room.ui.collapsing("The sheet's measurements", |ui| {
@@ -380,6 +443,68 @@ mod tests {
         let grid = grid_from(&state).expect("the defaults must describe a real sheet");
         assert_eq!(grid.per_sheet(), 24);
         assert_eq!(state.already_used, 0, "a fresh sheet, until told otherwise");
+    }
+
+    /// Choosing a code has to fill the fields in, not sit beside them.
+    ///
+    /// The whole reason a code is safe to offer is that the numbers it stands
+    /// for stay visible and stay editable — a code means different sizes in
+    /// different countries, and a screen that hid them would be the silent
+    /// wrongness [`onionskin::stock`] exists to avoid.
+    #[test]
+    fn a_stock_code_fills_in_the_measurements_and_leaves_them_showing() {
+        let mut state = State::default();
+        let stock = onionskin::stock::find("l7160").expect("l7160 is known");
+
+        // What the picker does when it is clicked.
+        state.stock = Some(stock);
+        state.page = stock.paper.to_string();
+        state.columns = stock.across;
+        state.rows = stock.down;
+        state.label_width_mm = stock.label_mm.0;
+        state.label_height_mm = stock.label_mm.1;
+        state.margin_x_mm = stock.margin_mm.0;
+        state.margin_y_mm = stock.margin_mm.1;
+        state.gap_x_mm = stock.gap_mm.0;
+        state.gap_y_mm = stock.gap_mm.1;
+
+        let grid = grid_from(&state).expect("a real box of labels must describe a real sheet");
+        assert_eq!(grid.per_sheet(), 21);
+        assert_eq!(state.columns, 3);
+        assert_eq!(state.rows, 7);
+        assert!((state.label_height_mm - 38.1).abs() < 1e-9);
+    }
+
+    /// Every code in the table has to describe a sheet this screen can lay out.
+    /// A code that fills the fields with something `grid_from` then refuses
+    /// would be a dead entry in the list.
+    #[test]
+    fn every_code_in_the_list_lays_out_on_this_screen() {
+        for stock in onionskin::stock::KNOWN {
+            let state = State {
+                page: stock.paper.to_string(),
+                columns: stock.across,
+                rows: stock.down,
+                label_width_mm: stock.label_mm.0,
+                label_height_mm: stock.label_mm.1,
+                margin_x_mm: stock.margin_mm.0,
+                margin_y_mm: stock.margin_mm.1,
+                gap_x_mm: stock.gap_mm.0,
+                gap_y_mm: stock.gap_mm.1,
+                stock: Some(stock),
+                ..Default::default()
+            };
+            let grid = grid_from(&state)
+                .unwrap_or_else(|why| panic!("{} does not lay out: {why}", stock.code));
+            assert_eq!(
+                grid.per_sheet(),
+                stock.per_sheet(),
+                "{} lays out {} labels, not {}",
+                stock.code,
+                grid.per_sheet(),
+                stock.per_sheet()
+            );
+        }
     }
 
     /// A grid that runs off the paper costs a sheet of labels rather than

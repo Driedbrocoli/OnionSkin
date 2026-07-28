@@ -1230,7 +1230,11 @@ fn a_target_printed_twice_and_scanned_gives_back_the_offset() {
 
 /// A scan of a sheet with square blots at the given places, printed by a
 /// printer whose error is `error`.
-fn sheet_with_blots(page: PageSize, at_mm: &[(f64, f64)], error: Similarity) -> (image::GrayImage, crate::scan::ScanRegistration) {
+fn sheet_with_blots(
+    page: PageSize,
+    at_mm: &[(f64, f64)],
+    error: Similarity,
+) -> (image::GrayImage, crate::scan::ScanRegistration) {
     let px_per_mm = 300.0 / 25.4;
     let width = (page.width_mm * px_per_mm).round() as u32;
     let height = (page.height_mm * px_per_mm).round() as u32;
@@ -1356,7 +1360,11 @@ fn a_shift_the_printer_introduced_is_measured_off_an_ordinary_job() {
     // And the fit recovers the printer's error, to a tenth of a millimetre.
     let learnt = learn_from_landings(&landings, page, "office").unwrap();
     assert!((learnt.error.dx_mm - 0.8).abs() < 0.1, "{:?}", learnt.error);
-    assert!((learnt.error.dy_mm - -0.5).abs() < 0.1, "{:?}", learnt.error);
+    assert!(
+        (learnt.error.dy_mm - -0.5).abs() < 0.1,
+        "{:?}",
+        learnt.error
+    );
     assert_eq!(learnt.n_points, 4);
 }
 
@@ -1376,10 +1384,7 @@ fn a_correction_already_applied_is_not_thrown_away() {
     // The delta was written with the correction for that error, so its content
     // sits a millimetre back from where it was asked for…
     let correction = error.inverse();
-    let rendered: Vec<(f64, f64)> = places
-        .iter()
-        .map(|p| correction.apply(*p, &page))
-        .collect();
+    let rendered: Vec<(f64, f64)> = places.iter().map(|p| correction.apply(*p, &page)).collect();
     // …and the printer's shift then puts the ink on the mark, which is the
     // whole point of having the profile. A scan of this sheet looks perfect.
     let (scan, registration) = sheet_with_blots(page, &places, Similarity::IDENTITY);
@@ -1415,7 +1420,11 @@ fn an_addition_that_did_not_print_is_not_measured() {
     assert_eq!(landings.len(), 3, "{landings:?}");
     let absent = &landings[2];
     assert!(!absent.printed());
-    assert!(absent.describe().contains("did not print"), "{}", absent.describe());
+    assert!(
+        absent.describe().contains("did not print"),
+        "{}",
+        absent.describe()
+    );
 
     // And two is not enough to fit from, so it says so rather than guessing.
     let said = learn_from_landings(&landings, page, "office")
@@ -1493,7 +1502,11 @@ fn marks_in_a_line_give_a_shift_and_no_invented_rotation() {
     assert_eq!(learnt.error.rotation_deg, 0.0, "{:?}", learnt.error);
     assert_eq!(learnt.error.scale, 1.0, "{:?}", learnt.error);
     assert!((learnt.error.dx_mm - 0.9).abs() < 0.1, "{:?}", learnt.error);
-    assert!((learnt.error.dy_mm - -0.4).abs() < 0.1, "{:?}", learnt.error);
+    assert!(
+        (learnt.error.dy_mm - -0.4).abs() < 0.1,
+        "{:?}",
+        learnt.error
+    );
     assert!(learnt.notes.contains("shift only"), "{}", learnt.notes);
 }
 
@@ -1582,10 +1595,21 @@ fn landed(miss_mm: f64, confidence: f64) -> Landing {
 fn a_sheet_where_everything_landed_close_enough_is_good() {
     let report = PrintReport::of(vec![landed(0.2, 1.0), landed(0.31, 0.95)], 1.0);
     assert!(report.good());
-    assert_eq!((report.absent, report.adrift, report.unmeasurable), (0, 0, 0));
+    assert_eq!(
+        (report.absent, report.adrift, report.unmeasurable),
+        (0, 0, 0)
+    );
     assert!((report.worst_mm - 0.31).abs() < 1e-9);
-    assert!(report.verdict().contains("Everything printed"), "{}", report.verdict());
-    assert!(report.lines().iter().all(|l| l.contains('✓')), "{:?}", report.lines());
+    assert!(
+        report.verdict().contains("Everything printed"),
+        "{}",
+        report.verdict()
+    );
+    assert!(
+        report.lines().iter().all(|l| l.contains('✓')),
+        "{:?}",
+        report.lines()
+    );
 }
 
 #[test]
@@ -1611,10 +1635,17 @@ fn an_addition_that_is_not_on_the_sheet_fails_it_and_names_the_likely_cause() {
 fn an_addition_over_existing_ink_is_set_aside_rather_than_failed() {
     let report = PrintReport::of(vec![landed(0.2, 1.0), landed(8.0, 1.9)], 1.0);
     assert!(report.good(), "{}", report.verdict());
-    assert_eq!((report.absent, report.adrift, report.unmeasurable), (0, 0, 1));
+    assert_eq!(
+        (report.absent, report.adrift, report.unmeasurable),
+        (0, 0, 1)
+    );
     // Eight millimetres of nonsense does not become the worst reading.
     assert!((report.worst_mm - 0.2).abs() < 1e-9, "{}", report.worst_mm);
-    assert!(report.verdict().contains("already printed"), "{}", report.verdict());
+    assert!(
+        report.verdict().contains("already printed"),
+        "{}",
+        report.verdict()
+    );
     assert!(report.lines()[1].contains('?'), "{:?}", report.lines());
 }
 
@@ -1633,12 +1664,161 @@ fn how_close_is_close_enough_is_the_callers_to_set() {
 #[test]
 fn a_sheet_can_be_wrong_in_more_than_one_way_at_once() {
     let report = PrintReport::of(
-        vec![landed(0.1, 1.0), landed(0.0, 0.0), landed(3.0, 1.0), landed(5.0, 1.8)],
+        vec![
+            landed(0.1, 1.0),
+            landed(0.0, 0.0),
+            landed(3.0, 1.0),
+            landed(5.0, 1.8),
+        ],
         1.0,
     );
-    assert_eq!((report.absent, report.adrift, report.unmeasurable), (1, 1, 1));
+    assert_eq!(
+        (report.absent, report.adrift, report.unmeasurable),
+        (1, 1, 1)
+    );
     let said = report.verdict();
     assert!(said.contains("did not print"), "{said}");
     assert!(said.contains("landed more than"), "{said}");
     assert!(said.contains("already printed"), "{said}");
+}
+
+// ---------------------------------------------------------------------------
+// A whole run
+// ---------------------------------------------------------------------------
+
+/// The report says which sheets to pull, and that is the whole product of it.
+/// "Something is wrong somewhere in the stack" costs the afternoon the check
+/// was meant to save.
+#[test]
+fn a_run_report_names_the_sheets_to_pull() {
+    let good = |sheet: usize| SheetOutcome {
+        sheet,
+        page_of_delta: sheet,
+        report: Some(PrintReport {
+            landings: Vec::new(),
+            tolerance_mm: 1.0,
+            absent: 0,
+            adrift: 0,
+            unmeasurable: 0,
+            worst_mm: 0.2,
+        }),
+        why_not: None,
+    };
+    let drifted = |sheet: usize| SheetOutcome {
+        sheet,
+        page_of_delta: sheet,
+        report: Some(PrintReport {
+            landings: Vec::new(),
+            tolerance_mm: 1.0,
+            absent: 0,
+            adrift: 1,
+            unmeasurable: 0,
+            worst_mm: 3.9,
+        }),
+        why_not: None,
+    };
+    let jammed = |sheet: usize| SheetOutcome {
+        sheet,
+        page_of_delta: sheet,
+        report: None,
+        why_not: Some("the sheet runs off the edge of this scan".to_string()),
+    };
+
+    let run = RunReport {
+        outcomes: vec![good(1), good(2), drifted(3), good(4), jammed(5)],
+        tolerance_mm: 1.0,
+        sheets: 5,
+    };
+    assert_eq!(run.adrift(), vec![3]);
+    // A sheet that could not be read is not a sheet that printed wrongly: one
+    // needs looking at and the other needs scanning again.
+    assert_eq!(run.unreadable(), vec![5]);
+    assert!(!run.good());
+    assert_eq!(run.checked(), 5);
+    assert_eq!(run.worst(), Some((3, 3.9)));
+
+    let said = run.verdict();
+    assert!(said.contains("1 of 5 sheet(s) drifted: 3."), "{said}");
+    assert!(said.contains("could not be read at all: 5"), "{said}");
+    // Three of the five measured right — the ones that can go.
+    assert!(said.contains("3 of them measured right"), "{said}");
+}
+
+/// A run that is entirely right says so plainly. A check that can only report
+/// trouble is a check people stop running.
+#[test]
+fn a_run_that_came_out_right_says_so_and_names_the_worst_anyway() {
+    let outcome = |sheet: usize, worst_mm: f64| SheetOutcome {
+        sheet,
+        page_of_delta: sheet,
+        report: Some(PrintReport {
+            landings: Vec::new(),
+            tolerance_mm: 1.0,
+            absent: 0,
+            adrift: 0,
+            unmeasurable: 0,
+            worst_mm,
+        }),
+        why_not: None,
+    };
+    let run = RunReport {
+        outcomes: vec![outcome(1, 0.1), outcome(2, 0.4), outcome(3, 0.2)],
+        tolerance_mm: 1.0,
+        sheets: 3,
+    };
+    assert!(run.good());
+    assert_eq!(run.worst(), Some((2, 0.4)));
+    let said = run.verdict();
+    assert!(said.contains("All 3 sheet(s) came out right"), "{said}");
+    // The worst is named even when everything passed, because a run creeping
+    // towards the tolerance is worth knowing about before it crosses it.
+    assert!(said.contains("sheet 2 at 0.40 mm"), "{said}");
+    assert!(!said.contains("drifted"), "{said}");
+}
+
+/// Each sheet gets one line, and the mark on it is the thing somebody's eye
+/// runs down the list looking for.
+#[test]
+fn each_sheet_is_one_line_with_a_mark_on_it() {
+    let right = SheetOutcome {
+        sheet: 7,
+        page_of_delta: 7,
+        report: Some(PrintReport {
+            landings: Vec::new(),
+            tolerance_mm: 1.0,
+            absent: 0,
+            adrift: 0,
+            unmeasurable: 0,
+            worst_mm: 0.15,
+        }),
+        why_not: None,
+    };
+    let line = right.line(1.0);
+    assert!(line.contains("sheet   7"), "{line}");
+    assert!(line.contains('✓'), "{line}");
+    assert!(line.contains("0.15 mm of 1.00"), "{line}");
+    assert!(right.good());
+
+    let jammed = SheetOutcome {
+        sheet: 8,
+        page_of_delta: 8,
+        report: None,
+        why_not: Some("nothing on the glass".to_string()),
+    };
+    assert!(jammed.line(1.0).contains('?'));
+    assert!(!jammed.good());
+
+    // A page of the delta with nothing on it is neither good nor bad — there
+    // was nothing to look for.
+    let nothing = SheetOutcome {
+        sheet: 9,
+        page_of_delta: 9,
+        report: None,
+        why_not: None,
+    };
+    assert!(
+        nothing.line(1.0).contains("nothing on page 9"),
+        "{}",
+        nothing.line(1.0)
+    );
 }

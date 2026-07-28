@@ -2234,3 +2234,258 @@ pub fn now() -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// A whole run through the feeder
+// ---------------------------------------------------------------------------
+
+/// One sheet of a run, and what became of it.
+#[derive(Debug, Clone)]
+pub struct SheetOutcome {
+    /// Counted from 1, the way somebody talks about the fourth sheet.
+    pub sheet: usize,
+    /// Which page of the delta it was held against.
+    pub page_of_delta: usize,
+    /// What the measuring found, where the sheet could be read at all.
+    pub report: Option<PrintReport>,
+    /// Why it could not, where it could not.
+    pub why_not: Option<String>,
+}
+
+impl SheetOutcome {
+    pub fn good(&self) -> bool {
+        self.report.as_ref().map(PrintReport::good).unwrap_or(false)
+    }
+
+    /// One line, for a list somebody reads down looking for the ✗.
+    pub fn line(&self, tolerance_mm: f64) -> String {
+        let sheet = self.sheet;
+        match (&self.report, &self.why_not) {
+            (_, Some(why)) => format!("  sheet {sheet:>3}  ?  {why}"),
+            (Some(report), _) if report.good() => format!(
+                "  sheet {sheet:>3}  ✓  worst {:.2} mm of {tolerance_mm:.2}",
+                report.worst_mm
+            ),
+            (Some(report), _) => format!(
+                "  sheet {sheet:>3}  ✗  {}",
+                report.verdict().replace('\n', "\n           ")
+            ),
+            (None, None) => format!(
+                "  sheet {sheet:>3}  —  nothing on page {} of the delta to look for",
+                self.page_of_delta
+            ),
+        }
+    }
+}
+
+/// What checking a whole run came to.
+#[derive(Debug, Clone)]
+pub struct RunReport {
+    pub outcomes: Vec<SheetOutcome>,
+    pub tolerance_mm: f64,
+    /// How many sheets the scan had, whether or not all of them were checked.
+    pub sheets: usize,
+}
+
+impl RunReport {
+    /// The sheets that printed wrongly, by number — which is the answer
+    /// somebody came for. A report that says the stack has a problem somewhere
+    /// costs the afternoon it was meant to save.
+    pub fn adrift(&self) -> Vec<usize> {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.report.as_ref().is_some_and(|r| !r.good()))
+            .map(|outcome| outcome.sheet)
+            .collect()
+    }
+
+    /// The sheets that could not be read at all — a jam, a blank, a page the
+    /// scanner mangled. Not the same as a sheet that printed wrongly, and worth
+    /// keeping apart: one needs reprinting and the other needs looking at.
+    pub fn unreadable(&self) -> Vec<usize> {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.why_not.is_some())
+            .map(|outcome| outcome.sheet)
+            .collect()
+    }
+
+    pub fn checked(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    pub fn good(&self) -> bool {
+        self.adrift().is_empty() && self.unreadable().is_empty()
+    }
+
+    /// The sheet that came out worst, and by how much.
+    pub fn worst(&self) -> Option<(usize, f64)> {
+        self.outcomes
+            .iter()
+            .filter_map(|outcome| outcome.report.as_ref().map(|r| (outcome.sheet, r.worst_mm)))
+            .fold(None, |worst: Option<(usize, f64)>, (sheet, mm)| {
+                Some(match worst {
+                    Some((_, most)) if most >= mm => worst.expect("just matched"),
+                    _ => (sheet, mm),
+                })
+            })
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        self.outcomes
+            .iter()
+            .map(|outcome| outcome.line(self.tolerance_mm))
+            .collect()
+    }
+
+    pub fn verdict(&self) -> String {
+        let checked = self.checked();
+        let adrift = self.adrift();
+        let unreadable = self.unreadable();
+        if adrift.is_empty() && unreadable.is_empty() {
+            return match self.worst() {
+                Some((sheet, mm)) => format!(
+                    "All {checked} sheet(s) came out right. The worst was sheet {sheet} at \
+                     {mm:.2} mm,\n  inside the {:.2} mm you asked for.",
+                    self.tolerance_mm
+                ),
+                None => format!("All {checked} sheet(s) came out right."),
+            };
+        }
+
+        let mut said = Vec::new();
+        if !adrift.is_empty() {
+            let right = checked - adrift.len() - unreadable.len();
+            said.push(format!(
+                "{} of {checked} sheet(s) drifted: {}.",
+                adrift.len(),
+                crate::split::sheets(&adrift)
+            ));
+            said.push(format!(
+                "  Pull those out of the stack. They are the ones to look at, and the \
+                 rest\n  can go — {right} of them measured right."
+            ));
+        }
+        if !unreadable.is_empty() {
+            said.push(format!(
+                "{} sheet(s) could not be read at all: {}.",
+                unreadable.len(),
+                crate::split::sheets(&unreadable)
+            ));
+        }
+        said.push(
+            "\n  A run that drifts throughout is a printer that needs calibrating, not \
+             a\n  stack that needs re-doing."
+                .to_string(),
+        );
+        said.join("\n")
+    }
+}
+
+/// Why a run cannot be checked at all, as opposed to a run that checked badly.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error(
+        "{scan} has {sheets} sheet(s) on it and {delta} has {pages} page(s).\n    \
+         A run is checked sheet against page, so those have to match — or the \
+         delta has\n    to be a single page that went onto every sheet."
+    )]
+    Mismatch {
+        scan: PathBuf,
+        sheets: usize,
+        delta: PathBuf,
+        pages: usize,
+    },
+    #[error("{0}")]
+    Unreadable(String),
+}
+
+/// Check a whole run: every sheet of a scanned stack against its own page of
+/// the delta.
+///
+/// The single place that knows how a run is checked, so the command line and
+/// the window cannot drift apart on the one question where drifting apart
+/// would be funny.
+///
+/// `first` stops early, for somebody who wants the shape of a run before the
+/// whole box has been through the scanner. `saying` is called with each sheet
+/// number as it starts, so a window can show progress on a stack that takes a
+/// minute.
+pub fn check_a_run(
+    scan: &Path,
+    delta: &Path,
+    tolerance_mm: f64,
+    first: Option<usize>,
+    saying: &mut dyn FnMut(usize, usize),
+) -> Result<RunReport, RunError> {
+    let sheets = crate::recipe::pages_in(scan).map_err(RunError::Unreadable)?;
+    let delta_pages = pages_on_delta(delta).map_err(|e| RunError::Unreadable(e.to_string()))?;
+
+    // A one-page delta printed onto every sheet of a run is ordinary — a paid
+    // stamp, a signature. So is a page each. Anything between the two is
+    // somebody having scanned half the stack, and it is better said than
+    // silently checked against the wrong page.
+    if delta_pages != 1 && delta_pages != sheets {
+        return Err(RunError::Mismatch {
+            scan: scan.to_path_buf(),
+            sheets,
+            delta: delta.to_path_buf(),
+            pages: delta_pages,
+        });
+    }
+
+    let wanted = first.unwrap_or(sheets).min(sheets);
+
+    // The delta's own marks, read once per page rather than once per sheet: a
+    // stamp printed onto two hundred sheets is one page read two hundred times
+    // otherwise, and that is most of the work.
+    let mut marks: Vec<Option<Vec<Asked>>> = vec![None; delta_pages];
+    let mut outcomes = Vec::new();
+
+    for sheet in 1..=wanted {
+        saying(sheet, wanted);
+        let which = if delta_pages == 1 { 1 } else { sheet };
+        if marks[which - 1].is_none() {
+            marks[which - 1] = Some(
+                marks_on_delta_page(delta, which)
+                    .map_err(|e| RunError::Unreadable(e.to_string()))?,
+            );
+        }
+        let asked = marks[which - 1].as_ref().expect("just read");
+        if asked.is_empty() {
+            outcomes.push(SheetOutcome {
+                sheet,
+                page_of_delta: which,
+                report: None,
+                why_not: None,
+            });
+            continue;
+        }
+
+        // The sheet as the feeder gave it: straightened onto the paper's own
+        // grid, so a millimetre in the delta is the same millimetre here.
+        match crate::recipe::draw_page(scan, sheet) {
+            Ok((gray, registration)) => {
+                let landings = measure_landings(&gray, &registration, asked, ink_threshold());
+                outcomes.push(SheetOutcome {
+                    sheet,
+                    page_of_delta: which,
+                    report: Some(PrintReport::of(landings, tolerance_mm)),
+                    why_not: None,
+                });
+            }
+            Err(why) => outcomes.push(SheetOutcome {
+                sheet,
+                page_of_delta: which,
+                report: None,
+                why_not: Some(why),
+            }),
+        }
+    }
+
+    Ok(RunReport {
+        outcomes,
+        tolerance_mm,
+        sheets,
+    })
+}
