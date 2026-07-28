@@ -204,6 +204,12 @@ onionskin send delta.pdf                 # no --printer needed again
 scanner` does the same for `fetch`. A flag still beats the setting, for the day
 somebody uses a different machine.
 
+The window reads and writes the same setting. Its **Printers and scanners**
+screen opens on whatever was set here, and its "Always use this one" button
+keeps what is on screen — so setting it in either program sets it for both.
+There is one answer to "which printer", not one per program; two of them
+disagreeing is how a delta goes to the wrong printer.
+
 `--delta last` means the delta written most recently, which saves going to look
 for a file that was put in Onionskin's own folder under a name nobody chose:
 

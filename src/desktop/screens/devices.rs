@@ -56,15 +56,45 @@ impl Default for State {
             // turns up. A printer of its own is named directly.
             server: "ipp://127.0.0.1:631/".into(),
             found: Arc::new(Mutex::new(Vec::new())),
-            printer_uri: String::new(),
+            // The printer somebody last told Onionskin to remember, so the
+            // window opens on the same one the command line sends to. Set
+            // either here or with `onionskin config set printer`; there is one
+            // answer to "which printer", not one per program.
+            printer_uri: onionskin::settings::load()
+                .defaults
+                .printer
+                .unwrap_or_default(),
             to_print: None,
             copies: 1,
-            scanner_uri: String::new(),
+            scanner_uri: onionskin::settings::load()
+                .defaults
+                .scanner
+                .unwrap_or_default(),
             dpi: 300,
             colour: false,
             scan_to: None,
         }
     }
+}
+
+/// Keep a device as the default, where the command line looks for it.
+///
+/// One answer to "which printer", not one per program. Somebody who sets it in
+/// the window should not have to set it again in a terminal, and the settings
+/// file is the only place both of them read.
+fn remember(what: &'static str, uri: &str, room: &mut Room) {
+    let uri = uri.trim().to_string();
+    room.jobs.start("Remembering it", move |_| {
+        match onionskin::settings::set_default(what, Some(&uri)) {
+            Ok(()) => Outcome::done(format!(
+                "Kept '{uri}' as the {what} to use. The command line starts \
+                 there too — `onionskin config show` lists it."
+            )),
+            // Not a failure of the printing: nothing has been sent yet, and
+            // the address on screen still works for this job.
+            Err(why) => Outcome::refused(format!("That could not be kept as the {what}: {why}")),
+        }
+    });
 }
 
 pub fn show(state: &mut State, room: &mut Room) {
@@ -214,10 +244,26 @@ pub fn show(state: &mut State, room: &mut Room) {
         &["pdf"],
         room.dropped,
     );
+    // Remembered where the command line looks for it, so somebody who sets it
+    // here never has to set it again — in either program.
+    let mut keep_the_printer = false;
     room.ui.horizontal(|ui| {
         ui.label("Printer");
         ui.text_edit_singleline(&mut state.printer_uri);
+        keep_the_printer = ui
+            .add_enabled(
+                !state.printer_uri.trim().is_empty(),
+                egui::Button::new("Always use this one"),
+            )
+            .on_hover_text(
+                "Kept in your settings, so this screen and `onionskin send` \
+                 both start here.",
+            )
+            .clicked();
     });
+    if keep_the_printer {
+        remember("printer", &state.printer_uri.clone(), room);
+    }
     room.ui.horizontal(|ui| {
         ui.label("Copies");
         ui.add(egui::DragValue::new(&mut state.copies).range(1..=99));
@@ -261,10 +307,24 @@ pub fn show(state: &mut State, room: &mut Room) {
     room.ui.add_space(10.0);
     room.ui
         .label(egui::RichText::new("Scan a sheet from a printer").strong());
+    let mut keep_the_scanner = false;
     room.ui.horizontal(|ui| {
         ui.label("Scanner");
         ui.text_edit_singleline(&mut state.scanner_uri);
+        keep_the_scanner = ui
+            .add_enabled(
+                !state.scanner_uri.trim().is_empty(),
+                egui::Button::new("Always use this one"),
+            )
+            .on_hover_text(
+                "Kept in your settings, so this screen and `onionskin fetch` \
+                 both start here.",
+            )
+            .clicked();
     });
+    if keep_the_scanner {
+        remember("scanner", &state.scanner_uri.clone(), room);
+    }
     widgets::hint(room.ui, "for example http://printer.local/eSCL");
     room.ui.horizontal(|ui| {
         ui.label("Resolution");
@@ -360,4 +420,71 @@ pub fn show(state: &mut State, room: &mut Room) {
          you chose and to nothing else. Nothing about your documents goes \
          anywhere near the internet.",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Point `ONIONSKIN_HOME` at a directory of this test's own, and hold the
+    /// other one off until it is done.
+    ///
+    /// One variable for the whole process, and tests run beside one another —
+    /// so two of them changing it at once see each other's answers, which is a
+    /// test that fails once in three runs and passes when it is looked at.
+    /// The library has the same helper for its own tests; it cannot be shared,
+    /// because that one is compiled only when the library itself is under test
+    /// and this is a different program.
+    fn borrow_home(path: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let held = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var("ONIONSKIN_HOME", path);
+        held
+    }
+
+    /// One answer to "which printer", not one per program.
+    ///
+    /// Somebody who runs `onionskin config set printer` and then opens the
+    /// window should find it already there — and the other way round. Two
+    /// programs on one machine disagreeing about which printer is the printer
+    /// is how a delta goes to the wrong one.
+    #[test]
+    fn the_window_opens_on_the_printer_the_command_line_was_told_about() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = borrow_home(home.path());
+
+        // Nothing set: nothing filled in, rather than a guess.
+        assert!(State::default().printer_uri.is_empty());
+        assert!(State::default().scanner_uri.is_empty());
+
+        onionskin::settings::set_default("printer", Some("ipp://office/laser")).unwrap();
+        onionskin::settings::set_default("scanner", Some("http://printer.local/eSCL")).unwrap();
+
+        let opened = State::default();
+        assert_eq!(opened.printer_uri, "ipp://office/laser");
+        assert_eq!(opened.scanner_uri, "http://printer.local/eSCL");
+    }
+
+    /// And the other direction: what the window keeps is what the command line
+    /// reads, in the same place under the same name.
+    #[test]
+    fn what_the_window_keeps_is_what_the_command_line_reads() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = borrow_home(home.path());
+
+        // The names the button passes, which have to be the names the settings
+        // know — a typo here saves nothing anywhere and says it worked.
+        onionskin::settings::set_default("printer", Some("ipp://kept/one")).unwrap();
+        assert_eq!(
+            onionskin::settings::load().defaults.printer.as_deref(),
+            Some("ipp://kept/one")
+        );
+        onionskin::settings::set_default("scanner", Some("http://kept/eSCL")).unwrap();
+        assert_eq!(
+            onionskin::settings::load().defaults.scanner.as_deref(),
+            Some("http://kept/eSCL")
+        );
+    }
 }
