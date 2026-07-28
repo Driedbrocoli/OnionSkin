@@ -418,6 +418,9 @@ struct DeltaArgs {
     /// millimetres.
     #[arg(long, value_name = "MM")]
     tolerance: Option<f64>,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -506,6 +509,9 @@ struct StackArgs {
     /// the stack is only reported on.
     #[arg(long = "to", value_name = "FOLDER")]
     to: Option<PathBuf>,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -623,6 +629,9 @@ struct MergeArgs {
     /// Open it when it is written.
     #[arg(long)]
     open: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 /// Looking at the finished sheet before committing paper to it.
@@ -655,6 +664,9 @@ struct ProofArgs {
     /// Open it when it is written.
     #[arg(long)]
     open: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 /// Working out where on a form there is room to write.
@@ -765,6 +777,9 @@ struct LabelsArgs {
     /// Open it when it is written.
     #[arg(long)]
     open: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -1014,6 +1029,9 @@ struct CoverArgs {
     open: bool,
     #[command(flatten)]
     tuning: Tuning,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 /// One sheet each, from a spreadsheet.
@@ -1092,6 +1110,9 @@ struct BatchArgs {
     open: bool,
     #[command(flatten)]
     tuning: Tuning,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -1317,6 +1338,9 @@ struct PrintArgs {
     /// Print a delta even though something already on the sheet has changed.
     #[arg(long)]
     force: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -1486,6 +1510,73 @@ struct AddArgs {
     /// Warn about additions closer than this to an edge, in mm.
     #[arg(long, default_value_t = 5.0)]
     margin: f64,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+/// Where a command actually writes, when the run may be a rehearsal.
+///
+/// `--dry-run` does the whole job into a scratch folder that is thrown away
+/// afterwards, rather than stopping before the work. Anything less answers a
+/// different question. A page whose size cannot be read, a column that is not
+/// on the list, a font that will not load, a delta that comes out blank — all
+/// of those are found *while* the file is being made, and a rehearsal that
+/// skipped the making would say "that is fine" about a run that then fails.
+///
+/// So the work happens, the report is the report, and only the file is
+/// withheld. What is also withheld is everything a real run does *afterwards*:
+/// nothing is recorded in the history, nothing is sent to a printer, nothing
+/// is opened, and no document is marked as printed.
+struct Rehearsal {
+    scratch: Option<tempfile::TempDir>,
+}
+
+impl Rehearsal {
+    fn new(dry_run: bool) -> Result<Rehearsal, String> {
+        let scratch = match dry_run {
+            true => Some(
+                tempfile::tempdir()
+                    .map_err(|why| format!("could not make a scratch folder: {why}"))?,
+            ),
+            false => None,
+        };
+        Ok(Rehearsal { scratch })
+    }
+
+    fn pretending(&self) -> bool {
+        self.scratch.is_some()
+    }
+
+    /// The path to write to. The file keeps its name, in case anything
+    /// downstream reads it — the extension decides the format in more than one
+    /// place, and a rehearsal that quietly renamed the file would be testing
+    /// something else.
+    fn instead_of(&self, real: &Path) -> PathBuf {
+        match &self.scratch {
+            Some(scratch) => scratch.path().join(
+                real.file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("rehearsal")),
+            ),
+            None => real.to_path_buf(),
+        }
+    }
+
+    /// The same for a folder a command writes into: proof images, split
+    /// sheets. It keeps its own name inside the scratch folder, so anything
+    /// that names a file back to somebody names something recognisable.
+    fn folder_instead_of(&self, real: &Path) -> PathBuf {
+        self.instead_of(real)
+    }
+
+    /// Said at the end, so it is the last thing on the screen rather than the
+    /// first — somebody scrolling back to the report should not have to
+    /// wonder whether it happened.
+    fn say_nothing_was_written(&self) {
+        if self.pretending() {
+            println!("\nNothing written — --dry-run.");
+        }
+    }
 }
 
 /// Refuse to write over a file we are reading from.
@@ -2107,6 +2198,7 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
         .unwrap_or_else(|| beside(&args.document, "-covered", "pdf"));
     refuse_to_clobber(&output, "delta", &[(&args.document, "sheet")])?;
     check_writable(&output, "delta")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
 
     let mut boxes: Vec<(f64, f64, f64, f64)> = Vec::new();
     for spec in &args.over {
@@ -2160,10 +2252,21 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
         })
         .collect();
 
-    let options = options_from_settings(args.preview.clone(), &args.tuning)?;
-    let outcome =
-        pipeline::compose_run_drawing(&args.document, &[], &shapes, &output, None, &options)
-            .map_err(|e| e.to_string())?;
+    let options = options_from_settings(
+        args.preview
+            .as_deref()
+            .map(|dir| rehearsal.folder_instead_of(dir)),
+        &args.tuning,
+    )?;
+    let outcome = pipeline::compose_run_drawing(
+        &args.document,
+        &[],
+        &shapes,
+        &rehearsal.instead_of(&output),
+        None,
+        &options,
+    )
+    .map_err(|e| e.to_string())?;
 
     report_checks(&outcome.checks);
     if outcome.blocked() {
@@ -2183,7 +2286,9 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
     // this is the one worth being able to look up. A sheet that went out of
     // the building with somebody's salary blacked out is exactly the sheet
     // somebody asks about later, and `history` promises every delta is in it.
-    note_the_delta(&args.document, &output, shapes.len(), outcome.pages.len());
+    if !rehearsal.pretending() {
+        note_the_delta(&args.document, &output, shapes.len(), outcome.pages.len());
+    }
     println!(
         "\nWhat this does, and what it does not\n  \
          Printing this lays solid toner over those areas. It hides them from \
@@ -2193,7 +2298,10 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
          For anything that must not be recoverable, print a fresh page \
          without it."
     );
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2257,6 +2365,7 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         &[(&args.document, "sheet"), (&args.from, "list")],
     )?;
     check_writable(&output, "stack")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
 
     // Where the anchored words land, worked out once against the sheet.
     // Every copy is the same page, so the answer cannot differ between them.
@@ -2325,13 +2434,18 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         pictures_per_sheet.push(mine.into_iter().map(|(_, image)| image).collect());
     }
 
-    let options = options_from_settings(args.preview.clone(), &args.tuning)?;
+    let options = options_from_settings(
+        args.preview
+            .as_deref()
+            .map(|dir| rehearsal.folder_instead_of(dir)),
+        &args.tuning,
+    )?;
     let outcome = pipeline::compose_sheets_with_pictures(
         &args.document,
         args.page,
         &per_sheet,
         &pictures_per_sheet,
-        &output,
+        &rehearsal.instead_of(&output),
         None,
         &options,
     )
@@ -2359,7 +2473,9 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     // Recorded like any other delta. A batch is the expensive one to print
     // twice — two hundred certificates is two hundred sheets of stock — so it
     // is the one where "you have printed this already" is worth most.
-    note_the_delta(&args.document, &output, outcome.total_regions(), wanted);
+    if !rehearsal.pretending() {
+        note_the_delta(&args.document, &output, outcome.total_regions(), wanted);
+    }
     println!(
         "\nPrinting a stack\n  \
          1. Put {wanted} printed cop{} of {} in the tray, the same way up and \
@@ -2372,7 +2488,10 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         if wanted == 1 { "y" } else { "ies" },
         args.document.display()
     );
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2673,6 +2792,7 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
     });
     refuse_to_clobber(&output, "PDF", &[(&args.document, "document")])?;
     check_writable(&output, "PDF")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
 
     let font = load_font(args.font_file.as_deref(), args.font_index)?;
 
@@ -2717,7 +2837,7 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
     }
 
     onionskin::pdf::write_page_content(
-        &output,
+        &rehearsal.instead_of(&output),
         &document.page_sizes(),
         &pages,
         &drawings,
@@ -2739,7 +2859,10 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
         }
     );
 
-    if args.printed {
+    // `--printed` changes the document itself. A rehearsal must not: there
+    // would be no file to show for it, and the next `--delta` would carry only
+    // what came after a printing that never happened.
+    if args.printed && !rehearsal.pretending() {
         document.mark_printed();
         document.save(&args.document).map_err(|e| e.to_string())?;
         println!(
@@ -2752,10 +2875,15 @@ fn cmd_print(args: PrintArgs) -> Result<ExitCode, String> {
         // one: printing the whole document is a fresh sheet, and putting that
         // in a list of "what was added to which sheet" would make the list
         // mean two different things.
-        note_the_delta(&args.document, &output, written, document.pages);
+        if !rehearsal.pretending() {
+            note_the_delta(&args.document, &output, written, document.pages);
+        }
         println!("\n{PRINT_INSTRUCTIONS}");
     }
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -3513,6 +3641,7 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
         .unwrap_or_else(|| beside(&args.scan, "-delta", "pdf"));
     refuse_to_clobber(&output, "delta", &[(&args.scan, "scan")])?;
     check_writable(&output, "delta")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
     if let Some(preview) = &args.preview {
         refuse_to_clobber(
             preview,
@@ -3603,7 +3732,7 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     }
 
     write_delta(
-        &output,
+        &rehearsal.instead_of(&output),
         &[page],
         &[lines.clone()],
         "Onionskin delta",
@@ -3690,12 +3819,20 @@ fn cmd_add(args: AddArgs) -> Result<ExitCode, String> {
     }
 
     if let Some(preview_path) = &args.preview {
-        write_preview(&args.scan, &registration, &lines, preview_path)?;
+        write_preview(
+            &args.scan,
+            &registration,
+            &lines,
+            &rehearsal.instead_of(preview_path),
+        )?;
         println!("\n  proof      : {}", preview_path.display());
     }
 
     println!("\n{PRINT_INSTRUCTIONS}");
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -4034,6 +4171,7 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
         .clone()
         .unwrap_or_else(|| beside(&args.edited, "-delta", "pdf"));
     check_writable(&output, "delta")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
     // The flag, then what this person chose for themselves, then Onionskin's
     // own answer. Never the other way about: stating a preference must not
     // cost the ability to depart from it for one run.
@@ -4065,7 +4203,9 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
             .or(mine.margin_mm)
             .unwrap_or(onionskin::safety::DEFAULT_MARGIN_MM),
         args.profile.clone().or_else(|| mine.profile.clone()),
-        args.preview.clone(),
+        args.preview
+            .as_deref()
+            .map(|dir| rehearsal.folder_instead_of(dir)),
         outline,
     )?;
     let mut options = expert_options(options, &args)?;
@@ -4080,13 +4220,13 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
             ],
         )?;
         check_writable(fresh, "fresh pages")?;
-        options.fresh = Some(fresh.clone());
+        options.fresh = Some(rehearsal.instead_of(fresh));
     }
 
     let outcome = pipeline::run_watched(
         &args.original,
         &args.edited,
-        &output,
+        &rehearsal.instead_of(&output),
         &options,
         &mut progress_on_a_terminal(),
     )
@@ -4172,14 +4312,19 @@ fn cmd_delta(args: DeltaArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
-    note_the_delta(
-        &args.edited,
-        &output,
-        outcome.total_regions(),
-        outcome.pages.len(),
-    );
+    if !rehearsal.pretending() {
+        note_the_delta(
+            &args.edited,
+            &output,
+            outcome.total_regions(),
+            outcome.pages.len(),
+        );
+    }
     println!("\n{PRINT_INSTRUCTIONS}");
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5012,7 +5157,14 @@ fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
         return Err(format!("there are no pages in '{}'.", args.scan.display()));
     }
 
-    if let Some(folder) = &args.to {
+    let rehearsal = Rehearsal::new(args.dry_run)?;
+    // Where the sheets really land. In a rehearsal that is a scratch folder,
+    // so the report says exactly what it would say — including a sheet that
+    // cannot be split out — and nothing is left behind afterwards.
+    let writing_to = args.to.as_deref().map(|to| rehearsal.folder_instead_of(to));
+    // The folder somebody asked for, for saying where each sheet went.
+    let meant = args.to.clone().unwrap_or_default();
+    if let Some(folder) = &writing_to {
         std::fs::create_dir_all(folder)
             .map_err(|e| format!("could not make '{}': {e}", folder.display()))?;
     }
@@ -5064,10 +5216,13 @@ fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
         match (ranking.confident(), ranking.best()) {
             (true, Some(best)) => {
                 print!("  sheet {sheet:>3}  {}", best.path.display());
-                if let Some(folder) = &args.to {
-                    let out = folder.join(sheet_named(&best.path, sheet));
-                    match onionskin::split::keep_only(&args.scan, &[sheet], &out) {
-                        Ok(()) => print!("  → {}", out.display()),
+                if let Some(folder) = &writing_to {
+                    let named = sheet_named(&best.path, sheet);
+                    match onionskin::split::keep_only(&args.scan, &[sheet], &folder.join(&named)) {
+                        // The path somebody is told about is the one they
+                        // asked for, even when a rehearsal put the file
+                        // somewhere else and then threw it away.
+                        Ok(()) => print!("  → {}", meant.join(&named).display()),
                         Err(e) => print!("  (could not write it: {e})"),
                     }
                 }
@@ -5086,12 +5241,13 @@ fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
                         ))
                         .unwrap_or_else(|| "nothing to compare it with".to_string())
                 );
-                if let Some(folder) = &args.to {
-                    let out = folder.join(format!("sheet-{sheet:03}.pdf"));
+                if let Some(folder) = &writing_to {
+                    let named = format!("sheet-{sheet:03}.pdf");
+                    let out = folder.join(&named);
                     if let Err(e) = onionskin::split::keep_only(&args.scan, &[sheet], &out) {
                         println!("          (could not write it: {e})");
                     } else {
-                        println!("          → {}", out.display());
+                        println!("          → {}", meant.join(&named).display());
                     }
                 }
             }
@@ -5100,6 +5256,7 @@ fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
 
     if unplaced.is_empty() {
         println!("\nEvery sheet was placed.");
+        rehearsal.say_nothing_was_written();
         return Ok(ExitCode::SUCCESS);
     }
     println!(
@@ -5115,6 +5272,7 @@ fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
     );
     println!("  Look at those yourself — a sheet filed under the wrong document is");
     println!("  worse than one left in the pile.");
+    rehearsal.say_nothing_was_written();
     // Exit 2, so a script sorting a stack stops on the ones that need a person.
     Ok(ExitCode::from(2))
 }
@@ -5435,6 +5593,7 @@ fn cmd_labels(args: LabelsArgs) -> Result<ExitCode, String> {
         .unwrap_or_else(|| beside(&args.from, "-labels", "pdf"));
     refuse_to_clobber(&output, "labels", &[(&args.from, "list")])?;
     check_writable(&output, "labels")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
 
     // What the words are, before anything about paper. A label that cannot
     // hold its own lines is worth saying now rather than printing.
@@ -5491,7 +5650,7 @@ fn cmd_labels(args: LabelsArgs) -> Result<ExitCode, String> {
     let sizes: Vec<onionskin::geometry::PageSize> = (0..sheets).map(|_| page).collect();
     let nothing: Vec<Vec<onionskin::pdf::PlacedShape>> = sizes.iter().map(|_| Vec::new()).collect();
     onionskin::pdf::write_page_content(
-        &output,
+        &rehearsal.instead_of(&output),
         &sizes,
         &per_page,
         &nothing,
@@ -5525,7 +5684,10 @@ fn cmd_labels(args: LabelsArgs) -> Result<ExitCode, String> {
          a few\npercent and nothing will line up with the cuts. Try one sheet on \
          plain paper\nfirst and hold it against the label stock."
     );
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5921,6 +6083,7 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
         &[(&args.sheet, "sheet"), (&delta, "delta")],
     )?;
     check_writable(&output, "proof")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
 
     let added = onionskin::document::parse_colour(&args.colour)
         .map_err(|e| format!("--colour {}: {e}", args.colour))?;
@@ -5937,8 +6100,13 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
         options = options.tracing();
     }
 
-    let pages = onionskin::proof::write_proof(&args.sheet, &delta, &output, &options)
-        .map_err(|e| e.to_string())?;
+    let pages = onionskin::proof::write_proof(
+        &args.sheet,
+        &delta,
+        &rehearsal.instead_of(&output),
+        &options,
+    )
+    .map_err(|e| e.to_string())?;
 
     println!(
         "{}: {pages} page(s), the sheet in grey and what would be added in {}.",
@@ -5946,7 +6114,10 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
         args.colour
     );
     println!("Look at it before you print the delta. Nothing here goes near the printer.");
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5976,21 +6147,15 @@ fn cmd_join(args: JoinArgs) -> Result<ExitCode, String> {
     // different question: a page whose size cannot be read is refused by the
     // join itself, and a rehearsal that skipped it would say "fine" and then
     // fail for real.
-    let rehearsal = match args.dry_run {
-        true => Some(
-            tempfile::tempdir().map_err(|why| format!("could not make a scratch folder: {why}"))?,
-        ),
-        false => None,
-    };
-    let writing_to = match &rehearsal {
-        Some(scratch) => scratch.path().join("rehearsal.pdf"),
-        None => output.clone(),
-    };
+    let rehearsal = Rehearsal::new(args.dry_run)?;
+    let joined = onionskin::join::join(
+        &args.files,
+        &rehearsal.instead_of(&output),
+        "Onionskin joined document",
+    )
+    .map_err(|e| e.to_string())?;
 
-    let joined = onionskin::join::join(&args.files, &writing_to, "Onionskin joined document")
-        .map_err(|e| e.to_string())?;
-
-    if !args.dry_run {
+    if !rehearsal.pretending() {
         println!("{}", output.display());
     }
     println!("{}", joined.describe());
@@ -6018,12 +6183,10 @@ fn cmd_join(args: JoinArgs) -> Result<ExitCode, String> {
         );
     }
 
-    if args.dry_run {
-        println!("\nNothing written — --dry-run.");
-        return Ok(ExitCode::SUCCESS);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
     }
-
-    open_if_asked(args.open, &output);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -6045,11 +6208,18 @@ fn cmd_merge(args: MergeArgs) -> Result<ExitCode, String> {
         .collect();
     refuse_to_clobber(&output, "merged delta", &inputs)?;
     check_writable(&output, "merged delta")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
 
-    let merged = onionskin::merge::merge(&args.deltas, &output, "Onionskin merged delta")
-        .map_err(|e| e.to_string())?;
+    let merged = onionskin::merge::merge(
+        &args.deltas,
+        &rehearsal.instead_of(&output),
+        "Onionskin merged delta",
+    )
+    .map_err(|e| e.to_string())?;
 
-    println!("{}", output.display());
+    if !rehearsal.pretending() {
+        println!("{}", output.display());
+    }
     println!("{}", merged.describe());
 
     // The same delta twice puts every letter down twice in the same place. Not
@@ -6084,14 +6254,16 @@ fn cmd_merge(args: MergeArgs) -> Result<ExitCode, String> {
                 .unwrap_or_else(|| delta.display().to_string())
         })
         .collect();
-    note_the_delta_from(
-        &made_of.join(" + "),
-        &output,
-        merged.from.len(),
-        merged.pages,
-    );
+    if !rehearsal.pretending() {
+        note_the_delta_from(
+            &made_of.join(" + "),
+            &output,
+            merged.from.len(),
+            merged.pages,
+        );
+    }
 
-    if let Some(printer) = &args.print_to {
+    if let Some(printer) = args.print_to.as_ref().filter(|_| !rehearsal.pretending()) {
         let uri = resolve_printer(printer, &args.server)?;
         let options = printer::PrintOptions {
             job_name: "Onionskin merged delta".to_string(),
@@ -6107,7 +6279,10 @@ fn cmd_merge(args: MergeArgs) -> Result<ExitCode, String> {
             }
         );
     }
-    open_if_asked(args.open, &output);
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -7967,6 +8142,77 @@ mod naming_tests {
             };
             assert_eq!(args.output, Some(PathBuf::from("o.pdf")), "{flag}");
         }
+    }
+
+    /// Every command that writes a file takes `--dry-run`.
+    ///
+    /// Not for tidiness: a rehearsal is what somebody runs before committing
+    /// two hundred sheets of letterhead, and the one that is missing is always
+    /// the one they needed. Walked out of clap rather than listed here, so a
+    /// command added next year is covered the day it is added.
+    #[test]
+    fn everything_that_writes_a_file_can_be_rehearsed() {
+        // Commands with no file of their own to withhold: they report, they
+        // talk to a device, or they change a document in place — and that last
+        // group has `undo`, which is a better answer than a rehearsal.
+        const NOTHING_TO_WITHHOLD: &[&str] = &[
+            "inspect",
+            "compare",
+            "verify",
+            "fits",
+            "which",
+            "read",
+            "show",
+            "blanks",
+            "history",
+            "doctor",
+            "printers",
+            "scanners",
+            "fonts",
+            "send",
+            "serve",
+            "tidy",
+            "install",
+            "uninstall",
+            "completions",
+            "config",
+            "help",
+            "acquire",
+            "fetch",
+            "calibrate",
+            "job",
+            "new",
+            "write",
+            "draw",
+            "edit",
+            "erase",
+            "undo",
+            "redo",
+            "package",
+            "apt-repo",
+        ];
+        let cli = <Cli as clap::CommandFactory>::command();
+        let mut missing = Vec::new();
+        let mut checked = 0;
+        for command in cli.get_subcommands() {
+            let name = command.get_name();
+            if NOTHING_TO_WITHHOLD.contains(&name) {
+                continue;
+            }
+            let flags: Vec<&str> = command
+                .get_arguments()
+                .filter_map(|a| a.get_long())
+                .collect();
+            if !flags.contains(&"dry-run") {
+                missing.push(name.to_string());
+            }
+            checked += 1;
+        }
+        assert!(
+            missing.is_empty(),
+            "these write a file and cannot be rehearsed: {missing:?}"
+        );
+        assert!(checked >= 9, "only {checked} commands were checked");
     }
 
     /// Joining needs two files, and clap must say so before anything opens a

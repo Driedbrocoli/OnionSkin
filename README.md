@@ -1070,8 +1070,25 @@ any one page, and three documents' worth do not splice into one — two files ca
 both have a field called `Name`, meaning different fields. So they are named
 rather than lost quietly.
 
-`--dry-run` does the whole join into a scratch file and throws it away, so it
-reports exactly what the real thing would, including a refusal.
+### A rehearsal, before the paper goes in
+
+Every command that writes a file takes `--dry-run`:
+
+```bash
+onionskin batch certificate.pdf --from staff.xlsx --after 'Awarded to:{name}' --dry-run
+```
+
+It does the whole job into a scratch folder and throws it away. That matters
+more than it sounds: a column that is not on the list, a page whose size cannot
+be read, a font that will not load, an addition that lands on ink that is
+already there — all of those are found *while* the file is being made. A
+rehearsal that stopped before the work would say "that is fine" about a run
+that then fails, which is worse than no rehearsal at all.
+
+So the report is the report, word for word, and only the file is withheld —
+along with everything a real run does afterwards. Nothing goes in the history,
+nothing is sent to a printer, nothing is opened, and `print --printed` does not
+mark the document as printed.
 
 ### See what changed
 
