@@ -994,3 +994,155 @@ fn a_sheet_that_belongs_to_none_of_them_is_left_for_a_person() {
         "the unplaced sheet was filed under a document it is not: {written:?}"
     );
 }
+
+// --- fixing a mistake on a page already printed -----------------------------
+
+/// The whole point: the wrong figure is covered and the right one printed in
+/// its place, at the same position and in the same size, without reprinting the
+/// page. Everywhere else the answer to a wrong total is a fresh sheet.
+#[test]
+fn a_mistake_on_a_printed_page_is_covered_and_put_right() {
+    if !can_read_a_page() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let invoice = a_document(
+        &home,
+        dir.path(),
+        "invoice",
+        &[(30.0, "ACME LIMITED"), (80.0, "Total: 120.00")],
+    );
+    let fix = dir.path().join("fix.pdf");
+
+    let corrected = run(
+        &home,
+        &[
+            "correct",
+            &invoice.to_string_lossy(),
+            "--replace",
+            "120.00:140.00",
+            "-o",
+            &fix.to_string_lossy(),
+        ],
+    );
+    assert!(
+        corrected.ok,
+        "the correction was refused: {}",
+        corrected.said()
+    );
+    assert!(fix.is_file(), "{}", corrected.said());
+
+    let said = corrected.said();
+    // It says what it found, so somebody can see the right line was picked
+    // before any paper moves.
+    assert!(said.contains("Total"), "the line was not reported: {said}");
+    // And it is honest about what covering is and is not.
+    assert!(
+        said.contains("does not take the") && said.contains("off the paper"),
+        "it does not say that covering is not erasing: {said}"
+    );
+}
+
+/// The size is taken off the line the mistake is on, so a correction to a
+/// heading is set at the heading's size and one to the body at the body's.
+#[test]
+fn a_correction_is_set_at_the_size_of_the_line_it_replaces() {
+    if !can_read_a_page() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    // A heading at 20 pt and a body line at 10, in one document.
+    let source = dir.path().join("mixed.osk").to_string_lossy().into_owned();
+    assert!(run(&home, &["new", &source, "--page", "a4"]).ok);
+    assert!(
+        run(
+            &home,
+            &["write", &source, "--at", "20,30:HEADING", "--size", "20"]
+        )
+        .ok
+    );
+    assert!(
+        run(
+            &home,
+            &[
+                "write",
+                &source,
+                "--at",
+                "20,80:Total: 120.00",
+                "--size",
+                "10"
+            ]
+        )
+        .ok
+    );
+    let pdf = dir.path().join("mixed.pdf");
+    assert!(run(&home, &["print", &source, "-o", &pdf.to_string_lossy()]).ok);
+
+    let at_size = |replace: &str| -> f64 {
+        let said = run(
+            &home,
+            &[
+                "correct",
+                &pdf.to_string_lossy(),
+                "--replace",
+                replace,
+                "--dry-run",
+            ],
+        )
+        .said();
+        said.split(" at ")
+            .last()
+            .and_then(|tail| tail.split(" pt").next())
+            .and_then(|number| number.trim().parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("no size in: {said}"))
+    };
+
+    let heading = at_size("HEADING:TITLE");
+    let body = at_size("120.00:140.00");
+    assert!(
+        heading > body + 5.0,
+        "a 20 pt heading and a 10 pt line were set at {heading} and {body}"
+    );
+    assert!(
+        (body - 10.0).abs() < 2.5,
+        "a 10 pt line was corrected at {body} pt"
+    );
+}
+
+/// A phrase on the page twice is refused rather than guessed at. Covering the
+/// wrong "Total" cannot be undone.
+#[test]
+fn a_correction_that_could_go_in_two_places_is_refused() {
+    if !can_read_a_page() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let twice = a_document(
+        &home,
+        dir.path(),
+        "twice",
+        &[(60.0, "Total: 100.00"), (100.0, "Total: 200.00")],
+    );
+
+    let refused = run(
+        &home,
+        &[
+            "correct",
+            &twice.to_string_lossy(),
+            "--replace",
+            "Total:Sum",
+            "-o",
+            &dir.path().join("no.pdf").to_string_lossy(),
+        ],
+    );
+    assert!(!refused.ok, "{}", refused.said());
+    assert!(refused.said().contains("2 times"), "{}", refused.said());
+    assert!(
+        !dir.path().join("no.pdf").exists(),
+        "a delta was written for a correction that was refused"
+    );
+}

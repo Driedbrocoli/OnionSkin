@@ -1018,7 +1018,12 @@ fn dust_on_the_glass_is_still_thrown_away() {
     sheet.box_mm(150.0, 250.0, 0.2, 0.3);
 
     let page = read_sheet_with(&sheet, &font, None);
-    assert_eq!(page.lines.len(), 1, "the dust made lines: {:?}", page.text_lossy());
+    assert_eq!(
+        page.lines.len(),
+        1,
+        "the dust made lines: {:?}",
+        page.text_lossy()
+    );
     assert_eq!(
         page.letter_count(),
         6,
@@ -1044,7 +1049,10 @@ fn two_lines_of_writing_are_never_joined_into_one_character() {
     assert_eq!(page.lines.len(), 2, "{:?}", page.text_lossy());
     let said = page.text_lossy();
     assert_eq!(said.matches('.').count(), 2, "{said:?}");
-    assert!(!said.contains(':'), "two full stops became a colon: {said:?}");
+    assert!(
+        !said.contains(':'),
+        "two full stops became a colon: {said:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,8 +1145,16 @@ fn a_page_of_ordinary_prose_is_read_almost_perfectly() {
         }
         let page = read_sheet_with(&sheet, &font, None);
 
-        let wanted: String = lines.concat().chars().filter(|c| !c.is_whitespace()).collect();
-        let got: String = page.text_lossy().chars().filter(|c| !c.is_whitespace()).collect();
+        let wanted: String = lines
+            .concat()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let got: String = page
+            .text_lossy()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
 
         // Counted as a subsequence, so one dropped letter costs one and does
         // not shift everything after it into disagreement.

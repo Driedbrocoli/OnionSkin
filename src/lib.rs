@@ -3,6 +3,7 @@ pub mod anchor;
 pub mod apt;
 pub mod blanks;
 pub mod calibrate;
+pub mod correct;
 pub mod delta;
 pub mod diff;
 pub mod discover;

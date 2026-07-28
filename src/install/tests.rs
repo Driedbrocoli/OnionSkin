@@ -63,7 +63,10 @@ fn a_directory_already_on_the_path_is_recognised() {
     assert!(on_path(dir.path()));
     let roundabout = dir.path().join("sub/..");
     std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-    assert!(on_path(&roundabout), "the same directory written another way");
+    assert!(
+        on_path(&roundabout),
+        "the same directory written another way"
+    );
 
     std::env::set_var("PATH", existing);
 }
@@ -197,7 +200,10 @@ fn a_missing_rendering_library_is_said_rather_than_hidden() {
 
 #[test]
 fn the_path_line_is_written_in_the_shells_own_syntax() {
-    let bash = path_line(Path::new("/home/someone/.local/bin"), Path::new("/home/x/.profile"));
+    let bash = path_line(
+        Path::new("/home/someone/.local/bin"),
+        Path::new("/home/x/.profile"),
+    );
     assert!(bash.starts_with("export PATH="), "{bash}");
     assert!(bash.contains("/home/someone/.local/bin"));
 
@@ -218,8 +224,24 @@ fn every_line_written_is_marked_so_it_can_be_found_again() {
     }
 }
 
+/// Tests that set `SHELL` or `HOME` take turns.
+///
+/// There is one environment per process and `cargo test` runs threads, so two
+/// tests each setting `SHELL` to what they need will read each other's answer
+/// — not every time, which is worse than never: a suite that fails one run in
+/// twenty teaches people to run it again rather than to read it.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static ORDERLY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that panicked while holding it left it poisoned. Every test here
+    // sets what it needs on the way in, so there is nothing to recover.
+    ORDERLY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn the_profile_chosen_is_the_one_the_shell_reads() {
+    let _orderly = one_at_a_time();
     let before = std::env::var("SHELL").ok();
 
     std::env::set_var("SHELL", "/bin/zsh");
@@ -244,6 +266,7 @@ fn the_profile_chosen_is_the_one_the_shell_reads() {
 #[cfg(unix)]
 #[test]
 fn the_path_line_is_added_once_and_taken_out_cleanly() {
+    let _orderly = one_at_a_time();
     let fake_home = tempfile::tempdir().unwrap();
     let prefix = tempfile::tempdir().unwrap();
     let before_home = std::env::var("HOME").ok();
@@ -269,11 +292,17 @@ fn the_path_line_is_added_once_and_taken_out_cleanly() {
         1,
         "the line was added twice:\n{text}"
     );
-    assert!(text.contains("export EDITOR=vi"), "it ate the existing line");
+    assert!(
+        text.contains("export EDITOR=vi"),
+        "it ate the existing line"
+    );
 
     uninstall(&options).unwrap();
     let after = std::fs::read_to_string(&profile).unwrap();
-    assert!(!after.contains(MARKER), "the line was left behind:\n{after}");
+    assert!(
+        !after.contains(MARKER),
+        "the line was left behind:\n{after}"
+    );
     assert!(
         after.contains("export EDITOR=vi"),
         "uninstalling ate somebody else's line:\n{after}"

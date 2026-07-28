@@ -84,6 +84,9 @@ enum Command {
     Batch(BatchArgs),
     /// Print solid over something on a sheet you have to hand over.
     Cover(CoverArgs),
+    /// Fix a mistake on a page that is already printed: cover the wrong
+    /// words and set the right ones in their place.
+    Correct(CorrectArgs),
     /// Write a document out as a PDF, whole or as a delta onto the printed sheet.
     Print(PrintArgs),
     /// Read the letters off a scanned page.
@@ -913,6 +916,41 @@ struct Tuning {
 /// somebody holding the sheet up to a strong light may still make it out.
 #[derive(clap::Args)]
 #[command(allow_negative_numbers = true)]
+struct CorrectArgs {
+    /// The sheet as it was printed: a PDF, or a scan of the paper.
+    document: PathBuf,
+    /// What is wrong and what it should say: 'WAS:NOW'. Repeatable.
+    #[arg(
+        long = "replace",
+        value_name = "WAS:NOW",
+        required = true,
+        allow_hyphen_values = true
+    )]
+    replace: Vec<String>,
+    /// The type size to set the new words at, overriding what the page says.
+    #[arg(long)]
+    size: Option<f64>,
+    /// The face to set them in, overriding what the page says.
+    #[arg(long)]
+    font: Option<String>,
+    /// Which page, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Write a proof image here, showing what will be covered and written.
+    #[arg(long)]
+    preview: Option<PathBuf>,
+    /// Say what it would do without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    open: bool,
+    #[command(flatten)]
+    tuning: Tuning,
+}
+
+#[derive(clap::Args)]
 struct CoverArgs {
     /// The sheet to cover something on.
     document: PathBuf,
@@ -1675,6 +1713,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Tidy => cmd_tidy(),
         Command::Batch(args) => cmd_batch(args),
         Command::Cover(args) => cmd_cover(args),
+        Command::Correct(args) => cmd_correct(args),
         Command::Print(args) => cmd_print(args),
         Command::Read(args) => cmd_read(args),
         Command::Delta(args) => cmd_delta(args),
@@ -1874,6 +1913,145 @@ fn cmd_write(args: WriteArgs) -> Result<ExitCode, String> {
 /// The words can be named instead of measured, because somebody redacting a
 /// payslip knows they want the salary hidden and does not know it starts
 /// 46.2 mm across.
+/// Fix a mistake on a page that is already printed.
+///
+/// Everywhere else the answer to a wrong figure is to print the page again.
+/// Onionskin has both halves of something better — solid toner over what is
+/// wrong, and new words in its place — and this is the join. The page is read
+/// to find where the old words are, how big they are set and which face they
+/// are in, because getting any of those three wrong ruins a sheet there is
+/// only one of.
+fn cmd_correct(args: CorrectArgs) -> Result<ExitCode, String> {
+    let mut mistakes = Vec::new();
+    for spec in &args.replace {
+        mistakes.push(onionskin::correct::parse_mistake(spec)?);
+    }
+
+    // Read the page, and take what it says about its own typeface while doing
+    // it — the size and face come from the same reading as the positions.
+    let (gray, registration) = onionskin::recipe::draw_page(&args.document, args.page)?;
+    let (text, face) = onionskin::typeface::read_and_match_in(&gray, &registration).ok_or(
+        "there is no font on this machine to read the page against, so Onionskin \
+         cannot find the words to correct.\n    Install a common face — DejaVu, \
+         Liberation — or cover and write by hand with `cover` and `write`.",
+    )?;
+
+    let planned = onionskin::correct::plan(
+        &text,
+        face.as_ref(),
+        &mistakes,
+        args.size,
+        args.font.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!(
+        "{}: {} correction{}.\n",
+        args.document.display(),
+        planned.len(),
+        if planned.len() == 1 { "" } else { "s" }
+    );
+    for fix in &planned {
+        println!("  {}", fix.describe());
+        if let Some(over) = fix.wider_than_what_it_replaces() {
+            println!(
+                "    the new words are about {over:.0} mm wider than the old \
+                 ones, so they will run to the right of where those ended"
+            );
+        }
+        println!();
+    }
+
+    if args.dry_run {
+        println!("Nothing written — --dry-run.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-corrected", "pdf"));
+    refuse_to_clobber(&output, "delta", &[(&args.document, "sheet")])?;
+    check_writable(&output, "delta")?;
+
+    // Solid black over the old words, then the new ones on top. Both in one
+    // delta, because both go onto the sheet in one pass through the printer.
+    let shapes: Vec<(usize, onionskin::pdf::PlacedShape)> = planned
+        .iter()
+        .map(|fix| {
+            (
+                args.page,
+                onionskin::pdf::PlacedShape {
+                    drawing: onionskin::pdf::Drawing::Rect {
+                        x_mm: fix.cover_mm.0,
+                        y_mm: fix.cover_mm.1,
+                        width_mm: fix.cover_mm.2,
+                        height_mm: fix.cover_mm.3,
+                        radius_mm: 0.0,
+                    },
+                    stroke: None,
+                    fill: Some((0.0, 0.0, 0.0)),
+                    width_mm: 0.0,
+                    dash_mm: None,
+                },
+            )
+        })
+        .collect();
+
+    // White, because they are printed onto the black that has just covered the
+    // old words. Toner over toner is not white on paper — but the reason the
+    // box is there at all is that the old words must not be read, and words
+    // set in white on it are the only ones that can be.
+    let items: Vec<Item> = planned
+        .iter()
+        .map(|fix| Item {
+            id: 0,
+            page: args.page,
+            x_mm: fix.x_mm,
+            y_mm: fix.baseline_mm,
+            text: fix.now.clone(),
+            size_pt: fix.size_pt,
+            font: fix.font.clone(),
+            width_mm: None,
+            rotation_deg: 0.0,
+            colour: "#FFFFFF".to_string(),
+            leading: 1.2,
+        })
+        .collect();
+
+    let options = options_from_settings(args.preview.clone(), &args.tuning)?;
+    let outcome =
+        pipeline::compose_run_drawing(&args.document, &items, &shapes, &output, None, &options)
+            .map_err(|e| e.to_string())?;
+
+    report_checks(&outcome.checks);
+    if outcome.blocked() {
+        eprintln!("\nBlocked — see above. Nothing worth printing was produced.");
+        return Ok(ExitCode::from(2));
+    }
+    println!(
+        "{}: {} correction{} to print onto the sheet.",
+        output.display(),
+        planned.len(),
+        if planned.len() == 1 { "" } else { "s" }
+    );
+    for path in &outcome.previews {
+        println!("proof: {}", path.display());
+    }
+    note_the_delta(&args.document, &output, planned.len(), outcome.pages.len());
+    println!(
+        "\nWhat this does, and what it does not\n  \
+         The old words are covered with solid toner and the new ones printed on \
+         top of it.\n  It hides the old text from the eye and from a \
+         photocopier. It does not take the\n  old ink off the paper — a strong \
+         light behind the sheet may still show it through.\n  \
+         For anything that must not be recoverable, print a fresh page instead."
+    );
+    println!("\n{PRINT_INSTRUCTIONS}");
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
     if args.over.is_empty() && args.word.is_empty() {
         return Err("nothing to cover. Say what to hide:\n    \

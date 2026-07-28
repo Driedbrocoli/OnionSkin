@@ -330,3 +330,66 @@ fn covering_forgives_what_a_scan_gets_wrong() {
     let rows = vec![row(40.0, 20.0, &["Salaty"])];
     assert_eq!(boxes_in(&rows, "Salary").len(), 1);
 }
+
+// --- characters a reader cannot tell apart by shape --------------------------
+
+/// A page read off ink has no idea whether a ring is a capital O, a lower-case
+/// o or a nought. "120.00" on an invoice reads back as "?2O.OO" as often as
+/// not, and refusing to find it refuses the commonest correction there is.
+#[test]
+fn a_number_read_back_with_letters_in_it_is_still_found() {
+    let rows = vec![row(200.0, 20.0, &["Total:", "?2O.OO"])];
+    let found = boxes_in(&rows, "120.00");
+    assert_eq!(found.len(), 1, "the total was not found at all");
+    // The second word, not the label beside it.
+    assert!(
+        found[0].x_mm > 30.0,
+        "the label was matched instead: {:?}",
+        found[0]
+    );
+}
+
+/// The letters that are actually confused, and only those.
+#[test]
+fn the_shapes_that_are_folded_are_the_ones_a_reader_confuses() {
+    for (printed, wanted) in [
+        ("0rder", "Order"),     // nought for a capital O
+        ("1nvoice", "Invoice"), // one for a capital I
+        ("5ummary", "Summary"), // five for an S
+        ("8alance", "Balance"), // eight for a B
+    ] {
+        let rows = vec![row(100.0, 20.0, &[printed])];
+        assert_eq!(
+            boxes_in(&rows, wanted).len(),
+            1,
+            "'{printed}' was not matched against '{wanted}'"
+        );
+    }
+}
+
+/// An exact match always wins. A page that really does say what was asked must
+/// never be matched by shape to somewhere else instead.
+#[test]
+fn what_the_page_actually_says_beats_what_it_might_have_said() {
+    // "SO" and "50" are the same shape, and both are on the page.
+    let rows = vec![row(100.0, 20.0, &["50"]), row(150.0, 20.0, &["SO"])];
+    let found = boxes_in(&rows, "SO");
+    assert_eq!(found.len(), 1, "both were matched: {found:?}");
+    assert!(
+        found[0].y_mm > 140.0,
+        "the shape-alike was matched instead of the exact one: {:?}",
+        found[0]
+    );
+}
+
+/// Folding is a last resort, so ordinary words are never dragged together by
+/// it — `c` and `e` differ by a bar a tenth of the letter tall, and the reader
+/// is good at telling those apart.
+#[test]
+fn letters_the_reader_reads_well_are_not_folded_together() {
+    let rows = vec![row(100.0, 20.0, &["cat"])];
+    assert!(
+        boxes_in(&rows, "eat").is_empty(),
+        "'cat' was matched against 'eat'"
+    );
+}

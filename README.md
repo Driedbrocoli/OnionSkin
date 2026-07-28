@@ -801,6 +801,42 @@ page, the paper size changed, the two files were handed over the wrong way round
 — the job is refused whole and no fresh file is written, because none of those
 are fixed by taking pages out.
 
+### Fix a mistake on a page that is already printed
+
+The wrong figure went out, or a name is misspelt on a certificate somebody is
+waiting for. The page is fine apart from four characters, and everywhere else
+the answer is to print it again.
+
+```bash
+onionskin correct invoice.pdf --replace '120.00:140.00'
+```
+
+```
+invoice.pdf: 1 correction.
+
+  "120.00" → "140.00"
+    on the line: Total: 120.00
+    covering 32,76 14×4 mm, writing at 32,80 in Helvetica at 12 pt
+```
+
+It reads the page to find where the old words are, how big they are set and
+which face they are in — getting any of those three wrong ruins a sheet there is
+only one of. The size comes off the line the mistake is on rather than the page
+as a whole, so a correction to a heading is set at the heading's size and one to
+the body at the body's.
+
+Use `--dry-run` to see the plan before anything is written, and `--size` or
+`--font` to overrule the page where it is read wrongly.
+
+A phrase that appears twice is refused rather than guessed at: covering the
+wrong "Total" cannot be undone. Give more of the line to pick one out.
+
+**What this does, and what it does not.** The old words are covered with solid
+toner and the new ones printed on top. That hides them from the eye and from a
+photocopier. It does not take the old ink off the paper — a strong light behind
+the sheet may still show it through. For anything that must not be recoverable,
+print a fresh page.
+
 ### Check the sheet before you feed it
 
 `verify` looks at a sheet that has already been through the printer, which is

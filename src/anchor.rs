@@ -156,7 +156,23 @@ pub fn boxes_in(rows: &[Row], wanted: &str) -> Vec<Rect> {
     if wanted_key.is_empty() {
         return Vec::new();
     }
-    let slack = slack(&wanted_key);
+    let exact = boxes_matching(rows, &wanted_key, squash);
+    if !exact.is_empty() {
+        return exact;
+    }
+    // Nothing on the page reads as this, so try again allowing the characters
+    // a reader cannot tell apart by their shape. A page that really does say
+    // what was asked has already been found above, so this can only rescue a
+    // page that was read imperfectly — never override one that was not.
+    boxes_matching(rows, &by_shape(wanted), by_shape)
+}
+
+/// Every run of words matching `wanted_key`, under a given normalisation.
+fn boxes_matching(rows: &[Row], wanted_key: &str, normalise: fn(&str) -> String) -> Vec<Rect> {
+    if wanted_key.is_empty() {
+        return Vec::new();
+    }
+    let slack = slack(wanted_key);
     let mut found = Vec::new();
 
     for row in rows {
@@ -168,11 +184,11 @@ pub fn boxes_in(rows: &[Row], wanted: &str) -> Vec<Rect> {
                     joined.push(' ');
                 }
                 joined.push_str(&row.words[end].0);
-                let joined_key = squash(&joined);
+                let joined_key = normalise(&joined);
                 if joined_key.len() > wanted_key.len() + slack {
                     break;
                 }
-                if within(&joined_key, &wanted_key, slack) {
+                if within(&joined_key, wanted_key, slack) {
                     found.push(union_of(&row.words[start..=end]));
                     break;
                 }
@@ -536,6 +552,34 @@ fn squash(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// The same, with characters that are the same *shape* folded together.
+///
+/// A page read off ink has no idea whether a ring is a capital O, a lower-case
+/// o or a nought — they are the same mark, and which one it is comes from
+/// knowing what the word means. "120.00" on an invoice reads back as "?2O.OO"
+/// as often as not, and refusing to find it is refusing to find the commonest
+/// thing anybody wants to correct.
+///
+/// Only ever used after an exact match has been looked for and failed, so a
+/// page that really does say what was asked is never matched by shape instead.
+/// The pairs are the ones a reader actually confuses, and no others: nothing
+/// here folds `c` into `e`, because those are told apart by a bar a tenth of
+/// the letter tall and the reader is good at it.
+fn by_shape(text: &str) -> String {
+    squash(text)
+        .chars()
+        .map(|c| match c {
+            'o' | '0' => 'o',
+            'l' | 'i' | '1' => 'l',
+            's' | '5' => 's',
+            'z' | '2' => 'z',
+            'b' | '8' => 'b',
+            'g' | '6' => 'g',
+            other => other,
+        })
         .collect()
 }
 

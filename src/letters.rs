@@ -122,6 +122,27 @@ pub struct Word {
     pub letters: Vec<Letter>,
 }
 
+impl Letter {
+    /// A letter at a known place, already read.
+    ///
+    /// For building a page out of text that is known from somewhere other than
+    /// the reader — a test, or a caller that has the words already and wants
+    /// the rest of the program to treat them as a page.
+    ///
+    /// The stamp is blank, because there is no ink behind this one. Nothing
+    /// that matches text against a page needs it; only recognising an unread
+    /// mark does, and this one is read.
+    pub fn known(text: char, rect: Rect, ink_mm2: f64) -> Letter {
+        Letter {
+            rect,
+            ink_mm2,
+            text: Some(text),
+            confidence: 1.0,
+            stamp: Stamp::blank(),
+        }
+    }
+}
+
 impl Word {
     /// The word as text, if every letter in it was read.
     pub fn text(&self) -> Option<String> {
@@ -1552,7 +1573,14 @@ fn match_page(
 
     if threads <= 1 {
         for line in page.lines.iter_mut() {
-            match_line(line, candidates, cap_height, reference, min_confidence, home);
+            match_line(
+                line,
+                candidates,
+                cap_height,
+                reference,
+                min_confidence,
+                home,
+            );
         }
         return;
     }
@@ -1562,7 +1590,14 @@ fn match_page(
         for slice in page.lines.chunks_mut(chunk) {
             scope.spawn(move || {
                 for line in slice {
-                    match_line(line, candidates, cap_height, reference, min_confidence, home);
+                    match_line(
+                        line,
+                        candidates,
+                        cap_height,
+                        reference,
+                        min_confidence,
+                        home,
+                    );
                 }
             });
         }
