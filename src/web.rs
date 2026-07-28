@@ -161,6 +161,15 @@ fn handle(mut stream: TcpStream) {
                 message.as_bytes(),
             ),
         },
+        ("POST", "/barcode") => match barcode_sheet(&request) {
+            Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
+            Err(message) => respond(
+                &mut stream,
+                422,
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            ),
+        },
         ("POST", "/watermark") => match watermark_sheet(&request) {
             Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
             Err(message) => respond(
@@ -581,6 +590,104 @@ fn join_files(request: &Request) -> Result<(Vec<u8>, String), String> {
     let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
     let _ = joined;
     Ok((bytes, "joined.pdf".to_string()))
+}
+
+/// A barcode or a QR code on a sheet, worked out here.
+///
+/// The reason this is on the page at all: the ordinary way to get a barcode is
+/// to type what you want encoded into somebody else's website. An asset number,
+/// a patient reference, a case file — those are not things to hand over in
+/// exchange for a picture of them, and this machine can work one out in a
+/// millisecond without telling anybody.
+fn barcode_sheet(request: &Request) -> Result<(Vec<u8>, String), String> {
+    let parts = parse_multipart(&request.content_type, &request.body)?;
+    let field = |name: &str| parts.iter().find(|p| p.name == name);
+
+    let Some(sheet) = field("sheet").filter(|p| !p.data.is_empty()) else {
+        return Err("Choose the sheet the code goes on.".into());
+    };
+    let text = field("text").map(|p| p.text()).unwrap_or_default();
+    if text.is_empty() {
+        return Err("There is nothing to put in a code. Say what it should say.".into());
+    }
+    let qr = field("kind").map(|p| p.text()).as_deref() == Some("qr");
+    let number = |name: &str, fallback: f64| -> f64 {
+        field(name)
+            .map(|p| p.text())
+            .and_then(|t| t.parse::<f64>().ok())
+            .filter(|value| *value > 0.0)
+            .unwrap_or(fallback)
+    };
+    let module_mm = number("module", if qr { 0.8 } else { 0.4 });
+    let height_mm = number("height", 15.0);
+    let x_mm = number("x", 20.0);
+    let y_mm = number("y", 40.0);
+
+    let symbol = match qr {
+        true => {
+            let level = field("level")
+                .map(|p| p.text())
+                .and_then(|t| crate::barcode::qr::Ecc::parse(&t))
+                .unwrap_or(crate::barcode::qr::Ecc::Medium);
+            crate::barcode::qr::encode(&text, level).map_err(|e| e.to_string())?
+        }
+        false => crate::barcode::code128::encode(&text).map_err(|e| e.to_string())?,
+    };
+
+    let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
+    let path = workspace.path.join(safe_name(
+        sheet.filename.as_deref().unwrap_or("sheet.pdf"),
+        "sheet.pdf",
+    ));
+    std::fs::write(&path, &sheet.data).map_err(|e| e.to_string())?;
+
+    let pages = crate::recipe::pages_in(&path).unwrap_or(1);
+    let mut sizes = Vec::with_capacity(pages);
+    for page in 1..=pages {
+        sizes.push(crate::recipe::draw_page(&path, page)?.1.page);
+    }
+
+    let across_mm = symbol.width_mm(module_mm);
+    let down_mm = match qr {
+        true => symbol.height_mm(module_mm),
+        false => height_mm + symbol.quiet as f64 * module_mm * 2.0,
+    };
+    if x_mm + across_mm > sizes[0].width_mm || y_mm + down_mm > sizes[0].height_mm {
+        return Err(format!(
+            "That code comes to {across_mm:.0} x {down_mm:.0} mm, and at \
+             {x_mm:.0},{y_mm:.0} it runs off a {} sheet. Move it, or make the \
+             modules smaller.",
+            sizes[0].describe()
+        ));
+    }
+
+    let mut shapes: Vec<Vec<crate::pdf::PlacedShape>> = vec![Vec::new(); pages];
+    let boxes = match qr {
+        true => symbol.rectangles(module_mm),
+        false => symbol.bars(module_mm, height_mm),
+    };
+    for (bx, by, width_mm, height_mm) in boxes {
+        shapes[0].push(crate::pdf::PlacedShape {
+            drawing: crate::pdf::Drawing::Rect {
+                x_mm: x_mm + bx,
+                y_mm: y_mm + by,
+                width_mm,
+                height_mm,
+                radius_mm: 0.0,
+            },
+            stroke: None,
+            fill: Some((0.0, 0.0, 0.0)),
+            width_mm: 0.0,
+            dash_mm: None,
+        });
+    }
+
+    let out = workspace.path.join("barcode.pdf");
+    let blank: Vec<Vec<crate::pdf::PlacedLine>> = vec![Vec::new(); pages];
+    crate::pdf::write_page_content(&out, &sizes, &blank, &shapes, "Onionskin code", None)
+        .map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
+    Ok((bytes, "barcode.pdf".to_string()))
 }
 
 /// A word across every page of a sheet that is already printed.
@@ -1044,6 +1151,56 @@ const PAGE_BODY: &str = r#"
   stack in that order is a stack in the wrong order. Rename them
   <code>page-01</code>, <code>page-02</code>, <code>page-10</code> and it comes
   out right by itself.
+</p>
+
+<h2>A barcode or a QR code</h2>
+<p>
+  Worked out on this machine. Nothing is sent anywhere — which is the point,
+  because the ordinary way to get a barcode is to type the thing you want encoded
+  into somebody else&#39;s website, and an asset number or a case reference is not
+  a thing to hand over in exchange for a picture of it.
+</p>
+
+<form method="post" action="/barcode" enctype="multipart/form-data">
+  <fieldset>
+    <legend>The code</legend>
+
+    <label for="bcsheet">The sheet it goes on</label>
+    <input type="file" id="bcsheet" name="sheet"
+      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+
+    <label for="bctext">What it says</label>
+    <input type="text" id="bctext" name="text" placeholder="INV-2024-00817"
+      maxlength="500" required>
+
+    <label for="kind">Which kind</label>
+    <select id="kind" name="kind">
+      <option value="code128">Barcode — bars, read by a handheld scanner</option>
+      <option value="qr">QR code — a square, read by a telephone</option>
+    </select>
+
+    <label for="bcx">How far in from the left, in millimetres</label>
+    <input type="number" id="bcx" name="x" value="20" min="0" max="2000" step="1">
+
+    <label for="bcy">How far down from the top, in millimetres</label>
+    <input type="number" id="bcy" name="y" value="40" min="0" max="2000" step="1">
+
+    <label for="level">How much of a QR code can be lost
+      <span class="hint">— ignored for a barcode.</span></label>
+    <select id="level" name="level">
+      <option value="low">low: about 7%</option>
+      <option value="medium" selected>medium: about 15%</option>
+      <option value="quartile">quartile: about 25%</option>
+      <option value="high">high: about 30%</option>
+    </select>
+  </fieldset>
+
+  <button type="submit">Write the delta</button>
+</form>
+<p class="hint">
+  A barcode has to go on blank paper. Toner goes on top of what is already
+  printed, and printing showing through the bars changes their widths — a scanner
+  will not read it at all.
 </p>
 
 <h2>Stamp a word across a printed sheet</h2>

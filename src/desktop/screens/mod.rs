@@ -4,6 +4,7 @@
 //! do not know about one another, and none of them does slow work on the thread
 //! that draws — everything heavy goes through [`Jobs`].
 
+pub mod barcode;
 pub mod batch;
 pub mod blanks;
 pub mod calibrate;
@@ -119,6 +120,7 @@ pub enum Screen {
     Correct,
     Cover,
     Watermark,
+    Barcode,
     Proof,
     Merge,
     Join,
@@ -147,6 +149,7 @@ impl Screen {
         Screen::Correct,
         Screen::Cover,
         Screen::Watermark,
+        Screen::Barcode,
         Screen::Proof,
         Screen::Merge,
         Screen::Join,
@@ -182,6 +185,7 @@ impl Screen {
             Screen::Correct => "correct",
             Screen::Cover => "cover",
             Screen::Watermark => "watermark",
+            Screen::Barcode => "barcode",
             Screen::Fits => "fits",
             Screen::Stack => "stack",
             Screen::Verify => "verify",
@@ -217,6 +221,7 @@ impl Screen {
             Screen::Correct => "Fix a mistake",
             Screen::Cover => "Cover something up",
             Screen::Watermark => "Stamp a word across it",
+            Screen::Barcode => "A barcode or a QR code",
             Screen::Fits => "Check before printing",
             Screen::Stack => "Sort a stack",
             Screen::Verify => "Check a sheet or a run",
@@ -246,6 +251,7 @@ impl Screen {
             Screen::Correct => "Cover the wrong words and set the right ones",
             Screen::Cover => "Print solid over what must not be read",
             Screen::Watermark => "DRAFT, COPY or VOID, corner to corner",
+            Screen::Barcode => "An asset number or a link, worked out here",
             Screen::Fits => "Is this the sheet the delta was made for?",
             Screen::Stack => "Which document is each sheet from the feeder?",
             Screen::Verify => "Did it come out of the printer right — one sheet, or all of them?",

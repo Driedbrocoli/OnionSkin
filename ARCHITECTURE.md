@@ -25,6 +25,8 @@ went with it.
 | `document` | A document made from nothing and edited: words and drawings |
 | `font`     | Embedding a font so the printer needs nothing installed |
 | `pdf`      | Writing text and shapes into a PDF |
+| `watermark`| A word laid corner to corner across a sheet |
+| `barcode`  | Code 128 and QR codes, worked out rather than fetched |
 | `office`   | Reading and writing `.docx` and `.odt`, without a word processor |
 | `printer`  | Printing over IPP and scanning over eSCL, both spoken directly |
 | `acquire`  | Driving a scanner through SANE |
@@ -928,6 +930,69 @@ macOS is unsigned, and says so in the archive's README: Gatekeeper stops a
 downloaded program the first time it runs and the message it gives reads like
 the file is broken. Saying so up front is cheaper than the alternative, which
 is paying Apple for a certificate.
+
+## Barcodes without a barcode library
+
+Both `barcode::code128` and `barcode::qr` are written out here. That is not
+enthusiasm: every barcode library worth using is C or C++, and one of them in the
+tree would undo the property this program is built around — that it is one file
+which runs on a machine with nothing installed. The alternative people actually
+reach for is worse. The ordinary way to get a barcode today is to type the thing
+you want encoded into a website, and an asset number, a patient reference or a
+case file is not a thing to hand over in exchange for a picture of it.
+
+Code 128 is small: a table of 107 patterns, a check digit, and the decision of
+when to switch to the packing that puts two digits in one symbol. That decision
+is counted rather than guessed — the switch costs one symbol, each pair of digits
+saves one, and coming back costs another unless the digits run to the end. Which
+works out at six digits in the middle of a text and four at the end, and not the
+round number it looks like it should be.
+
+QR is not small. It is five stages: packing the text three ways and choosing the
+narrowest, choosing the smallest of forty sizes that fits, Reed–Solomon over the
+field of 256, threading the result through the square in a zigzag around the
+frame, and then trying all eight masks and keeping whichever leaves the fewest
+features a scanner might mistake for part of the frame.
+
+### How it is known to be right
+
+This is the part worth writing down, because it is the part that would otherwise
+be taken on trust.
+
+Three hundred and twenty numbers were copied by hand out of the standard: how
+many error-correction codewords each version uses at each of the four levels, and
+how many blocks each splits into. A wrong one does not produce a wrong-looking
+code. It produces a code of exactly the right shape, with the eyes in the right
+corners and the timing lines where they belong, that no scanner on earth can
+read. Reading the tables back over does not catch it; nor does any test written
+against the same understanding that produced the mistake.
+
+So the tests hand the finished PDF to `zbarimg` and insist it reads back the
+text that went in — every one of the forty versions, at every one of the four
+levels, each filled to the brim so that it really does land on that version.
+A hundred and sixty round trips, through the encoder, the PDF writer, the
+renderer, and somebody else's decoder. Two deliberate one-digit changes to those
+tables were tried, and each came back naming the exact version and level it
+broke.
+
+zbar is not a dependency and will not become one — it is a C library, and
+needing nothing was the point. The tests skip themselves and say so when it is
+not installed. But when it happens to be there it is the only opinion in the
+repository that did not come from this program.
+
+It earned its place immediately. `café` went into a QR code and came back out of
+zbar as `caf矇`. Nothing was wrong with the encoder: byte mode carries bytes and
+says nothing about what they mean, the standard's default is Latin-1, and zbar
+had decided those two bytes were part of a Chinese codepage. It was entitled to.
+The code had not said otherwise, so `café` on that sheet genuinely meant whatever
+the reader decided it meant — and a different reader would have decided
+differently. The fix is twelve bits in front of the text naming UTF-8, which is
+what the standard's character-set indicator is for; plain ASCII does not pay
+them, because it means the same in every character set anybody would guess.
+
+No amount of reading the encoder over would have found that. It was correct. It
+was correct in a way that produced sheets whose meaning depended on who was
+looking.
 
 ## Where it came from
 

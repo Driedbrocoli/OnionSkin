@@ -114,6 +114,8 @@ enum Command {
     Join(JoinArgs),
     /// Lay a word across a printed sheet: DRAFT, COPY, VOID.
     Watermark(WatermarkArgs),
+    /// Put a barcode or a QR code on a sheet.
+    Barcode(BarcodeArgs),
     /// Find the places on a form where something can be written.
     Blanks(BlanksArgs),
     /// What was added to which sheet, and when.
@@ -584,6 +586,62 @@ struct VerifyArgs {
     /// waiting for two hundred.
     #[arg(long, value_name = "N")]
     first: Option<usize>,
+}
+
+/// A barcode or a QR code, on a sheet that is otherwise already printed.
+///
+/// Both are worked out here rather than fetched from anywhere: there is no
+/// library behind them, nothing is downloaded, and a machine with no network
+/// makes the same symbol as one with it. That last part matters more than it
+/// sounds, because the ordinary way to get a barcode today is to hand the thing
+/// being encoded to a website.
+///
+/// The one thing to know before printing: a barcode has to go on blank paper.
+/// Toner goes on top of what is already there, and printing showing through the
+/// bars changes their widths — which does not make a barcode that reads wrongly,
+/// it makes one that does not read at all.
+#[derive(clap::Args)]
+struct BarcodeArgs {
+    /// The sheet the code goes on.
+    document: PathBuf,
+    /// What to encode: a reference, a web address, an asset number.
+    #[arg(long, value_name = "TEXT")]
+    text: String,
+    /// Where its top-left corner goes: 'X,Y' in millimetres from the top-left
+    /// of the paper.
+    #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+    at: String,
+    /// A QR code — a square read by a telephone — rather than a barcode.
+    #[arg(long)]
+    qr: bool,
+    /// How wide one module is, in millimetres. Bigger reads from further away
+    /// and takes more paper.
+    #[arg(long, value_name = "MM")]
+    module: Option<f64>,
+    /// How tall the bars are, in millimetres. Barcodes only; a QR code is
+    /// square and its height is not a choice.
+    #[arg(long, value_name = "MM", default_value_t = 15.0)]
+    height: f64,
+    /// How much of a QR code can be lost and still read: low, medium,
+    /// quartile, high.
+    #[arg(long, value_name = "LEVEL", default_value = "medium")]
+    level: String,
+    /// Print what was encoded underneath, in small type, so a person can read
+    /// it when the scanner will not.
+    #[arg(long)]
+    caption: bool,
+    /// Which page, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    /// Where to write the delta.
+    #[arg(short, long, alias = "out")]
+    output: Option<PathBuf>,
+    /// Open the delta when it is written.
+    #[arg(long)]
+    open: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 /// A word across the whole sheet: DRAFT, COPY, VOID.
@@ -1914,6 +1972,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Merge(args) => cmd_merge(args),
         Command::Join(args) => cmd_join(args),
         Command::Watermark(args) => cmd_watermark(args),
+        Command::Barcode(args) => cmd_barcode(args),
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
@@ -6415,6 +6474,186 @@ fn cmd_watermark(args: WatermarkArgs) -> Result<ExitCode, String> {
 
     if !rehearsal.pretending() {
         note_the_delta(&args.document, &output, said.len(), pages);
+    }
+    println!("\n{PRINT_INSTRUCTIONS}");
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// How wide one module is by default, in millimetres.
+///
+/// Not the smallest that prints — the smallest that prints *and* is read by a
+/// handheld scanner at arm's length, which is what somebody with a barcode on a
+/// sheet is going to do with it. A QR code's modules can be smaller than a
+/// barcode's bars because a camera looks at the whole square at once, where a
+/// laser sweeps across the bars and has to resolve each one.
+const BARCODE_MODULE_MM: f64 = 0.4;
+const QR_MODULE_MM: f64 = 0.8;
+
+fn cmd_barcode(args: BarcodeArgs) -> Result<ExitCode, String> {
+    let (x_mm, y_mm) = parse_point(&args.at)?;
+    if args.text.trim().is_empty() {
+        return Err("there is nothing to put in a code. Say --text.".into());
+    }
+
+    let level = onionskin::barcode::qr::Ecc::parse(&args.level).ok_or_else(|| {
+        format!(
+            "'{}' is not a level of error correction. Use low, medium, \
+             quartile or high.",
+            args.level
+        )
+    })?;
+
+    let symbol = match args.qr {
+        true => onionskin::barcode::qr::encode(&args.text, level).map_err(|e| e.to_string())?,
+        false => onionskin::barcode::code128::encode(&args.text).map_err(|e| e.to_string())?,
+    };
+    let module_mm = args.module.unwrap_or(match args.qr {
+        true => QR_MODULE_MM,
+        false => BARCODE_MODULE_MM,
+    });
+
+    let pages = onionskin::recipe::pages_in(&args.document).unwrap_or(1);
+    if args.page == 0 || args.page > pages {
+        return Err(format!(
+            "{} has {pages} page(s), so there is no page {} to put a code on.",
+            args.document.display(),
+            args.page
+        ));
+    }
+    let paper = onionskin::recipe::draw_page(&args.document, args.page)?
+        .1
+        .page;
+
+    // How big it comes out, which is the thing somebody needs before they find
+    // it hanging off the edge of the paper.
+    let across_mm = symbol.width_mm(module_mm);
+    let down_mm = match args.qr {
+        true => symbol.height_mm(module_mm),
+        false => args.height + symbol.quiet as f64 * module_mm * 2.0,
+    };
+    if x_mm < 0.0
+        || y_mm < 0.0
+        || x_mm + across_mm > paper.width_mm
+        || y_mm + down_mm > paper.height_mm
+    {
+        return Err(format!(
+            "that code comes to {across_mm:.0} x {down_mm:.0} mm, and at \
+             {x_mm:.0},{y_mm:.0} it runs off a {} sheet. Move it, or make the \
+             modules smaller with --module.",
+            paper.describe()
+        ));
+    }
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-barcode", "pdf"));
+    refuse_to_clobber(&output, "delta", &[(&args.document, "sheet")])?;
+    check_writable(&output, "delta")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
+
+    let mut sizes = Vec::with_capacity(pages);
+    let mut shapes: Vec<Vec<onionskin::pdf::PlacedShape>> = vec![Vec::new(); pages];
+    let mut lines: Vec<Vec<onionskin::pdf::PlacedLine>> = vec![Vec::new(); pages];
+    for page in 1..=pages {
+        sizes.push(onionskin::recipe::draw_page(&args.document, page)?.1.page);
+    }
+    let boxes = match args.qr {
+        true => symbol.rectangles(module_mm),
+        false => symbol.bars(module_mm, args.height),
+    };
+    for (bx, by, width_mm, height_mm) in boxes {
+        shapes[args.page - 1].push(onionskin::pdf::PlacedShape {
+            drawing: onionskin::pdf::Drawing::Rect {
+                x_mm: x_mm + bx,
+                y_mm: y_mm + by,
+                width_mm,
+                height_mm,
+                radius_mm: 0.0,
+            },
+            stroke: None,
+            fill: Some((0.0, 0.0, 0.0)),
+            width_mm: 0.0,
+            dash_mm: None,
+        });
+    }
+
+    // The human-readable line under a barcode, which is what somebody types in
+    // when the scanner will not read it. Centred under the symbol.
+    if args.caption {
+        // Small, because it is there for when the scanner fails rather than
+        // instead of it — and set one cap height below the symbol, so the tops
+        // of the letters sit exactly where the quiet zone ends.
+        const CAPTION_PT: f64 = 8.0;
+        let width = onionskin::pdf::builtin_width_mm(
+            onionskin::pdf::Font::Helvetica,
+            &args.text,
+            CAPTION_PT,
+        );
+        lines[args.page - 1].push(onionskin::pdf::PlacedLine {
+            text: args.text.clone(),
+            x_mm: x_mm + (across_mm - width) / 2.0,
+            y_mm: y_mm + down_mm + CAPTION_PT * 0.7 * 25.4 / 72.0,
+            size_pt: CAPTION_PT,
+            font: onionskin::pdf::LineFont::Builtin(onionskin::pdf::Font::Helvetica),
+            colour: (0.0, 0.0, 0.0),
+            rotation_deg: 0.0,
+        });
+    }
+
+    onionskin::pdf::write_page_content(
+        &rehearsal.instead_of(&output),
+        &sizes,
+        &lines,
+        &shapes,
+        "Onionskin code",
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if !rehearsal.pretending() {
+        println!("{}", output.display());
+    }
+    println!(
+        "  {}, {across_mm:.0} x {down_mm:.0} mm at {x_mm:.0},{y_mm:.0} on page {}",
+        match args.qr {
+            true => "a QR code",
+            false => "a Code 128 barcode",
+        },
+        args.page
+    );
+    match args.qr {
+        true => println!(
+            "  {} modules square at {module_mm} mm, correction {}",
+            symbol.width,
+            level.describe()
+        ),
+        false => println!(
+            "  {} modules wide at {module_mm} mm, bars {} mm tall",
+            symbol.width, args.height
+        ),
+    }
+
+    if onionskin::barcode::too_small_to_print(module_mm) {
+        println!(
+            "\nAt {module_mm} mm a module is smaller than a laser printer puts \
+             down the same way twice.\n  Under about \
+             {} mm the bars come out ragged and scanners give up. Try --module {}.",
+            onionskin::barcode::SMALLEST_MODULE_MM,
+            match args.qr {
+                true => QR_MODULE_MM,
+                false => BARCODE_MODULE_MM,
+            }
+        );
+    }
+    println!("\n{}", onionskin::barcode::Symbol::over_printing());
+
+    if !rehearsal.pretending() {
+        note_the_delta(&args.document, &output, 1, pages);
     }
     println!("\n{PRINT_INSTRUCTIONS}");
     rehearsal.say_nothing_was_written();

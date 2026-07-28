@@ -1063,3 +1063,106 @@ fn the_page_offers_the_watermark_and_says_the_toner_goes_on_top() {
         "the page does not say the toner goes on top of the printing"
     );
 }
+
+/// A real code comes out, and it is one that decodes.
+///
+/// Checked by drawing the delta and reading it back rather than by looking at
+/// the bytes: a code that is the right shape and cannot be read is exactly the
+/// failure this needs to catch, and the only way to catch it is to read it.
+#[test]
+fn the_browser_writes_a_barcode_that_reads_back() {
+    for (kind, text) in [
+        ("code128", "INV-2024-00817"),
+        ("qr", "https://example.org/renew"),
+    ] {
+        let request = posted(&[
+            ("sheet", Some("form.pdf"), &a_page("Asset register")),
+            ("text", None, text.as_bytes()),
+            ("kind", None, kind.as_bytes()),
+        ]);
+        let (bytes, name) = barcode_sheet(&request).expect("it should write a code");
+        assert_eq!(name, "barcode.pdf");
+
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("code.pdf");
+        std::fs::write(&pdf, &bytes).unwrap();
+
+        // There is ink on the page, and it is black.
+        let engine = crate::render::engine().expect("a renderer");
+        let document = engine.open(&pdf).expect("it should open");
+        let drawn = document.render_gray(0, 300.0).expect("it should draw");
+        assert!(
+            drawn.gray.iter().any(|level| *level < 60),
+            "the {kind} delta came out blank"
+        );
+
+        // And a decoder agrees, when there is one on this machine.
+        let png = dir.path().join("code.png");
+        let image =
+            image::GrayImage::from_raw(drawn.width as u32, drawn.height as u32, drawn.gray.clone())
+                .expect("the render should be an image");
+        image.save(&png).unwrap();
+        if let Ok(out) = std::process::Command::new("zbarimg")
+            .args(["--nodbus", "--quiet", "--raw"])
+            .arg(&png)
+            .output()
+        {
+            let read = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+            if !read.is_empty() {
+                assert_eq!(
+                    read, text,
+                    "a scanner read the {kind} back as something else"
+                );
+            }
+        }
+    }
+}
+
+/// Nothing to encode is a question, not a crash.
+#[test]
+fn a_code_of_nothing_is_refused() {
+    let why = barcode_sheet(&posted(&[("sheet", Some("f.pdf"), &a_page("x"))])).unwrap_err();
+    assert!(why.contains("nothing to put in a code"), "{why}");
+    let why = barcode_sheet(&posted(&[("text", None, b"HELLO")])).unwrap_err();
+    assert!(why.contains("Choose the sheet"), "{why}");
+}
+
+/// A code too big for the paper is refused with the numbers, rather than
+/// written half off the page.
+#[test]
+fn a_code_that_runs_off_the_paper_says_so() {
+    let request = posted(&[
+        ("sheet", Some("form.pdf"), &a_page("Asset register")),
+        (
+            "text",
+            None,
+            b"A REFERENCE LONG ENOUGH TO NOT FIT ON THE PAGE AT ALL",
+        ),
+        ("kind", None, b"code128"),
+        ("module", None, b"2"),
+    ]);
+    let why = barcode_sheet(&request).unwrap_err();
+    assert!(why.contains("runs off"), "{why}");
+    assert!(why.contains("mm"), "{why}");
+}
+
+/// The page has to offer it, and has to say the thing that decides whether it
+/// works: blank paper.
+#[test]
+fn the_page_offers_the_barcode_and_says_it_needs_blank_paper() {
+    assert!(
+        PAGE_BODY.contains("action=\"/barcode\""),
+        "the page has no barcode form"
+    );
+    assert!(
+        PAGE_BODY.contains("blank paper"),
+        "the page does not say a barcode needs blank paper"
+    );
+    // And that nothing is sent anywhere, which is why it is here rather than on
+    // one of the websites that does this.
+    assert!(
+        PAGE_BODY.contains("Nothing is sent anywhere"),
+        "{}",
+        "no such line"
+    );
+}

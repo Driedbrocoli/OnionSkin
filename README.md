@@ -1218,6 +1218,60 @@ page one's watermark onto page two. `--size 96` overrules the worked-out size an
 `--font times` the face. On a *fresh* page there is nothing underneath to protect,
 so `--grey 0` is perfectly reasonable there.
 
+### A barcode or a QR code
+
+```bash
+onionskin barcode assets.pdf --text "INV-2024-00817" --at 20,60 --caption
+onionskin barcode letter.pdf --text "https://example.org/renew" --at 150,240 --qr
+```
+
+Both are worked out on your machine. There is no library behind them, nothing is
+downloaded, and a computer with no network makes exactly the same symbol as one
+with it. That matters more than it sounds: the ordinary way to get a barcode
+today is to type the thing you want encoded into somebody else's website, and an
+asset number, a patient reference or a case file is not a thing to hand over in
+exchange for a picture of it.
+
+**The one thing that decides whether it works: a barcode has to go on blank
+paper.** Toner goes on top of what is already printed, and printing showing
+through the bars changes their widths. That does not produce a barcode that reads
+wrongly — it produces one that does not read at all. `onionskin blanks` will tell
+you where there is room.
+
+The barcode is Code 128, which is what a warehouse scanner expects when nobody
+has said otherwise: all the ASCII printing characters, and digits packed two to a
+symbol so a numeric reference takes half the paper. Onionskin switches between
+the two packings by counting, so `INV-2024-00817` gets the tight packing for the
+digits without giving up the letters.
+
+The QR code is the full thing: all forty sizes, all four levels of error
+correction, and any text at all — `--qr` on a line of Japanese or a name with an
+accent in it works, because past digits and capitals it falls back to encoding
+the bytes.
+
+```bash
+onionskin barcode form.pdf --text "案件 2024-8817" --at 20,60 --qr --level high
+```
+
+`--level high` spends about 30% of the square on being able to lose 30% of it,
+which is what you want on a label that will be handled or one with a logo printed
+over the middle. `--level low` spends 7% and gives you the smallest square. The
+default is medium, which is the right answer for anything going on paper.
+
+`--module` sets how wide one module is; the defaults are 0.4 mm for a barcode and
+0.8 mm for a QR code, both comfortably above the quarter of a millimetre where a
+laser printer stops laying a bar down the same width twice. `--height` sets how
+tall the bars are, `--caption` prints what was encoded underneath in small type
+so a person can type it in when the scanner will not, and `--page` puts it on a
+page other than the first.
+
+Onionskin checks the code fits the paper before writing anything:
+
+```
+that code comes to 214 x 23 mm, and at 20,60 it runs off an A4 sheet.
+Move it, or make the modules smaller with --module.
+```
+
 ### A rehearsal, before the paper goes in
 
 Every command that writes a file takes `--dry-run`:
