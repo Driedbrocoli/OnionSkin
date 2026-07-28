@@ -578,6 +578,10 @@ struct VerifyArgs {
     /// Also teach the profile of this name from what was measured.
     #[arg(long, value_name = "NAME")]
     learn: Option<String>,
+    /// Stop after this many sheets of a run, to see the shape of it before
+    /// waiting for two hundred.
+    #[arg(long, value_name = "N")]
+    first: Option<usize>,
 }
 
 /// Several PDFs, one after another.
@@ -5462,9 +5466,153 @@ fn cmd_fits(args: FitsArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::from(2))
 }
 
+/// A whole run through the feeder, checked sheet by sheet.
+///
+/// `verify` answers "did this sheet come out right", which is the right
+/// question asked once. Two hundred certificates through a printer is two
+/// hundred chances for a sheet to go in crooked, and nobody scans two hundred
+/// sheets one at a time to find out — so nobody finds out, and the drifted ones
+/// go out in the post.
+///
+/// A feeder produces the whole stack as one PDF already. So the run is checked
+/// the way it was printed: every sheet against its own page of the delta, and
+/// the report is a list of the ones that need looking at rather than a wall of
+/// two hundred good ones.
+fn verify_a_run(args: &VerifyArgs, delta: &Path, sheets: usize) -> Result<ExitCode, String> {
+    let delta_pages = calibrate::pages_on_delta(delta).map_err(|e| e.to_string())?;
+    // A one-page delta printed onto every sheet of a run is ordinary — a paid
+    // stamp, a signature. So is a page each. Anything between the two is
+    // somebody having scanned half the stack, and it is better said than
+    // silently checked against the wrong page.
+    if delta_pages != 1 && delta_pages != sheets {
+        return Err(format!(
+            "{} has {sheets} sheet(s) on it and {} has {delta_pages} page(s).\n    \
+             A run is checked sheet against page, so those have to match — or \
+             the delta has\n    to be a single page that went onto every sheet.",
+            args.scan.display(),
+            delta.display()
+        ));
+    }
+
+    let wanted = args.first.unwrap_or(sheets).min(sheets);
+    println!(
+        "{}: {wanted} sheet(s), against {}.\n",
+        args.scan.display(),
+        delta.display()
+    );
+
+    // The delta's own marks, read once per page rather than once per sheet: a
+    // stamp printed onto two hundred sheets is one page read two hundred times
+    // otherwise, and that is most of the work.
+    let mut marks: Vec<Option<Vec<calibrate::Asked>>> = vec![None; delta_pages];
+
+    let mut adrift: Vec<usize> = Vec::new();
+    let mut unreadable: Vec<(usize, String)> = Vec::new();
+    let mut worst = (0usize, 0.0f64);
+    let mut good = 0usize;
+
+    for sheet in 1..=wanted {
+        let which = if delta_pages == 1 { 1 } else { sheet };
+        if marks[which - 1].is_none() {
+            marks[which - 1] =
+                Some(calibrate::marks_on_delta_page(delta, which).map_err(|e| e.to_string())?);
+        }
+        let asked = marks[which - 1].as_ref().expect("just read");
+        if asked.is_empty() {
+            println!("  sheet {sheet:>3}  —  nothing on page {which} of the delta to look for");
+            continue;
+        }
+
+        // The sheet as the feeder gave it: straightened onto the paper's own
+        // grid, so a millimetre in the delta is the same millimetre here.
+        let (gray, registration) = match onionskin::recipe::draw_page(&args.scan, sheet) {
+            Ok(both) => both,
+            Err(why) => {
+                println!("  sheet {sheet:>3}  ?  {why}");
+                unreadable.push((sheet, why));
+                continue;
+            }
+        };
+        let landings =
+            calibrate::measure_landings(&gray, &registration, asked, calibrate::ink_threshold());
+        let report = calibrate::PrintReport::of(landings, args.tolerance);
+
+        if report.good() {
+            good += 1;
+            println!(
+                "  sheet {sheet:>3}  ✓  worst {:.2} mm of {:.2}",
+                report.worst_mm, args.tolerance
+            );
+        } else {
+            adrift.push(sheet);
+            println!(
+                "  sheet {sheet:>3}  ✗  {}",
+                report.verdict().replace('\n', "\n           ")
+            );
+        }
+        if report.worst_mm > worst.1 {
+            worst = (sheet, report.worst_mm);
+        }
+    }
+
+    println!();
+    match (adrift.len(), unreadable.len()) {
+        (0, 0) => println!(
+            "All {wanted} sheet(s) came out right. The worst was sheet {} at \
+             {:.2} mm,\n  inside the {:.2} mm you asked for.",
+            worst.0, worst.1, args.tolerance
+        ),
+        _ => {
+            if !adrift.is_empty() {
+                println!(
+                    "{} of {wanted} sheet(s) drifted: {}.",
+                    adrift.len(),
+                    onionskin::split::sheets(&adrift)
+                );
+                println!(
+                    "  Pull those out of the stack. They are the ones to look at, and \
+                     the rest\n  can go — {good} of them measured right.",
+                );
+            }
+            if !unreadable.is_empty() {
+                let which: Vec<usize> = unreadable.iter().map(|(sheet, _)| *sheet).collect();
+                println!(
+                    "{} sheet(s) could not be read at all: {}.",
+                    unreadable.len(),
+                    onionskin::split::sheets(&which)
+                );
+            }
+            println!(
+                "\n  A run that drifts throughout is a printer that needs \
+                 calibrating, not a\n  stack that needs re-doing:\n    onionskin \
+                 calibrate learn <one of those sheets> --delta {}",
+                delta.display()
+            );
+        }
+    }
+
+    // Exit 2 when any sheet needs a person, the same as the single-sheet check.
+    Ok(if adrift.is_empty() && unreadable.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
 fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     let page = parse_page(&args.page).map_err(|e| e.to_string())?;
     let delta = the_delta(&args.delta)?;
+
+    // A whole run, when the stack came back from the feeder as one PDF. One
+    // sheet is the ordinary case and stays exactly as it was.
+    let sheets = onionskin::recipe::pages_in(&args.scan).unwrap_or(1);
+    if sheets > 1 {
+        // `--page` is not wanted here and is not passed on. A stack from a
+        // feeder is a PDF, and a PDF says what size paper each of its pages
+        // is; taking a flag instead would let somebody override the file with
+        // a wrong answer on two hundred sheets at once.
+        return verify_a_run(&args, &delta, sheets);
+    }
     let asked = calibrate::marks_on_delta(&delta).map_err(|e| e.to_string())?;
     if asked.is_empty() {
         return Err(format!(

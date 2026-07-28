@@ -880,6 +880,47 @@ photocopier. It does not take the old ink off the paper — a strong light behin
 the sheet may still show it through. For anything that must not be recoverable,
 print a fresh page.
 
+### Check a whole run, not one sheet
+
+`verify` answers "did this sheet come out right", which is the right question
+asked once. Two hundred certificates is two hundred chances for the paper to go
+in crooked, and nobody scans two hundred sheets one at a time to find out — so
+nobody finds out, and the drifted ones go out in the post.
+
+A feeder gives the whole stack back as one PDF, so give it that:
+
+```bash
+onionskin verify stack.pdf --delta certificates-delta.pdf
+```
+
+```
+stack.pdf: 200 sheet(s), against certificates-delta.pdf.
+
+  sheet   1  ✓  worst 0.15 mm of 1.00
+  sheet   2  ✓  worst 0.11 mm of 1.00
+  sheet   3  ✗  1 addition(s) landed more than 1.00 mm from where they were
+               asked for; the worst is 3.98 mm out.
+  ...
+
+1 of 200 sheet(s) drifted: 3.
+  Pull those out of the stack. They are the ones to look at, and the rest
+  can go — 199 of them measured right.
+```
+
+Each sheet is held against **its own page** of the delta, so a batch of two
+hundred different certificates is checked properly rather than all against the
+first. A single-page delta — a paid stamp, a signature — is checked against every
+sheet instead, which is the other thing people print in runs. Anything between
+the two is somebody having scanned half the stack, and it is refused with both
+counts named rather than quietly compared against the wrong pages.
+
+`--first 2` stops after two, so the shape of a run shows before the whole box
+has been through the scanner. It exits 2 if any sheet needs a person, so a
+script can stop on it.
+
+A run that drifts *throughout* is not a stack to redo — it is a printer to
+calibrate, and the report says so.
+
 ### Check the sheet before you feed it
 
 `verify` looks at a sheet that has already been through the printer, which is

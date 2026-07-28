@@ -1733,6 +1733,25 @@ pub fn marks_asked_for(
 /// something measurable, so the command line and the window cannot drift apart
 /// on it.
 pub fn marks_on_delta(path: &Path) -> Result<Vec<Asked>, CalibrateError> {
+    marks_on_delta_page(path, 1)
+}
+
+/// How many pages a delta has, for a run that is checked sheet by sheet.
+pub fn pages_on_delta(path: &Path) -> Result<usize, CalibrateError> {
+    let engine = crate::render::engine().map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+    let doc = engine
+        .open(path)
+        .map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+    Ok(doc.len())
+}
+
+/// The same, for one page of a delta that has more than one.
+///
+/// `page` counts from 1, the way somebody talks about the fourth sheet of a
+/// run. A batch of two hundred certificates is two hundred pages of delta, and
+/// checking the run means holding each sheet against its own page rather than
+/// against the first.
+pub fn marks_on_delta_page(path: &Path, page: usize) -> Result<Vec<Asked>, CalibrateError> {
     // Fine enough that the middle of a mark settles to well under a tenth of a
     // millimetre, coarse enough that a page renders in a moment.
     const DPI: f64 = 200.0;
@@ -1741,8 +1760,16 @@ pub fn marks_on_delta(path: &Path) -> Result<Vec<Asked>, CalibrateError> {
     let doc = engine
         .open(path)
         .map_err(|e| CalibrateError::Invalid(e.to_string()))?;
+    let index = page.saturating_sub(1);
+    if index >= doc.len() {
+        return Err(CalibrateError::Invalid(format!(
+            "{} has {} page(s), so there is no page {page} on it",
+            path.display(),
+            doc.len()
+        )));
+    }
     let drawn = doc
-        .render_gray(0, DPI)
+        .render_gray(index, DPI)
         .map_err(|e| CalibrateError::Invalid(e.to_string()))?;
 
     let options = crate::diff::DiffOptions::default();
@@ -1752,12 +1779,7 @@ pub fn marks_on_delta(path: &Path) -> Result<Vec<Asked>, CalibrateError> {
         drawn.height,
         options.ink_threshold,
     );
-    let regions = crate::diff::label_regions(
-        &mask,
-        DPI,
-        options.group_mm,
-        options.min_region_mm2,
-    );
+    let regions = crate::diff::label_regions(&mask, DPI, options.group_mm, options.min_region_mm2);
     Ok(marks_asked_for(
         &drawn.gray,
         drawn.width,
@@ -1813,9 +1835,15 @@ pub fn measure_landings(
             mapping.page_mm_to_pixel((x1, y1)),
         ];
         let px0 = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-        let px1 = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let px1 = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
         let py0 = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let py1 = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let py1 = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
 
         // Nothing there to read: off the edge of the scan, or clear paper.
         // Recorded rather than dropped, because "this addition did not print"
