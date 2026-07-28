@@ -4,13 +4,16 @@
 //! do not know about one another, and none of them does slow work on the thread
 //! that draws — everything heavy goes through [`Jobs`].
 
+pub mod batch;
 pub mod blanks;
 pub mod calibrate;
 pub mod compare;
+pub mod correct;
 pub mod devices;
 pub mod doctor;
 pub mod document;
 pub mod draw;
+pub mod fits;
 pub mod history;
 pub mod jobs;
 pub mod join;
@@ -80,11 +83,14 @@ pub enum Screen {
     Draw,
     Read,
     Blanks,
+    Correct,
     Proof,
     Merge,
     Join,
+    Batch,
     Labels,
     Jobs,
+    Fits,
     Verify,
     History,
     Devices,
@@ -102,11 +108,14 @@ impl Screen {
         Screen::Draw,
         Screen::Read,
         Screen::Blanks,
+        Screen::Correct,
         Screen::Proof,
         Screen::Merge,
         Screen::Join,
+        Screen::Batch,
         Screen::Labels,
         Screen::Jobs,
+        Screen::Fits,
         Screen::Verify,
         Screen::History,
         Screen::Devices,
@@ -130,6 +139,9 @@ impl Screen {
             Screen::Join => "join",
             Screen::Labels => "labels",
             Screen::Jobs => "jobs",
+            Screen::Batch => "batch",
+            Screen::Correct => "correct",
+            Screen::Fits => "fits",
             Screen::Verify => "verify",
             Screen::History => "history",
             Screen::Devices => "devices",
@@ -159,6 +171,9 @@ impl Screen {
             Screen::Join => "Join files",
             Screen::Labels => "Sheet of labels",
             Screen::Jobs => "Saved jobs",
+            Screen::Batch => "One each, from a list",
+            Screen::Correct => "Fix a mistake",
+            Screen::Fits => "Check before printing",
             Screen::Verify => "Check a sheet or a run",
             Screen::History => "What was added",
             Screen::Devices => "Printers and scanners",
@@ -182,11 +197,112 @@ impl Screen {
             Screen::Join => "Several one after another, into one document",
             Screen::Labels => "Addresses and files, one per label, from a list",
             Screen::Jobs => "The same stamp on today's document, in two clicks",
+            Screen::Batch => "Two hundred certificates, two hundred names",
+            Screen::Correct => "Cover the wrong words and set the right ones",
+            Screen::Fits => "Is this the sheet the delta was made for?",
             Screen::Verify => "Did it come out of the printer right — one sheet, or all of them?",
             Screen::History => "Have I printed this delta already?",
             Screen::Devices => "Print and scan over the network",
             Screen::Calibrate => "Measure a printer, once, for exactness",
             Screen::Doctor => "What works here, and what is missing",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Every screen has to be in `ALL`, because `ALL` is what the sidebar is
+    /// made from.
+    ///
+    /// Nothing else catches this. `key`, `name` and `summary` are exhaustive
+    /// matches, so a new variant will not compile until all three know about
+    /// it — but `ALL` is a hand-written list, and a screen left out of it is a
+    /// screen nobody can reach. It compiles, it passes, and the feature is
+    /// simply not there.
+    ///
+    /// So the arms are counted out of this file's own source. Exotic, but the
+    /// alternative is a number in a test that has to be remembered, and a
+    /// number that has to be remembered is a number that will not be.
+    #[test]
+    fn every_screen_is_one_the_sidebar_offers() {
+        let source = include_str!("mod.rs");
+        // The arms of `key`, which is the first of the three matches and the
+        // one that has one line per screen.
+        let key_body = source
+            .split("pub fn key(&self)")
+            .nth(1)
+            .expect("key() should be in this file");
+        let arms: BTreeSet<&str> = key_body
+            .lines()
+            .take_while(|line| !line.contains("from_key"))
+            .filter_map(|line| line.trim().strip_prefix("Screen::"))
+            .filter_map(|rest| rest.split_once(" =>"))
+            .map(|(name, _)| name)
+            .collect();
+
+        assert!(
+            arms.len() > 10,
+            "only {} arms were found, so this test is reading the file wrongly",
+            arms.len()
+        );
+        assert_eq!(
+            Screen::ALL.len(),
+            arms.len(),
+            "there are {} screens and {} in the sidebar — one has been added to \
+             the enum and left out of ALL, which makes it unreachable",
+            arms.len(),
+            Screen::ALL.len()
+        );
+    }
+
+    /// Two screens with the same key would make the remembered screen
+    /// ambiguous — somebody would close the window on one and open it on
+    /// another.
+    #[test]
+    fn every_screen_is_told_apart_by_its_key_and_says_something_of_itself() {
+        let mut keys = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        for screen in Screen::ALL {
+            assert!(
+                keys.insert(screen.key()),
+                "'{}' is the key of more than one screen",
+                screen.key()
+            );
+            assert!(
+                names.insert(screen.name()),
+                "'{}' is the name of more than one screen",
+                screen.name()
+            );
+            assert!(!screen.lede().is_empty(), "{} has no lede", screen.key());
+            // A key goes in a settings file and comes back out, so it has to
+            // be something a person can read and a file can hold.
+            assert!(
+                screen
+                    .key()
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '-'),
+                "'{}' is not a key anybody would want in a settings file",
+                screen.key()
+            );
+        }
+    }
+
+    /// The screen somebody was last on is remembered by key, so every key has
+    /// to find its way home.
+    #[test]
+    fn the_screen_somebody_was_last_on_is_found_again() {
+        for screen in Screen::ALL {
+            assert_eq!(
+                Screen::from_key(screen.key()),
+                Some(*screen),
+                "{} does not come back from its own key",
+                screen.key()
+            );
+        }
+        assert_eq!(Screen::from_key("no-such-screen"), None);
+        assert_eq!(Screen::from_key(""), None);
     }
 }

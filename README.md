@@ -252,20 +252,38 @@ Down the side, in the order somebody meets them:
 | **Draw on a page** | Lines, boxes and circles, in any colour |
 | **Read a scan** | Turn a scan into a Word document |
 | **Where there is room** | Ask the form where you can write, in millimetres |
+| **Fix a mistake** | Cover the wrong words and set the right ones |
 | **See it before you print** | The sheet and the delta together, on screen |
 | **Merge deltas** | Several onto one, so the sheet goes through once |
+| **Join files** | Several one after another, into one document |
+| **One each, from a list** | Two hundred certificates, two hundred names |
 | **Sheet of labels** | Addresses and files, one per label, from a list |
 | **Saved jobs** | The same stamp on today's document, in two clicks |
-| **Check a sheet** | Did it come out of the printer right? |
+| **Check before printing** | Is this the sheet the delta was made for? |
+| **Check a sheet or a run** | Did it come out right — one sheet, or all of them? |
 | **What was added** | Have I printed this delta already? |
 | **Printers and scanners** | Print and scan over the network |
 | **Calibration** | Measure a printer, once, for exactness |
 | **This machine** | What works here, and what is missing |
 
+Everything the command line can do that involves a file and a printer has a
+screen. The two share the same library underneath — a run of two hundred sheets
+is checked by the same code whichever way you ask — so they cannot drift apart
+on the answers, only on the words around them.
+
 The labels screen opens on the commonest address sheet in the world — three
 across, eight down, 63.5 × 33.9 mm — so somebody holding that box can press the
-button without typing a number. And the first thing it asks is how many labels
-have already been peeled off the sheet in the drawer.
+button without typing a number. Or pick the code off the box from the dropdown,
+which fills the measurements in below rather than hiding them: they stay visible
+and stay editable, which is the whole reason a code is safe to offer. And the
+first thing the screen asks is how many labels have already been peeled off the
+sheet in the drawer.
+
+**One each, from a list** reads the spreadsheet as soon as you choose it and puts
+its column headings on the screen as buttons, so `{name}` is a click rather than
+a guess — and a placement naming a column the list has not got is caught while
+the screen is still on the screen, not after two hundred sheets have printed
+saying `{name}`.
 
 **Where there is room** is the one that matters most if you have never measured
 anything in millimetres. Give it the form — as a PDF, or a photograph of the
