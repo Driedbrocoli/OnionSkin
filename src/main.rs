@@ -6903,6 +6903,28 @@ fn cmd_back(args: BackArgs) -> Result<ExitCode, String> {
         }
     }
 
+    // Where the words really land. This delta is written straight rather than
+    // diffed, so nothing upstream has looked at it — and words off the side of
+    // the paper print as a blank sheet and a wasted pass through the feeder.
+    let margin_mm = onionskin::settings::load()
+        .defaults
+        .margin_mm
+        .unwrap_or(onionskin::safety::DEFAULT_MARGIN_MM);
+    let mut checks = Vec::new();
+    for (index, page) in lines.iter().enumerate() {
+        for mut check in onionskin::safety::check_placements(sizes[index], page, margin_mm) {
+            check.page = Some(index + 1);
+            checks.push(check);
+        }
+    }
+    onionskin::safety::sort_checks(&mut checks);
+    if let Some(stop) = checks
+        .iter()
+        .find(|check| check.severity == onionskin::safety::Severity::Blocker)
+    {
+        return Err(stop.format());
+    }
+
     let placed: usize =
         lines.iter().map(Vec::len).sum::<usize>() + images.iter().map(Vec::len).sum::<usize>();
     if placed == 0 {
@@ -6928,6 +6950,13 @@ fn cmd_back(args: BackArgs) -> Result<ExitCode, String> {
     if !rehearsal.pretending() {
         println!("{}", output.display());
     }
+    for check in &checks {
+        println!("{}", check.format());
+    }
+    if !checks.is_empty() {
+        println!();
+    }
+
     let done = wanted.len() - left_out.len();
     println!(
         "  {placed} addition(s) on the back of {done} sheet(s), on a {delta_pages}-page delta."

@@ -766,6 +766,119 @@ fn trim_number(value: f64) -> String {
 #[cfg(test)]
 mod tests;
 
+// ---------------------------------------------------------------------------
+// Words placed by millimetre, on a delta written without a diff
+// ---------------------------------------------------------------------------
+
+/// Whether words placed by hand land on the paper at all.
+///
+/// Most of this program works out what is new by comparing two renderings, and
+/// [`check_margins`] looks at that comparison. A few commands do not: `back`
+/// writes its delta straight, because there is nothing on a blank reverse to
+/// compare against. Those had no check at all, and it showed —
+/// `back --at '300,400:x'` on A4 wrote a perfectly good delta with the words a
+/// clear nine centimetres off the side of the sheet, said "3 additions", and
+/// left somebody to find out at the printer.
+///
+/// Off the paper is refused rather than warned about, because there is no
+/// version of that which is what somebody meant. Close to an edge is a warning,
+/// because there is.
+pub fn check_placements(
+    page: PageSize,
+    lines: &[crate::pdf::PlacedLine],
+    margin_mm: f64,
+) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for line in lines {
+        let (left, top, right, bottom) = extent_of(page, line);
+        if right <= 0.0 || bottom <= 0.0 || left >= page.width_mm || top >= page.height_mm {
+            checks.push(
+                Check::new(
+                    Severity::Blocker,
+                    "off-the-paper",
+                    format!(
+                        "'{}' is placed at {:.0},{:.0} mm, which is off the {} sheet altogether.",
+                        line.text,
+                        line.x_mm,
+                        line.y_mm,
+                        page.describe()
+                    ),
+                )
+                .with_detail(
+                    "Nothing of it would print. Measure from the top-left corner of the paper."
+                        .to_string(),
+                ),
+            );
+            continue;
+        }
+        if left < margin_mm
+            || top < margin_mm
+            || right > page.width_mm - margin_mm
+            || bottom > page.height_mm - margin_mm
+        {
+            checks.push(
+                Check::new(
+                    Severity::Warning,
+                    "near-the-edge",
+                    format!(
+                        "'{}' comes within {margin_mm:.0} mm of the edge of the paper.",
+                        line.text
+                    ),
+                )
+                .with_detail(
+                    "Most printers cannot put ink right to the edge, so part of it may be cut off."
+                        .to_string(),
+                ),
+            );
+        }
+    }
+    checks
+}
+
+/// The box a line of type occupies, turned if it is turned.
+///
+/// Only the four corners of the upright box, moved: enough to tell whether a
+/// line is on the paper, which is the question being asked. A tighter box would
+/// need the font's own outlines and would not change any answer here.
+fn extent_of(page: PageSize, line: &crate::pdf::PlacedLine) -> (f64, f64, f64, f64) {
+    let width = match line.font {
+        crate::pdf::LineFont::Builtin(font) => {
+            crate::pdf::builtin_width_mm(font, &line.text, line.size_pt)
+        }
+        // An embedded font's widths are not to hand here. Its own em is a fair
+        // stand-in, and erring wide is the safe way to err for a check about
+        // running off an edge.
+        crate::pdf::LineFont::Embedded => {
+            line.text.chars().count() as f64 * line.size_pt * 25.4 / 72.0 * 0.6
+        }
+    };
+    let cap = line.size_pt * 0.7 * 25.4 / 72.0;
+    let radians = line.rotation_deg.to_radians();
+    let (along, up) = (
+        (radians.cos(), radians.sin()),
+        (radians.sin(), -radians.cos()),
+    );
+    let corner = |a: f64, u: f64| {
+        (
+            line.x_mm + along.0 * a + up.0 * u,
+            line.y_mm + along.1 * a + up.1 * u,
+        )
+    };
+    let corners = [
+        corner(0.0, 0.0),
+        corner(width, 0.0),
+        corner(width, cap),
+        corner(0.0, cap),
+    ];
+    let _ = page;
+    (
+        corners.iter().map(|c| c.0).fold(f64::MAX, f64::min),
+        corners.iter().map(|c| c.1).fold(f64::MAX, f64::min),
+        corners.iter().map(|c| c.0).fold(f64::MIN, f64::max),
+        corners.iter().map(|c| c.1).fold(f64::MIN, f64::max),
+    )
+}
+
 #[cfg(test)]
 mod legibility_tests {
     use super::*;

@@ -467,3 +467,77 @@ fn a_sheet_whose_back_is_not_a_page_is_named_and_not_counted() {
         "page three was marked"
     );
 }
+
+/// Words placed off the paper are refused before anything is written.
+///
+/// This delta is written straight rather than diffed, so none of the checks
+/// that guard the ordinary path had ever looked at it: `--at '300,400:x'` on A4
+/// wrote a perfectly good delta with the words a clear nine centimetres off the
+/// side of the sheet, reported three additions, and left somebody to find out at
+/// the printer.
+#[test]
+fn words_off_the_paper_are_refused_rather_than_printed_onto_nothing() {
+    let work = Work::new();
+    let printed = work.a_document(1);
+    let delta = work.at("off.pdf");
+
+    let (ok, said) = run(
+        &work.home,
+        &[
+            "back",
+            &at(&printed),
+            "--at",
+            "300,400:off the page",
+            "-o",
+            &at(&delta),
+        ],
+    );
+    assert!(!ok, "it wrote a delta with the words off the sheet: {said}");
+    assert!(said.contains("off the"), "{said}");
+    assert!(said.contains("300,400"), "it did not say where: {said}");
+    assert!(!delta.exists(), "it wrote the delta anyway");
+}
+
+/// Words near an edge are a warning rather than a refusal, because there are
+/// good reasons to put something there and no way to know from here.
+#[test]
+fn words_near_the_edge_are_a_warning_and_still_written() {
+    let work = Work::new();
+    let printed = work.a_document(1);
+    let delta = work.at("near.pdf");
+
+    let (ok, said) = run(
+        &work.home,
+        &[
+            "back",
+            &at(&printed),
+            "--at",
+            "2,40:close",
+            "-o",
+            &at(&delta),
+        ],
+    );
+    assert!(ok, "{said}");
+    assert!(said.contains("WARNING"), "{said}");
+    assert!(said.contains("edge of the paper"), "{said}");
+    assert!(delta.exists(), "a warning stopped the delta being written");
+
+    // And an ordinary placement says nothing about edges at all.
+    let fine = work.at("fine.pdf");
+    let (ok, said) = run(
+        &work.home,
+        &[
+            "back",
+            &at(&printed),
+            "--at",
+            "20,40:fine",
+            "-o",
+            &at(&fine),
+        ],
+    );
+    assert!(ok, "{said}");
+    assert!(
+        !said.contains("WARNING"),
+        "an ordinary placement was warned about: {said}"
+    );
+}
