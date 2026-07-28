@@ -311,3 +311,48 @@ fn a_file_that_is_not_there_is_caught_before_anything_is_sent() {
         sent.said()
     );
 }
+
+/// `doctor` is the report somebody reads to find out what is set up here, so a
+/// printer that has been set has to be on it.
+///
+/// Left off, the report shows a made-up example address beside a real one
+/// sitting in the settings, and is less use than `config show` — while looking
+/// like the place to find out.
+#[test]
+fn doctor_names_the_printer_that_was_set_and_says_how_to_set_one_when_none_is() {
+    let home = tempfile::tempdir().unwrap();
+
+    // Nothing set: the example, and how to stop needing it.
+    let bare = run(home.path(), &["doctor"]);
+    let said = bare.said();
+    assert!(said.contains("to any network printer"), "{said}");
+    assert!(said.contains("config set printer"), "{said}");
+
+    let set = run(
+        home.path(),
+        &["config", "set", "printer", "ipp://office/laser"],
+    );
+    assert!(set.ok, "{}", set.said());
+    let set = run(
+        home.path(),
+        &["config", "set", "scanner", "http://office/eSCL"],
+    );
+    assert!(set.ok, "{}", set.said());
+
+    let after = run(home.path(), &["doctor"]);
+    let said = after.said();
+    assert!(
+        said.contains("ipp://office/laser"),
+        "the printer that was set is not on the report: {said}"
+    );
+    assert!(
+        said.contains("http://office/eSCL"),
+        "the scanner that was set is not on the report: {said}"
+    );
+    // And the example that is no longer needed is gone, rather than sitting
+    // beside the real one saying two different things.
+    assert!(
+        !said.contains("ipp://printer.local/ipp/print"),
+        "the made-up address is still there beside the real one: {said}"
+    );
+}

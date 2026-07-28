@@ -48,6 +48,36 @@ pub struct Room<'a> {
     pub dropped: &'a mut Vec<std::path::PathBuf>,
 }
 
+/// A button that fills in the delta written most recently.
+///
+/// The counterpart of `--delta last` on the command line, and it exists for the
+/// same reason: a delta that was not given a name of its own goes into
+/// Onionskin's own folder under one nobody chose, and finding it again means
+/// going and looking for a file whose name you never saw. The program already
+/// knows which one it was.
+///
+/// Nothing is shown when there is no delta to offer — a button that is always
+/// there and usually does nothing is a button people stop reading.
+pub fn last_delta_button(ui: &mut egui::Ui, into: &mut Option<std::path::PathBuf>) {
+    let Some(last) = onionskin::history::last_delta() else {
+        return;
+    };
+    let named = last
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        if ui
+            .small_button("Use the one just written")
+            .on_hover_text(last.display().to_string())
+            .clicked()
+        {
+            *into = Some(last.clone());
+        }
+        ui.label(egui::RichText::new(named).weak().monospace());
+    });
+}
+
 /// A name beside another file, which is where somebody looks for what came out.
 ///
 /// Here rather than in each screen because four of them want it and three had
@@ -316,5 +346,35 @@ mod tests {
         }
         assert_eq!(Screen::from_key("no-such-screen"), None);
         assert_eq!(Screen::from_key(""), None);
+    }
+}
+
+#[cfg(test)]
+mod last_delta_tests {
+    /// The window has to offer the delta just written wherever the command
+    /// line's `--delta last` would.
+    ///
+    /// The three screens that take a delta are proof, verify and fits. A
+    /// fourth added later that asks for one and does not offer this is a
+    /// screen where somebody has to go and find a file whose name they never
+    /// saw — so the source is checked rather than a list kept by hand.
+    #[test]
+    fn every_screen_that_asks_for_a_delta_offers_the_one_just_written() {
+        let screens = [
+            ("proof", include_str!("proof.rs")),
+            ("verify", include_str!("verify.rs")),
+            ("fits", include_str!("fits.rs")),
+        ];
+        for (name, source) in screens {
+            assert!(
+                source.contains("&mut state.delta"),
+                "{name} no longer asks for a delta; this test needs revisiting"
+            );
+            assert!(
+                source.contains("last_delta_button"),
+                "the {name} screen asks for a delta and does not offer the one \
+                 just written"
+            );
+        }
     }
 }

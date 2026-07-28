@@ -6956,10 +6956,27 @@ fn cmd_doctor() -> Result<ExitCode, String> {
     }
 
     // Printing straight to a printer, which also needs nothing installed.
-    println!(
-        "  Printing        ok, to any network printer\n      onionskin send \
-         delta.pdf --printer ipp://printer.local/ipp/print"
-    );
+    //
+    // A printer that has been set is named, because this is the report
+    // somebody reads to find out what is set up here — and a made-up address
+    // in the example, beside a real one in the settings, is this report being
+    // less use than `config show`.
+    let saved = onionskin::settings::load().defaults;
+    match &saved.printer {
+        Some(printer) => println!(
+            "  Printing        ok — {printer}\n      onionskin send delta.pdf\
+             \n    Set here, so no --printer is needed. A flag still beats it."
+        ),
+        None => println!(
+            "  Printing        ok, to any network printer\n      onionskin send \
+             delta.pdf --printer ipp://printer.local/ipp/print\n    \
+             `onionskin config set printer <address>` and it need not be typed \
+             again."
+        ),
+    }
+    if let Some(scanner) = &saved.scanner {
+        println!("  Scanner set     {scanner}\n      onionskin fetch -o scan.png");
+    }
 
     // Fonts: the built-ins always work; a system font is needed only for other
     // alphabets.

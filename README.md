@@ -210,6 +210,11 @@ keeps what is on screen — so setting it in either program sets it for both.
 There is one answer to "which printer", not one per program; two of them
 disagreeing is how a delta goes to the wrong printer.
 
+`onionskin doctor` names it too, once it is set, and stops showing the made-up
+example address — that report is where somebody looks to find out what is set
+up on this machine, and an invented address beside a real one in the settings
+makes it less use than the settings themselves.
+
 `--delta last` means the delta written most recently, which saves going to look
 for a file that was put in Onionskin's own folder under a name nobody chose:
 
@@ -217,6 +222,11 @@ for a file that was put in Onionskin's own folder under a name nobody chose:
 onionskin proof sheet.pdf --delta last
 onionskin verify scan.png --delta last
 ```
+
+The window offers the same thing: every screen that asks for a delta has a
+**Use the one just written** button beside the picker, with the file's name
+next to it so you can see which one that is. It is not shown when there is
+nothing to offer.
 
 `onionskin uninstall` removes exactly what was put there and says what it
 removed.

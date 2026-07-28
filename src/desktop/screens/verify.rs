@@ -72,6 +72,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         &["pdf"],
         room.dropped,
     );
+    super::last_delta_button(room.ui, &mut state.delta);
     widgets::file_row(
         room.ui,
         room.picker,
