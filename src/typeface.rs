@@ -264,6 +264,21 @@ pub fn read_and_match(
 /// own edges are. Splitting the finding off from the reading is what lets a
 /// scanned PDF — which is what every multifunction printer produces by default
 /// — go through the same matcher as a photograph of the same sheet.
+/// Whether there is a face on this machine to read a page against at all.
+///
+/// Worth asking separately, because [`read_and_match_in`] answers `None` to two
+/// quite different questions — "there is no font here to read with" and "there
+/// is nothing on this page to read" — and telling somebody to install DejaVu
+/// when they have handed over a blank sheet sends them a long way in the wrong
+/// direction.
+pub fn a_face_to_read_with() -> bool {
+    READING_FACES.iter().any(|(names, _)| {
+        names
+            .iter()
+            .any(|name| crate::font::find_font(name).is_some())
+    })
+}
+
 pub fn read_and_match_in(
     gray: &image::GrayImage,
     registration: &crate::scan::ScanRegistration,

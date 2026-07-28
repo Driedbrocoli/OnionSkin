@@ -1276,3 +1276,85 @@ fn the_page_offers_the_back_and_asks_which_way_up() {
         assert!(crate::duplex::Feed::parse(feed).is_some());
     }
 }
+
+/// A stack in, a spreadsheet out, through the browser.
+#[test]
+fn the_browser_reads_a_stack_back_into_a_spreadsheet() {
+    let request = posted(&[
+        ("scan", Some("forms.pdf"), &a_page("Name: J. Bezzina")),
+        ("fields", None, b"Name"),
+    ]);
+    let (bytes, name) = harvest_a_stack(&request).expect("it should harvest");
+    assert_eq!(name, "harvested.csv");
+
+    let csv = String::from_utf8(bytes).expect("a spreadsheet is text");
+    let mut lines = csv.lines();
+    assert_eq!(lines.next(), Some("Sheet,Name"));
+    let row = lines.next().expect("a row per sheet");
+    assert!(row.starts_with("1,"), "{csv}");
+    assert!(row.contains("Bezzina"), "{csv}");
+}
+
+/// A column of figures is asked for the way the form says to ask, and comes
+/// back as figures rather than as rings and letters.
+#[test]
+fn a_column_of_figures_comes_back_as_figures() {
+    let request = posted(&[
+        ("scan", Some("forms.pdf"), &a_page("Amount: 240.00")),
+        ("fields", None, b"Amount/number"),
+    ]);
+    let (bytes, _) = harvest_a_stack(&request).expect("it should harvest");
+    let csv = String::from_utf8(bytes).unwrap();
+    let value = csv
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .nth(1)
+        .unwrap()
+        .to_string();
+    assert!(
+        value.parse::<f64>().is_ok(),
+        "'{value}' is not a figure:\n{csv}"
+    );
+}
+
+/// No columns is a question with the answer in it.
+#[test]
+fn a_harvest_with_no_columns_says_what_to_type() {
+    let why = harvest_a_stack(&posted(&[("scan", Some("f.pdf"), &a_page("x"))])).unwrap_err();
+    assert!(why.contains("at least one column"), "{why}");
+    assert!(why.contains("/number"), "{why}");
+
+    let why = harvest_a_stack(&posted(&[("fields", None, b"Name")])).unwrap_err();
+    assert!(why.contains("Choose the scanned stack"), "{why}");
+}
+
+/// The page has to offer it, and has to say the thing that decides whether it
+/// is worth trying at all.
+#[test]
+fn the_page_offers_the_harvest_and_says_handwriting_is_not_read() {
+    assert!(
+        PAGE_BODY.contains("action=\"/harvest\""),
+        "the page has no harvest form"
+    );
+    assert!(
+        PAGE_BODY.contains("Handwriting is not read"),
+        "the page does not say handwriting is not read"
+    );
+    // And every spelling the form suggests is one the field parser understands.
+    for spec in [
+        "Amount/number",
+        "Address/below",
+        "Name=Full name of applicant",
+    ] {
+        assert!(
+            PAGE_BODY.contains(spec),
+            "the form does not mention '{spec}'"
+        );
+        assert!(
+            crate::harvest::Field::parse(spec).is_ok(),
+            "the form suggests '{spec}', which is not a field"
+        );
+    }
+}

@@ -646,10 +646,10 @@ struct BackArgs {
     document: PathBuf,
     /// Where the words go on the back, as you will look at it: 'X,Y:the words',
     /// in millimetres from the top-left.
-    #[arg(long = "at", value_name = "X,Y:TEXT")]
+    #[arg(long = "at", value_name = "X,Y:TEXT", allow_hyphen_values = true)]
     at: Vec<String>,
     /// A picture on the back: 'X,Y:file.png', or 'X,Y:WIDTHxHEIGHT:file.png'.
-    #[arg(long = "image", value_name = "X,Y:FILE")]
+    #[arg(long = "image", value_name = "X,Y:FILE", allow_hyphen_values = true)]
     image: Vec<String>,
     /// Which sheet, counted from 1. Without it, every sheet.
     #[arg(long, value_name = "N")]
@@ -6484,6 +6484,14 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
 /// white where the page is blank, and on black where it is not, which reads as
 /// black. Which is exactly what a watermark looks like.
 fn cmd_watermark(args: WatermarkArgs) -> Result<ExitCode, String> {
+    if let Some(size) = args.size {
+        if !size.is_finite() || size <= 0.0 {
+            return Err(format!(
+                "{size} is not a type size. Leave --size out and Onionskin \
+                 works out the one\n  that makes the word span the paper."
+            ));
+        }
+    }
     let font = onionskin::pdf::Font::parse(&args.font).ok_or_else(|| {
         format!(
             "'{}' is not a built-in font. Try `onionskin fonts`.",
@@ -6664,16 +6672,27 @@ fn cmd_harvest(args: HarvestArgs) -> Result<ExitCode, String> {
     }
     println!();
 
+    // Asked once, before any paper is read: without a face to read against,
+    // every sheet fails for the same reason and it is not the sheets' fault.
+    if !onionskin::typeface::a_face_to_read_with() {
+        return Err(
+            "There is no font on this machine to read the pages against, so \
+             Onionskin cannot find\n  the labels. Install a common face — \
+             DejaVu, Liberation — and try again."
+                .into(),
+        );
+    }
+
     let mut sheets = Vec::with_capacity(wanted);
     for page in 1..=wanted {
         let (gray, registration) = onionskin::recipe::draw_page(&args.scan, page)?;
+        // A sheet that reads as nothing is a blank page, or one fed in the
+        // wrong way round, or a photograph. It is one bad sheet in a stack and
+        // not a reason to throw away the other hundred and ninety-nine.
         let Some((text, _)) = onionskin::typeface::read_and_match_in(&gray, &registration) else {
-            return Err(
-                "There is no font on this machine to read the pages against, so \
-                 Onionskin cannot find\n  the labels. Install a common face — \
-                 DejaVu, Liberation — and try again."
-                    .into(),
-            );
+            println!("  sheet {page}: nothing on it could be read");
+            sheets.push(onionskin::harvest::Sheet::unreadable(page, fields.len()));
+            continue;
         };
         let values = onionskin::harvest::pick_from(&text, &fields);
         // Said as it goes, because two hundred sheets is minutes and a run that
@@ -6824,6 +6843,9 @@ fn cmd_back(args: BackArgs) -> Result<ExitCode, String> {
 
     let mut lines: Vec<Vec<onionskin::pdf::PlacedLine>> = vec![Vec::new(); delta_pages];
     let mut images: Vec<Vec<onionskin::pdf::PlacedImage>> = vec![Vec::new(); delta_pages];
+    // Sheets that were asked for and got nothing, so the count reported is the
+    // number of backs really written on rather than the number wanted.
+    let mut left_out = Vec::new();
     for sheet in &wanted {
         // A two-sided document has a page for the back and the printer does the
         // turning, so nothing here is turned. A stack going through again is
@@ -6836,10 +6858,11 @@ fn cmd_back(args: BackArgs) -> Result<ExitCode, String> {
             false => (*sheet, true),
         };
         if index > delta_pages {
-            // An odd last page of a two-sided document: its back is blank paper
-            // that never went through the printer, so there is nothing to add
-            // to. Said below rather than refused, because the other sheets are
-            // perfectly good.
+            // The last sheet of a document with an odd number of pages: its
+            // back is paper that never went through the printer, so there is no
+            // page of the delta that lands on it. Named below rather than
+            // refused, because every other sheet is perfectly good.
+            left_out.push(*sheet);
             continue;
         }
         let paper = sizes[index - 1];
@@ -6905,11 +6928,23 @@ fn cmd_back(args: BackArgs) -> Result<ExitCode, String> {
     if !rehearsal.pretending() {
         println!("{}", output.display());
     }
+    let done = wanted.len() - left_out.len();
     println!(
-        "  {placed} addition(s) on the back of {} sheet(s), on a {}-page delta.",
-        wanted.len(),
-        delta_pages
+        "  {placed} addition(s) on the back of {done} sheet(s), on a {delta_pages}-page delta."
     );
+    if !left_out.is_empty() {
+        println!(
+            "\nNothing went on the back of sheet {} — {} has {pages} page(s), an \
+             odd number,\n  so that sheet's back never went through the printer \
+             and is not a page of it.",
+            left_out
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            args.document.display()
+        );
+    }
 
     match args.two_sided {
         true => println!("\n{}", onionskin::duplex::PRINT_IT_THE_SAME_WAY),

@@ -421,3 +421,49 @@ fn a_rehearsal_writes_no_back() {
     assert!(said.contains("2 sheet(s)"), "{said}");
     assert!(!delta.exists(), "a rehearsal left a file behind");
 }
+
+/// A document with an odd number of pages has a last sheet whose back never
+/// went through the printer. That sheet is named, and not counted.
+///
+/// It used to be counted: "1 addition(s) on the back of 2 sheet(s)" off a
+/// three-page document, when only one back had anything on it and nothing said
+/// which. Somebody reading that has been told both backs are marked.
+#[test]
+fn a_sheet_whose_back_is_not_a_page_is_named_and_not_counted() {
+    let work = Work::new();
+    let printed = work.a_document(3);
+    let delta = work.at("odd.pdf");
+
+    let (ok, said) = run(
+        &work.home,
+        &[
+            "back",
+            &at(&printed),
+            "--two-sided",
+            "--at",
+            "20,250:Footer",
+            "-o",
+            &at(&delta),
+        ],
+    );
+    assert!(ok, "{said}");
+    assert!(
+        said.contains("on the back of 1 sheet(s)"),
+        "it counted a sheet that got nothing: {said}"
+    );
+    assert!(
+        said.contains("Nothing went on the back of sheet 2"),
+        "the sheet that got nothing was not named: {said}"
+    );
+
+    // And the delta really has one marked page, the back of sheet one.
+    assert!(ink_seen(&delta, 1, false).is_none(), "page one was marked");
+    assert!(
+        ink_seen(&delta, 2, false).is_some(),
+        "sheet one's back is blank"
+    );
+    assert!(
+        ink_seen(&delta, 3, false).is_none(),
+        "page three was marked"
+    );
+}

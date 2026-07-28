@@ -518,3 +518,97 @@ fn a_field_told_it_is_a_number_tries_harder_than_one_that_is_not() {
     let as_number = pick_in(&rows, &[Field::parse("Total/number").unwrap()]);
     assert_eq!(as_number[0], Value::Read("240.50".into()));
 }
+
+/// Asking for one of two fields on a line must not hand back both.
+///
+/// The stopping rule knew only about the labels that had been asked for, so
+/// `--field Name` alone, off a line that also carried `Date:`, came back with
+/// the whole rest of the line in it. Nobody reading that spreadsheet would see a
+/// bug — they would see a long name. A form marks its labels with a colon, and
+/// that is enough to stop at.
+#[test]
+fn a_field_nobody_asked_about_still_stops_the_one_before_it() {
+    let rows = a_form(&[("Name: J. Bezzina    Date: 27 July 2024", 20.0, 40.0)]);
+
+    // Only one of the two asked for.
+    let values = pick_in(&rows, &[Field::named("Name")]);
+    assert_eq!(read(&values), vec!["J. Bezzina"]);
+
+    // And the other way round, so it is not an accident of which came first.
+    let values = pick_in(&rows, &[Field::named("Date")]);
+    assert_eq!(read(&values), vec!["27 July 2024"]);
+
+    // Three on a line, asking for the middle one.
+    let three = a_form(&[("Ref: A-17 Date: 27 July Amount: 240.00", 20.0, 40.0)]);
+    assert_eq!(
+        read(&pick_in(&three, &[Field::named("Date")])),
+        vec!["27 July"]
+    );
+}
+
+/// The same, under a caption rather than beside it.
+#[test]
+fn a_caption_nobody_asked_about_stops_a_value_below_too() {
+    let rows = a_form(&[
+        ("Address", 20.0, 40.0),
+        ("14 Republic Street Telephone: 21234567", 20.0, 46.0),
+    ]);
+    let values = pick_in(
+        &rows,
+        &[Field {
+            name: "Address".into(),
+            label: "Address".into(),
+            put: Where::Below,
+            kind: Kind::Text,
+        }],
+    );
+    assert_eq!(read(&values), vec!["14 Republic Street"]);
+}
+
+/// A colon inside a value is not the end of it — only one at the end of a word
+/// marks a label.
+#[test]
+fn a_colon_in_the_middle_of_a_value_is_not_a_label() {
+    let rows = a_form(&[("Time: 14:30 to 17:00", 20.0, 40.0)]);
+    assert_eq!(
+        read(&pick_in(&rows, &[Field::named("Time")])),
+        vec!["14:30 to 17:00"]
+    );
+}
+
+/// A sheet nothing can be read off is still a sheet, and still a row.
+///
+/// It used to end the run: the reader answers `None` both when there is no font
+/// on the machine and when there is nothing on the page, so one blank sheet in a
+/// stack of two hundred stopped the job and blamed the fonts. Two hundred sheets
+/// with one blank in the middle must not lose the other hundred and ninety-nine.
+#[test]
+fn a_sheet_that_cannot_be_read_is_a_row_like_any_other() {
+    let sheet = Sheet::unreadable(7, 3);
+    assert_eq!(sheet.page, 7);
+    assert_eq!(sheet.values.len(), 3);
+    for value in &sheet.values {
+        assert_eq!(*value, Value::Unreadable);
+        assert!(!value.is_read());
+        assert_eq!(value.cell(), "");
+        assert!(value.why_not().unwrap().contains("could be read"));
+    }
+
+    // And it comes out of the spreadsheet as a row with its sheet number on it,
+    // so the paper it refers to can be found.
+    let harvest = Harvest {
+        fields: vec![Field::named("Name")],
+        sheets: vec![
+            Sheet {
+                page: 1,
+                values: vec![Value::Read("J. Bezzina".into())],
+            },
+            Sheet::unreadable(2, 1),
+        ],
+    };
+    let rows = harvest.rows();
+    assert_eq!(rows[2], vec!["2", ""]);
+    assert_eq!(harvest.read(), 1);
+    assert_eq!(harvest.cells(), 2);
+    assert!(harvest.gaps()[0].contains("sheet 2"));
+}

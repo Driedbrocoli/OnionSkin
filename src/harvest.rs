@@ -173,6 +173,13 @@ pub enum Value {
     /// correct than an empty cell to go and find on the paper. But it is not
     /// counted as read, so it appears in the list of things to check.
     NotANumber(String),
+    /// Nothing on this sheet could be read at all — a blank page, a sheet fed
+    /// in the wrong way round, a photograph.
+    ///
+    /// A sheet rather than a field, but recorded per field so the spreadsheet
+    /// still has a row for it. Two hundred sheets with one blank in the middle
+    /// should not lose the other hundred and ninety-nine.
+    Unreadable,
 }
 
 impl Value {
@@ -200,6 +207,7 @@ impl Value {
             Value::NoLabel => Some("the label is not on this sheet".into()),
             Value::Twice(n) => Some(format!("the label is on this sheet {n} times")),
             Value::NotANumber(text) => Some(format!("'{text}' is not a number")),
+            Value::Unreadable => Some("nothing on this sheet could be read".into()),
         }
     }
 }
@@ -210,6 +218,17 @@ pub struct Sheet {
     /// Which page of the scan, counted from 1.
     pub page: usize,
     pub values: Vec<Value>,
+}
+
+impl Sheet {
+    /// A sheet nothing could be read off, which is still a sheet and still a
+    /// row in the spreadsheet.
+    pub fn unreadable(page: usize, fields: usize) -> Sheet {
+        Sheet {
+            page,
+            values: vec![Value::Unreadable; fields],
+        }
+    }
 }
 
 /// The whole stack.
@@ -555,6 +574,23 @@ fn is_a_label(word: Rect, labels: &[Rect]) -> bool {
     })
 }
 
+/// Whether a word is a label for some *other* field — one nobody asked about.
+///
+/// Stopping only at the labels that were asked for is not enough, and the way it
+/// fails is the bad way. Ask for `Name` alone, off a line reading
+/// `Name: J. Bezzina    Date: 27 July 2024`, and there is nothing to stop at, so
+/// the name comes out as the whole rest of the line. Nobody looking at that
+/// spreadsheet would see a bug; they would see a long name.
+///
+/// A form marks its labels, and it nearly always marks them the same way: with a
+/// colon. So a word ending in one ends the value before it. It is a convention
+/// rather than a rule, and it can stop a value early — `Note: see overleaf:
+/// page 2` loses its tail — but stopping early leaves an obviously short cell,
+/// and running on leaves something that reads like data.
+fn ends_a_value(text: &str) -> bool {
+    matches!(text.trim_end().chars().last(), Some(':' | '：'))
+}
+
 /// The value on the same line: everything right of the label, stopping at the
 /// next label along.
 fn on_the_same_line(rows: &[Row], label: Rect, every_label: &[Rect]) -> String {
@@ -580,7 +616,7 @@ fn on_the_same_line(rows: &[Row], label: Rect, every_label: &[Rect]) -> String {
     // the date.
     let mut said = Vec::new();
     for (text, rect, _) in words {
-        if is_a_label(*rect, every_label) {
+        if is_a_label(*rect, every_label) || ends_a_value(text) {
             break;
         }
         said.push(text.clone());
@@ -624,6 +660,7 @@ fn on_the_line_below(rows: &[Row], label: Rect, every_label: &[Rect]) -> String 
     words
         .iter()
         .map(|(text, _, _)| text.as_str())
+        .take_while(|text| !ends_a_value(text))
         .collect::<Vec<_>>()
         .join(" ")
 }

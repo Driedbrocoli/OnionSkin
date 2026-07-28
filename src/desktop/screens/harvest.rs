@@ -224,6 +224,17 @@ fn harvest(state: &mut State, room: &mut Room) {
             return Outcome::refused(format!("{} has no pages on it.", scan.display()));
         }
 
+        // Asked once, before any paper is read: without a face to read against
+        // every sheet fails for the same reason, and it is not the sheets' fault.
+        if !onionskin::typeface::a_face_to_read_with() {
+            return Outcome::refused(
+                "There is no font on this machine to read the pages against, so \
+                 Onionskin cannot find the labels. Install a common face — \
+                 DejaVu, Liberation — and try again."
+                    .to_string(),
+            );
+        }
+
         let mut sheets = Vec::with_capacity(wanted);
         for page in 1..=wanted {
             report.saying(format!("Reading sheet {page} of {wanted}…"));
@@ -231,14 +242,12 @@ fn harvest(state: &mut State, room: &mut Room) {
                 Ok(both) => both,
                 Err(why) => return Outcome::refused(why),
             };
+            // One unreadable sheet in a stack is one bad sheet, not a reason to
+            // throw away the rest of the run.
             let Some((text, _)) = onionskin::typeface::read_and_match_in(&gray, &registration)
             else {
-                return Outcome::refused(
-                    "There is no font on this machine to read the pages against, \
-                     so Onionskin cannot find the labels. Install a common face \
-                     — DejaVu, Liberation — and try again."
-                        .to_string(),
-                );
+                sheets.push(onionskin::harvest::Sheet::unreadable(page, fields.len()));
+                continue;
             };
             sheets.push(onionskin::harvest::Sheet {
                 page,

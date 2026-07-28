@@ -98,7 +98,12 @@ pub fn across(
     let rotation_deg = angle_of(page);
 
     let size_pt = match size_pt {
-        Some(given) => given,
+        // A size somebody asked for is taken at their word — but a word set at
+        // nought points is no ink at all, and a delta of no ink is a sheet
+        // through the printer for nothing. Refused here as well as at the
+        // command line, so no caller can produce one.
+        Some(given) if given.is_finite() && given > 0.0 => given,
+        Some(_) => return None,
         None => biggest_that_fits(text, page, font)?,
     };
 

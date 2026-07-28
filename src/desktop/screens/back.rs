@@ -333,6 +333,9 @@ fn write_the_backs(state: &mut State, room: &mut Room) {
 
         report.saying("Placing the words…");
         let mut lines: Vec<Vec<onionskin::pdf::PlacedLine>> = vec![Vec::new(); delta_pages];
+        // Sheets asked for that got nothing, so what is reported is the number
+        // of backs really written on rather than the number wanted.
+        let mut left_out = Vec::new();
         for sheet in &wanted {
             // A two-sided document has a page for the back and the printer does
             // the turning; a stack going through again is turned by hand.
@@ -344,6 +347,7 @@ fn write_the_backs(state: &mut State, room: &mut Room) {
                 false => (*sheet, feed),
             };
             if index > delta_pages {
+                left_out.push(*sheet);
                 continue;
             }
             let paper = sizes[index - 1];
@@ -387,10 +391,24 @@ fn write_the_backs(state: &mut State, room: &mut Room) {
                 format!("Placed for a feed of '{}': {}", feed.key(), feed.describe()),
             ],
         };
+        let mut notes = notes;
+        if !left_out.is_empty() {
+            notes.push(format!(
+                "Nothing went on the back of sheet {} — {} has {pages} page(s), \
+                 an odd number, so that sheet's back never went through the \
+                 printer and is not a page of it.",
+                left_out
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                document.display()
+            ));
+        }
         Outcome::Done {
             message: format!(
                 "{placed} addition(s) on the back of {} sheet(s).",
-                wanted.len()
+                wanted.len() - left_out.len()
             ),
             wrote: vec![output],
             notes,

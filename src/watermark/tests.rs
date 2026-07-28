@@ -241,3 +241,20 @@ fn it_says_what_it_will_do() {
     assert!(said.contains("pt"), "{said}");
     assert!(said.contains("grey"), "{said}");
 }
+
+/// A size nothing could be set at is refused rather than written.
+///
+/// `--size 0` used to write a delta with a nought-point word on it: a sheet
+/// through the printer for no ink, and a report saying "at 0 pt" as though that
+/// were a thing.
+#[test]
+fn a_size_that_is_not_a_size_is_refused() {
+    for size in [0.0, -12.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            across("DRAFT", A4, Font::Helvetica, Some(size), None).is_none(),
+            "{size} was accepted as a type size"
+        );
+    }
+    // And a real one still is.
+    assert!(across("DRAFT", A4, Font::Helvetica, Some(48.0), None).is_some());
+}

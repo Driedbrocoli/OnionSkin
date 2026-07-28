@@ -338,3 +338,61 @@ fn a_rehearsal_writes_no_spreadsheet() {
     );
     assert!(!out.exists(), "a rehearsal left a file behind");
 }
+
+/// One unreadable sheet in a stack does not lose the rest of the run.
+///
+/// The reader answers "nothing" both when there is no font on the machine and
+/// when there is nothing on the page. Harvest used to take the second for the
+/// first, stop the run and tell somebody to install DejaVu — so a stack with one
+/// blank sheet in it produced no spreadsheet at all, and the wrong reason.
+#[test]
+fn a_blank_sheet_in_the_stack_does_not_lose_the_others() {
+    let work = Work::new();
+    let filled = work.a_stack_of_filled_forms(
+        "Name,Date,Amount\n\
+         J. Bezzina,27 July 2024,240.00\n\
+         A. Borg,28 July 2024,95.50\n",
+    );
+
+    // A blank sheet, joined onto the end of the stack.
+    let blank_document = work.at("blank.osk");
+    let blank = work.at("blank.pdf");
+    let mixed = work.at("mixed.pdf");
+    for args in [
+        vec!["new", &at(&blank_document), "--page", "a4"],
+        vec!["print", &at(&blank_document), "-o", &at(&blank)],
+        vec!["join", &at(&filled), &at(&blank), "-o", &at(&mixed)],
+    ] {
+        let (ok, said) = run(&work.home, &args);
+        assert!(ok, "{said}");
+    }
+
+    let (ok, said) = run(
+        &work.home,
+        &["harvest", &at(&mixed), "--field", "Name", "--stdout"],
+    );
+    assert!(ok, "the run stopped at the blank sheet: {said}");
+
+    let rows = spreadsheet_in(&said);
+    assert_eq!(
+        rows.len(),
+        4,
+        "a row per sheet, blank one included: {rows:?}"
+    );
+    assert!(rows[1][1].contains("Bezzina"), "{said}");
+    assert!(rows[2][1].contains("Borg"), "{said}");
+    assert_eq!(
+        rows[3][1], "",
+        "the blank sheet came back with something on it"
+    );
+
+    // And it is said out loud rather than left as an empty cell.
+    assert!(
+        said.contains("sheet 3") && said.contains("could be read"),
+        "the blank sheet was not named: {said}"
+    );
+    assert!(
+        !said.contains("Install a common face"),
+        "a blank sheet was blamed on the fonts: {said}"
+    );
+}

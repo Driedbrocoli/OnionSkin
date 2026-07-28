@@ -161,6 +161,15 @@ fn handle(mut stream: TcpStream) {
                 message.as_bytes(),
             ),
         },
+        ("POST", "/harvest") => match harvest_a_stack(&request) {
+            Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
+            Err(message) => respond(
+                &mut stream,
+                422,
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            ),
+        },
         ("POST", "/back") => match the_back_of_the_sheet(&request) {
             Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
             Err(message) => respond(
@@ -599,6 +608,79 @@ fn join_files(request: &Request) -> Result<(Vec<u8>, String), String> {
     let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
     let _ = joined;
     Ok((bytes, "joined.pdf".to_string()))
+}
+
+/// A stack of filled-in forms, read back into a spreadsheet.
+///
+/// The reverse of everything else on this page: paper in, data out. It belongs
+/// here for the same reason the join does — the people who reach a browser
+/// rather than the window are the ones on a server, and "these two hundred forms
+/// came back, get them into a spreadsheet" is a request that turns up there.
+fn harvest_a_stack(request: &Request) -> Result<(Vec<u8>, String), String> {
+    let parts = parse_multipart(&request.content_type, &request.body)?;
+    let field = |name: &str| parts.iter().find(|p| p.name == name);
+
+    let Some(scan) = field("scan").filter(|p| !p.data.is_empty()) else {
+        return Err("Choose the scanned stack: one PDF with a page per sheet.".into());
+    };
+    // One field per line, which is how somebody types a list into a form.
+    let fields: Vec<crate::harvest::Field> = field("fields")
+        .map(|p| p.text())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(crate::harvest::Field::parse)
+        .collect::<Result<_, _>>()?;
+    if fields.is_empty() {
+        return Err(
+            "Name at least one column. A column is the label printed beside it \
+             on the form — one to a line, and `Amount/number` for a column of \
+             figures."
+                .into(),
+        );
+    }
+
+    let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
+    let path = workspace.path.join(safe_name(
+        scan.filename.as_deref().unwrap_or("scan.pdf"),
+        "scan.pdf",
+    ));
+    std::fs::write(&path, &scan.data).map_err(|e| e.to_string())?;
+
+    let pages = crate::recipe::pages_in(&path)?;
+    let wanted = field("first")
+        .map(|p| p.text())
+        .and_then(|t| t.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(pages)
+        .min(pages);
+
+    if !crate::typeface::a_face_to_read_with() {
+        return Err(
+            "There is no font on this machine to read the pages against, so \
+             Onionskin cannot find the labels. Install a common face — DejaVu, \
+             Liberation — and try again."
+                .into(),
+        );
+    }
+
+    let mut sheets = Vec::with_capacity(wanted);
+    for page in 1..=wanted {
+        let (gray, registration) = crate::recipe::draw_page(&path, page)?;
+        // One unreadable sheet is one bad sheet, not a reason to lose the run.
+        let Some((text, _)) = crate::typeface::read_and_match_in(&gray, &registration) else {
+            sheets.push(crate::harvest::Sheet::unreadable(page, fields.len()));
+            continue;
+        };
+        sheets.push(crate::harvest::Sheet {
+            page,
+            values: crate::harvest::pick_from(&text, &fields),
+        });
+    }
+
+    let harvest = crate::harvest::Harvest { fields, sheets };
+    Ok((harvest.csv().into_bytes(), "harvested.csv".to_string()))
 }
 
 /// Words on the blank back of a stack that has already been printed.
@@ -1277,6 +1359,45 @@ const PAGE_BODY: &str = r#"
   stack in that order is a stack in the wrong order. Rename them
   <code>page-01</code>, <code>page-02</code>, <code>page-10</code> and it comes
   out right by itself.
+</p>
+
+<h2>Filled-in forms, back into a spreadsheet</h2>
+<p>
+  The other direction. The sheets came back filled in, and this reads them
+  instead of somebody typing them. A column is named after the label printed
+  beside it on the form, and the value is whatever follows that label — stopping
+  where the next label starts, which is what keeps two fields on one line from
+  running into each other.
+</p>
+
+<form method="post" action="/harvest" enctype="multipart/form-data">
+  <fieldset>
+    <legend>The stack</legend>
+
+    <label for="hvscan">The scanned stack
+      <span class="hint">— one PDF with a page per sheet.</span></label>
+    <input type="file" id="hvscan" name="scan"
+      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+
+    <label for="fields">The columns, one to a line
+      <span class="hint">— <code>Amount/number</code> for a column of figures,
+      <code>Address/below</code> where the value sits under its caption, and
+      <code>Name=Full name of applicant</code> to give a long label a short
+      heading.</span></label>
+    <textarea id="fields" name="fields" rows="5"
+      placeholder="Name&#10;Date&#10;Amount/number" required></textarea>
+
+    <label for="first">Read only the first few sheets
+      <span class="hint">— leave blank for all of them.</span></label>
+    <input type="number" id="first" name="first" min="1" max="9999">
+  </fieldset>
+
+  <button type="submit">Read the stack</button>
+</form>
+<p class="hint">
+  Handwriting is not read. Onionskin matches printed letter shapes against the
+  fonts on this machine, and a signature has nothing to match — so a hand-filled
+  form comes back mostly empty, and that is the honest answer rather than a guess.
 </p>
 
 <h2>The back of the sheet</h2>
