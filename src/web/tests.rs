@@ -983,3 +983,83 @@ fn the_page_offers_the_join_and_says_what_it_does_not_do() {
         "the command line is not mentioned"
     );
 }
+
+/// The word really goes on, and it goes on grey.
+///
+/// The whole design of the watermark rests on the toner being light enough to
+/// read the page through, and a browser that quietly sent full black would
+/// destroy every sheet it was pointed at.
+#[test]
+fn the_browser_stamps_a_word_across_the_sheet_in_grey() {
+    let request = posted(&[
+        ("sheet", Some("report.pdf"), &a_page("Quarterly report")),
+        ("text", None, b"DRAFT"),
+    ]);
+    let (bytes, name) = watermark_sheet(&request).expect("it should stamp");
+    assert_eq!(name, "watermark.pdf");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mark.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let engine = crate::render::engine().expect("a renderer");
+    let doc = engine.open(&path).expect("the delta should open");
+    let drawn = doc.render_gray(0, 100.0).expect("it should draw");
+    let ink: Vec<u8> = drawn
+        .gray
+        .iter()
+        .copied()
+        .filter(|level| *level < 250)
+        .collect();
+    assert!(!ink.is_empty(), "the delta came out blank");
+    assert!(
+        ink.iter().copied().min().unwrap_or(255) > 150,
+        "the browser stamped something nearly black, which would bury the page"
+    );
+}
+
+/// A grey typed as a percentage is taken as one. The form offers 0–100 because
+/// that is how people say it, and 0.75 is what the placement wants.
+#[test]
+fn a_grey_typed_as_a_percentage_is_understood() {
+    for (typed, darker) in [("20", true), ("0.2", true), ("75", false)] {
+        let request = posted(&[
+            ("sheet", Some("report.pdf"), &a_page("Quarterly report")),
+            ("text", None, b"VOID"),
+            ("grey", None, typed.as_bytes()),
+        ]);
+        let (bytes, _) = watermark_sheet(&request).expect("it should stamp");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mark.pdf");
+        std::fs::write(&path, &bytes).unwrap();
+        let engine = crate::render::engine().expect("a renderer");
+        let doc = engine.open(&path).expect("it should open");
+        let drawn = doc.render_gray(0, 100.0).expect("it should draw");
+        let darkest = drawn.gray.iter().copied().min().unwrap_or(255);
+        match darker {
+            true => assert!(darkest < 100, "'{typed}' came out at {darkest}"),
+            false => assert!(darkest > 150, "'{typed}' came out at {darkest}"),
+        }
+    }
+}
+
+/// No sheet is a question, not a crash.
+#[test]
+fn stamping_nothing_asks_for_the_sheet() {
+    let why = watermark_sheet(&posted(&[("text", None, b"DRAFT")])).unwrap_err();
+    assert!(why.contains("printed sheet"), "{why}");
+}
+
+/// The page has to offer it, and has to say the one thing about it that is not
+/// like a word processor — before somebody prints sixty sheets.
+#[test]
+fn the_page_offers_the_watermark_and_says_the_toner_goes_on_top() {
+    assert!(
+        PAGE_BODY.contains("action=\"/watermark\""),
+        "the page has no watermark form"
+    );
+    assert!(
+        PAGE_BODY.contains("goes over it"),
+        "the page does not say the toner goes on top of the printing"
+    );
+}

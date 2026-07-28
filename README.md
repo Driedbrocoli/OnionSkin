@@ -1176,6 +1176,48 @@ any one page, and three documents' worth do not splice into one — two files ca
 both have a field called `Name`, meaning different fields. So they are named
 rather than lost quietly.
 
+### DRAFT across a sheet you already printed
+
+```bash
+onionskin watermark report.pdf --text DRAFT
+```
+
+Corner to corner, on every page, sized so it fills the paper. The size is worked
+out from the word itself, so `VOID` and `NOT FOR CIRCULATION` both come out
+spanning the sheet rather than one of them lost in the middle of it — and the
+angle follows the paper's own diagonal, so a landscape sheet gets a landscape
+slant instead of a flat forty-five that misses.
+
+There is one thing about this that is not like a word processor, and it is worth
+knowing before the paper goes in. A word processor puts a watermark *behind* the
+page's own printing. Onionskin cannot: the sheet is already printed and a printer
+adds toner without taking any away, so the word goes **on top**. Where it crosses
+printing, the printing wins and the mark reads as black there.
+
+That is why it is light by default — 75% grey, about a quarter of full black,
+which is unmistakable from arm's length and still leaves the words underneath
+readable. Somebody who wants a heavier one can have it, and is told what it
+costs:
+
+```bash
+onionskin watermark superseded.pdf --text VOID --grey 0.2
+```
+
+```
+At 20% grey the words underneath will be hard to read. --grey 0.75 is the
+default, and leaves them legible.
+```
+
+Which is the right answer for a form that has been superseded and the wrong one
+for a draft somebody still has to read.
+
+The rest is what you would expect. `--page 2` marks one page instead of all of
+them; the delta still comes out with as many pages as the document, blank where
+nothing is being marked, because a two-page sheet fed a one-page delta prints
+page one's watermark onto page two. `--size 96` overrules the worked-out size and
+`--font times` the face. On a *fresh* page there is nothing underneath to protect,
+so `--grey 0` is perfectly reasonable there.
+
 ### A rehearsal, before the paper goes in
 
 Every command that writes a file takes `--dry-run`:

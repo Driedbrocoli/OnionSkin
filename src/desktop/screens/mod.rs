@@ -25,6 +25,7 @@ pub mod read;
 pub mod scan;
 pub mod stack;
 pub mod verify;
+pub mod watermark;
 
 use eframe::egui;
 
@@ -117,6 +118,7 @@ pub enum Screen {
     Blanks,
     Correct,
     Cover,
+    Watermark,
     Proof,
     Merge,
     Join,
@@ -144,6 +146,7 @@ impl Screen {
         Screen::Blanks,
         Screen::Correct,
         Screen::Cover,
+        Screen::Watermark,
         Screen::Proof,
         Screen::Merge,
         Screen::Join,
@@ -178,6 +181,7 @@ impl Screen {
             Screen::Batch => "batch",
             Screen::Correct => "correct",
             Screen::Cover => "cover",
+            Screen::Watermark => "watermark",
             Screen::Fits => "fits",
             Screen::Stack => "stack",
             Screen::Verify => "verify",
@@ -212,6 +216,7 @@ impl Screen {
             Screen::Batch => "One each, from a list",
             Screen::Correct => "Fix a mistake",
             Screen::Cover => "Cover something up",
+            Screen::Watermark => "Stamp a word across it",
             Screen::Fits => "Check before printing",
             Screen::Stack => "Sort a stack",
             Screen::Verify => "Check a sheet or a run",
@@ -240,6 +245,7 @@ impl Screen {
             Screen::Batch => "Two hundred certificates, two hundred names",
             Screen::Correct => "Cover the wrong words and set the right ones",
             Screen::Cover => "Print solid over what must not be read",
+            Screen::Watermark => "DRAFT, COPY or VOID, corner to corner",
             Screen::Fits => "Is this the sheet the delta was made for?",
             Screen::Stack => "Which document is each sheet from the feeder?",
             Screen::Verify => "Did it come out of the printer right — one sheet, or all of them?",

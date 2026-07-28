@@ -34,6 +34,7 @@ pub struct Onionskin {
     stack: screens::stack::State,
     correct: screens::correct::State,
     cover: screens::cover::State,
+    watermark: screens::watermark::State,
     batch: screens::batch::State,
     labels: screens::labels::State,
     jobs_screen: screens::jobs::State,
@@ -66,6 +67,7 @@ impl Onionskin {
             stack: Default::default(),
             correct: Default::default(),
             cover: Default::default(),
+            watermark: Default::default(),
             batch: Default::default(),
             scan: Default::default(),
             document: Default::default(),
@@ -129,6 +131,9 @@ impl eframe::App for Onionskin {
                         Screen::Stack => screens::stack::show(&mut self.stack, &mut room),
                         Screen::Correct => screens::correct::show(&mut self.correct, &mut room),
                         Screen::Cover => screens::cover::show(&mut self.cover, &mut room),
+                        Screen::Watermark => {
+                            screens::watermark::show(&mut self.watermark, &mut room)
+                        }
                         Screen::Batch => screens::batch::show(&mut self.batch, &mut room),
                         Screen::Labels => screens::labels::show(&mut self.labels, &mut room),
                         Screen::Jobs => screens::jobs::show(&mut self.jobs_screen, &mut room),

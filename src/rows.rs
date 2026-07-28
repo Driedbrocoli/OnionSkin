@@ -281,6 +281,29 @@ impl List {
         Ok(List { columns, rows })
     }
 
+    /// A list of nothing but numbers: one row per sheet, and no file at all.
+    ///
+    /// Numbering five hundred raffle tickets, a receipt book, a run of numbered
+    /// certificates — every one of those is a list whose only column Onionskin
+    /// already counts. Making somebody build a spreadsheet of the numbers 1 to
+    /// 500 in order to be handed back the numbers 1 to 500 is a chore the
+    /// program invented, so `--count 500` skips it.
+    ///
+    /// The rows carry no columns of their own, and they do not need to:
+    /// `{number}` is not a column, it comes off [`Row::number`] wherever a row
+    /// goes. So the sheets come out numbered with nothing named at all.
+    pub fn counted(how_many: usize) -> List {
+        List {
+            columns: Vec::new(),
+            rows: (1..=how_many)
+                .map(|number| Row {
+                    values: BTreeMap::new(),
+                    number,
+                })
+                .collect(),
+        }
+    }
+
     /// The column names, for a message that has to say what is on offer.
     pub fn describe_columns(&self) -> String {
         self.columns

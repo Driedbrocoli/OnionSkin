@@ -268,3 +268,33 @@ fn the_columns_are_listed_the_way_they_would_be_typed() {
     let list = list_of("name,seat,table\nA,1,2\n");
     assert_eq!(list.describe_columns(), "{name}, {seat}, {table}");
 }
+
+/// A run of numbers is a list, and it should not need a file.
+///
+/// Five hundred raffle tickets, a receipt book, numbered certificates: every
+/// one of those is a list whose only column Onionskin already counts. Asking
+/// somebody to build a spreadsheet of the numbers 1 to 500 so that it can hand
+/// back the numbers 1 to 500 is a chore the program invented.
+#[test]
+fn a_run_of_numbers_needs_no_file_at_all() {
+    let list = List::counted(500);
+    assert_eq!(list.rows.len(), 500);
+    assert_eq!(list.rows[0].number, 1);
+    assert_eq!(list.rows[499].number, 500);
+    // No columns, because there is nothing to name.
+    assert!(list.columns.is_empty());
+    assert!(list.describe_columns().is_empty());
+
+    // And {number} still fills in, because it never was a column.
+    assert_eq!(fill("no. {number}", &list.rows[41]), "no. 42");
+    assert_eq!(
+        fill("Ticket {number} of 500", &list.rows[0]),
+        "Ticket 1 of 500"
+    );
+}
+
+/// Counting none is a list of none, not a panic and not one row.
+#[test]
+fn counting_nothing_gives_nothing() {
+    assert!(List::counted(0).rows.is_empty());
+}

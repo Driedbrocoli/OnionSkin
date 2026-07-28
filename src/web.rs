@@ -161,6 +161,15 @@ fn handle(mut stream: TcpStream) {
                 message.as_bytes(),
             ),
         },
+        ("POST", "/watermark") => match watermark_sheet(&request) {
+            Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
+            Err(message) => respond(
+                &mut stream,
+                422,
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            ),
+        },
         ("POST", "/convert") => match convert_scan(&request) {
             Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
             Err(message) => respond(
@@ -574,6 +583,68 @@ fn join_files(request: &Request) -> Result<(Vec<u8>, String), String> {
     Ok((bytes, "joined.pdf".to_string()))
 }
 
+/// A word across every page of a sheet that is already printed.
+///
+/// The other job here that needs no measuring: a document goes in, a delta with
+/// DRAFT across it comes out. It belongs on this page for the same reason the
+/// join does — the people who reach the browser are the ones without the
+/// window, and "stamp this DRAFT before it goes out" is the request that turns
+/// up on a server rather than on a desk.
+fn watermark_sheet(request: &Request) -> Result<(Vec<u8>, String), String> {
+    let parts = parse_multipart(&request.content_type, &request.body)?;
+    let field = |name: &str| parts.iter().find(|p| p.name == name);
+
+    let Some(sheet) = field("sheet").filter(|p| !p.data.is_empty()) else {
+        return Err("Choose the printed sheet to mark.".into());
+    };
+    let text = field("text")
+        .map(|p| p.text())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "DRAFT".to_string());
+    // A grey out of range is brought back into it rather than refused: the
+    // placement clamps anyway, and a form that rejects "80" for not being "0.8"
+    // is a form that teaches nothing.
+    let grey = field("grey")
+        .map(|p| p.text())
+        .filter(|t| !t.is_empty())
+        .and_then(|t| t.parse::<f64>().ok())
+        .map(|given| if given > 1.0 { given / 100.0 } else { given });
+
+    let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
+    let path = workspace.path.join(safe_name(
+        sheet.filename.as_deref().unwrap_or("sheet.pdf"),
+        "sheet.pdf",
+    ));
+    std::fs::write(&path, &sheet.data).map_err(|e| e.to_string())?;
+
+    let pages = crate::recipe::pages_in(&path).unwrap_or(1);
+    let font = crate::pdf::Font::Helvetica;
+    let mut sizes = Vec::with_capacity(pages);
+    let mut lines: Vec<Vec<crate::pdf::PlacedLine>> = vec![Vec::new(); pages];
+    for page in 1..=pages {
+        let paper = crate::recipe::draw_page(&path, page)?.1.page;
+        sizes.push(paper);
+        let Some(mark) = crate::watermark::across(&text, paper, font, None, grey) else {
+            return Err("There is nothing to write across the sheet.".into());
+        };
+        lines[page - 1].push(crate::pdf::PlacedLine {
+            text: mark.text.clone(),
+            x_mm: mark.x_mm,
+            y_mm: mark.y_mm,
+            size_pt: mark.size_pt,
+            font: crate::pdf::LineFont::Builtin(font),
+            colour: mark.colour(),
+            rotation_deg: mark.rotation_deg,
+        });
+    }
+
+    let out = workspace.path.join("watermark.pdf");
+    crate::pdf::write_delta(&out, &sizes, &lines, "Onionskin watermark", None)
+        .map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
+    Ok((bytes, "watermark.pdf".to_string()))
+}
+
 /// A filename safe to write into a scratch folder.
 ///
 /// A browser sends whatever the file was called, and what it was called may be
@@ -973,6 +1044,38 @@ const PAGE_BODY: &str = r#"
   stack in that order is a stack in the wrong order. Rename them
   <code>page-01</code>, <code>page-02</code>, <code>page-10</code> and it comes
   out right by itself.
+</p>
+
+<h2>Stamp a word across a printed sheet</h2>
+<p>
+  DRAFT, COPY, VOID — corner to corner, on every page. The size works itself out
+  from the word, so a short one and a long one both fill the paper.
+</p>
+
+<form method="post" action="/watermark" enctype="multipart/form-data">
+  <fieldset>
+    <legend>The sheet</legend>
+
+    <label for="sheet">The document
+      <span class="hint">— a PDF, or a scan of the printed page.</span></label>
+    <input type="file" id="sheet" name="sheet"
+      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+
+    <label for="text">The word</label>
+    <input type="text" id="text" name="text" value="DRAFT" maxlength="60">
+
+    <label for="grey">How light
+      <span class="hint">— 75 is the default. Lower is darker.</span></label>
+    <input type="number" id="grey" name="grey" value="75" min="0" max="100" step="5">
+  </fieldset>
+
+  <button type="submit">Stamp it</button>
+</form>
+<p class="hint">
+  Toner goes on top. This does not sit behind the page&#39;s own printing the way
+  a word processor&#39;s watermark does — it goes over it, and where it crosses
+  printing the printing wins. Much below 50 and the words underneath stop being
+  readable, which is right for a superseded form and wrong for a draft.
 </p>
 
 <div class="warn">

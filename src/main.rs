@@ -112,6 +112,8 @@ enum Command {
     Merge(MergeArgs),
     /// Put several PDFs one after another, into one document.
     Join(JoinArgs),
+    /// Lay a word across a printed sheet: DRAFT, COPY, VOID.
+    Watermark(WatermarkArgs),
     /// Find the places on a form where something can be written.
     Blanks(BlanksArgs),
     /// What was added to which sheet, and when.
@@ -584,6 +586,45 @@ struct VerifyArgs {
     first: Option<usize>,
 }
 
+/// A word across the whole sheet: DRAFT, COPY, VOID.
+///
+/// A word processor puts grey text *behind* the page's own. Onionskin cannot: a
+/// printer adds toner and never takes it away, so this goes on top of whatever
+/// is printed. That is why it is light by default — grey toner over printed
+/// text leaves the text readable, and black toner does not.
+#[derive(clap::Args)]
+struct WatermarkArgs {
+    /// The sheet to mark.
+    document: PathBuf,
+    /// The word: DRAFT, COPY, VOID, "NOT FOR CIRCULATION".
+    #[arg(long, default_value = "DRAFT")]
+    text: String,
+    /// Type size in points. Without it, whatever fills the paper.
+    #[arg(long)]
+    size: Option<f64>,
+    /// How light, from 0 (black) to 1 (invisible).
+    #[arg(long)]
+    grey: Option<f64>,
+    /// A built-in font's name (see `onionskin fonts`).
+    #[arg(long, default_value = "Helvetica")]
+    font: String,
+    /// Which page, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    /// Where to write the delta. Without it, beside the sheet.
+    #[arg(short, long, alias = "out")]
+    output: Option<PathBuf>,
+    /// Mark every page, not only one.
+    #[arg(long)]
+    every_page: bool,
+    /// Open it when it is written.
+    #[arg(long)]
+    open: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 /// Several PDFs, one after another.
 ///
 /// The other half of `merge`. That one puts three files onto one sheet; this
@@ -1051,14 +1092,19 @@ struct CoverArgs {
 /// rather than once for one. The only new idea is `{column}`.
 #[derive(clap::Args)]
 #[command(allow_negative_numbers = true)]
+#[command(group = clap::ArgGroup::new("who").required(true))]
 struct BatchArgs {
     /// The printed sheet everybody's copy goes onto: the blank certificate,
     /// the form, the ticket.
     document: PathBuf,
     /// The list: a CSV file, or a spreadsheet (.xlsx, .ods). Its first line
-    /// names the columns.
-    #[arg(long = "from", value_name = "LIST")]
-    from: PathBuf,
+    /// names the columns. Not needed with --count.
+    #[arg(long = "from", value_name = "LIST", group = "who")]
+    from: Option<PathBuf>,
+    /// Make this many sheets, numbered, with no list at all — raffle tickets,
+    /// a receipt book, a run of numbered certificates. `{number}` counts them.
+    #[arg(long, value_name = "N", group = "who")]
+    count: Option<usize>,
     /// Which tab of a spreadsheet to read. Without it, the first one with
     /// anything on it.
     #[arg(long, value_name = "NAME")]
@@ -1867,6 +1913,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Proof(args) => cmd_proof(args),
         Command::Merge(args) => cmd_merge(args),
         Command::Join(args) => cmd_join(args),
+        Command::Watermark(args) => cmd_watermark(args),
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
@@ -2315,6 +2362,27 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// What to call the list in a message.
+///
+/// A run of numbers has no file to name, and "no column called 'nmae' in ''"
+/// is a sentence about nothing.
+fn the_list_called(args: &BatchArgs) -> String {
+    match (&args.from, args.count) {
+        (Some(from), _) => from.display().to_string(),
+        (None, Some(how_many)) => format!("a run of {how_many}"),
+        (None, None) => "the list".to_string(),
+    }
+}
+
+/// The files this batch reads, for the check that refuses to write over one.
+fn named_inputs(args: &BatchArgs) -> Vec<(&Path, &'static str)> {
+    let mut inputs: Vec<(&Path, &'static str)> = vec![(args.document.as_path(), "sheet")];
+    if let Some(from) = &args.from {
+        inputs.push((from.as_path(), "list"));
+    }
+    inputs
+}
+
 fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     if args.at.is_empty()
         && args.after.is_empty()
@@ -2329,8 +2397,20 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
                 .into(),
         );
     }
-    let list = onionskin::rows::List::read_sheet(&args.from, args.sheet.as_deref())
-        .map_err(|e| e.to_string())?;
+    // A list off disk, or a run of numbers that needs no disk at all.
+    let list = match (&args.from, args.count) {
+        (Some(from), _) => onionskin::rows::List::read_sheet(from, args.sheet.as_deref())
+            .map_err(|e| e.to_string())?,
+        (None, Some(0)) => {
+            return Err("--count 0 would make no sheets at all. Give the number \
+                        you want, or a list with --from."
+                .into())
+        }
+        (None, Some(how_many)) => onionskin::rows::List::counted(how_many),
+        // clap requires one or the other, so this cannot be reached from the
+        // command line — but a message beats a panic if it ever is.
+        (None, None) => return Err("give --from and a list, or --count and a number".into()),
+    };
 
     // Every template checked against the columns before a single sheet is
     // made. Two hundred certificates reading "{nmae}" is a discovery to make
@@ -2352,28 +2432,35 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         .filter(|name| !onionskin::jobs::known_without_asking(name))
         .collect();
     if !unknown.is_empty() {
-        return Err(format!(
-            "{} has no column called {}.\n    It has: {}\n    \
-             {{number}} also works, and counts the sheets for you.",
-            args.from.display(),
-            unknown
-                .iter()
-                .map(|name| format!("'{name}'"))
-                .collect::<Vec<_>>()
-                .join(" or "),
-            list.describe_columns()
-        ));
+        let wanted = unknown
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        // A run of numbers has no columns at all, and "It has: " followed by
+        // nothing is a sentence that trails off. It has {number}, which is the
+        // whole of what a counted run offers.
+        return Err(match list.columns.is_empty() {
+            true => format!(
+                "{} has no columns to fill in, so {wanted} cannot be found.\n    \
+                 A counted run offers {{number}} and nothing else — for anything \
+                 more,\n    give a list with --from.",
+                the_list_called(&args)
+            ),
+            false => format!(
+                "{} has no column called {wanted}.\n    It has: {}\n    \
+                 {{number}} also works, and counts the sheets for you.",
+                the_list_called(&args),
+                list.describe_columns()
+            ),
+        });
     }
 
     let output = args
         .output
         .clone()
         .unwrap_or_else(|| beside(&args.document, "-batch", "pdf"));
-    refuse_to_clobber(
-        &output,
-        "stack",
-        &[(&args.document, "sheet"), (&args.from, "list")],
-    )?;
+    refuse_to_clobber(&output, "stack", &named_inputs(&args))?;
     check_writable(&output, "stack")?;
     let rehearsal = Rehearsal::new(args.dry_run)?;
 
@@ -6227,6 +6314,116 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
 
 /// Put several deltas onto one, so the sheet goes through the printer once.
 /// Put several PDFs into one, page after page.
+/// Lay a word across a printed sheet.
+///
+/// Written straight out rather than through the diffing pipeline, and that is
+/// the whole difference between this working and not. A diff asks "what is new
+/// on this page", which for a grey word laid over black text is a question with
+/// no good answer: opaque grey over black would *lighten* it, and toner cannot
+/// lighten anything. Routed that way, a quarter of the word came out solid
+/// black where it crossed the text.
+///
+/// The marks are known — a word, a place, a size, a grey — so they are simply
+/// written. On paper the physics does the compositing: grey toner lands on
+/// white where the page is blank, and on black where it is not, which reads as
+/// black. Which is exactly what a watermark looks like.
+fn cmd_watermark(args: WatermarkArgs) -> Result<ExitCode, String> {
+    let font = onionskin::pdf::Font::parse(&args.font).ok_or_else(|| {
+        format!(
+            "'{}' is not a built-in font. Try `onionskin fonts`.",
+            args.font
+        )
+    })?;
+
+    let pages = onionskin::recipe::pages_in(&args.document).unwrap_or(1);
+    let wanted: Vec<usize> = match args.every_page {
+        true => (1..=pages).collect(),
+        false => vec![args.page],
+    };
+    if let Some(past) = wanted.iter().find(|page| **page > pages || **page == 0) {
+        return Err(format!(
+            "{} has {pages} page(s), so there is no page {past} to mark.",
+            args.document.display()
+        ));
+    }
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-watermark", "pdf"));
+    refuse_to_clobber(&output, "delta", &[(&args.document, "sheet")])?;
+    check_writable(&output, "delta")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
+
+    // Every page of the delta, blank where the sheet is not being marked — a
+    // delta with fewer pages than the sheet would print page one's watermark
+    // onto page two.
+    let mut sizes = Vec::with_capacity(pages);
+    let mut lines: Vec<Vec<onionskin::pdf::PlacedLine>> = vec![Vec::new(); pages];
+    let mut said = Vec::new();
+    for page in 1..=pages {
+        let paper = onionskin::recipe::draw_page(&args.document, page)?.1.page;
+        sizes.push(paper);
+        if !wanted.contains(&page) {
+            continue;
+        }
+        let mark = onionskin::watermark::across(&args.text, paper, font, args.size, args.grey)
+            .ok_or("there is nothing to write across the sheet")?;
+        said.push(format!("  page {page}: {}", mark.describe()));
+        lines[page - 1].push(onionskin::pdf::PlacedLine {
+            text: mark.text.clone(),
+            x_mm: mark.x_mm,
+            y_mm: mark.y_mm,
+            size_pt: mark.size_pt,
+            font: onionskin::pdf::LineFont::Builtin(font),
+            colour: mark.colour(),
+            rotation_deg: mark.rotation_deg,
+        });
+    }
+
+    onionskin::pdf::write_delta(
+        &rehearsal.instead_of(&output),
+        &sizes,
+        &lines,
+        "Onionskin watermark",
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if !rehearsal.pretending() {
+        println!("{}", output.display());
+    }
+    for line in &said {
+        println!("{line}");
+    }
+
+    // The one thing about this that is not like a word processor, said where
+    // somebody can still act on it.
+    let grey = args.grey.unwrap_or(onionskin::watermark::GREY);
+    println!(
+        "\nToner goes on top. This does not sit behind the page's own printing \
+         the way a\n  word processor's watermark does — it goes over it. Where \
+         it crosses printing,\n  the printing wins and the mark reads as black."
+    );
+    if onionskin::watermark::too_dark_to_read_through(grey) {
+        println!(
+            "  At {:.0}% grey the words underneath will be hard to read. \
+             --grey 0.75 is the\n  default, and leaves them legible.",
+            grey * 100.0
+        );
+    }
+
+    if !rehearsal.pretending() {
+        note_the_delta(&args.document, &output, said.len(), pages);
+    }
+    println!("\n{PRINT_INSTRUCTIONS}");
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_join(args: JoinArgs) -> Result<ExitCode, String> {
     for file in &args.files {
         if !file.is_file() {
@@ -8313,6 +8510,72 @@ mod naming_tests {
             "a.csv",
             "--text",
             "{name}",
+        ])
+        .is_err());
+    }
+
+    /// A run of numbers is a list, and should not need a file.
+    ///
+    /// Five hundred raffle tickets, a receipt book, numbered certificates:
+    /// each is a list whose only column Onionskin already counts. Building a
+    /// spreadsheet of the numbers 1 to 500 so the program can hand back the
+    /// numbers 1 to 500 is a chore the program invented.
+    #[test]
+    fn a_run_can_be_numbered_without_a_list() {
+        let parsed = Cli::try_parse_from([
+            "onionskin",
+            "batch",
+            "sheet.pdf",
+            "--count",
+            "500",
+            "--at",
+            "150,60:No. {number}",
+        ])
+        .expect("--count alone should be enough");
+        let Some(Command::Batch(args)) = parsed.command else {
+            panic!("that did not parse as a batch");
+        };
+        assert_eq!(args.count, Some(500));
+        assert!(args.from.is_none());
+
+        // A list still stands on its own, so nothing that worked before needs
+        // a count now.
+        assert!(Cli::try_parse_from([
+            "onionskin",
+            "batch",
+            "sheet.pdf",
+            "--from",
+            "people.csv",
+            "--at",
+            "60,120:{name}",
+        ])
+        .is_ok());
+    }
+
+    /// One or the other, and clap has to name both when neither is given —
+    /// otherwise somebody with no list is told to go and make one.
+    #[test]
+    fn a_batch_needs_a_list_or_a_count_and_says_so_when_it_has_neither() {
+        let Err(refused) =
+            Cli::try_parse_from(["onionskin", "batch", "sheet.pdf", "--at", "1,1:x"])
+        else {
+            panic!("a batch with neither a list nor a count was accepted");
+        };
+        let refused = refused.to_string();
+        assert!(refused.contains("--from"), "{refused}");
+        assert!(refused.contains("--count"), "{refused}");
+
+        // And both at once is a contradiction, not a merge.
+        assert!(Cli::try_parse_from([
+            "onionskin",
+            "batch",
+            "sheet.pdf",
+            "--from",
+            "a.csv",
+            "--count",
+            "5",
+            "--at",
+            "1,1:x",
         ])
         .is_err());
     }

@@ -35,5 +35,6 @@ pub mod sheets;
 pub mod split;
 pub mod stock;
 pub mod typeface;
+pub mod watermark;
 pub mod web;
 pub mod which;
