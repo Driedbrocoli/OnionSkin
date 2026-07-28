@@ -1459,3 +1459,35 @@ fn a_broken_document_is_still_a_document() {
         Err(DocumentError::Malformed { .. })
     ));
 }
+
+/// A type size has a ceiling as well as a floor.
+///
+/// Only the floor was there, and only the floor was obvious. `1e300` is a
+/// perfectly finite number, passed every check, and then arrived at the PDF
+/// writer — where the arithmetic that turns points into user space overflowed
+/// and put the literal word `inf` into the file. PDF has no such number, so the
+/// document was corrupt, and nothing between the typing and the file had
+/// anything to say about it.
+#[test]
+fn a_type_size_too_large_to_write_is_refused() {
+    let mut document = Document::blank(PageSize::new(210.0, 297.0), 1);
+    let mut huge = item("x", 20.0, 30.0);
+    huge.size_pt = 1e300;
+    let why = document.add(huge).expect_err("1e300 pt is not a type size");
+    let said = why.to_string();
+    assert!(said.contains("cannot be printed"), "{said}");
+    // And it says so in a sentence, rather than in three hundred digits.
+    assert!(
+        said.len() < 120,
+        "the message is {} long: {said}",
+        said.len()
+    );
+
+    // The ordinary sizes are untouched, including a very large but usable one.
+    for size in [1.0, 12.0, 400.0, BIGGEST_TYPE_PT] {
+        let mut ok = Document::blank(PageSize::new(210.0, 297.0), 1);
+        let mut one = item("x", 20.0, 30.0);
+        one.size_pt = size;
+        assert!(ok.add(one).is_ok(), "{size} pt was refused");
+    }
+}

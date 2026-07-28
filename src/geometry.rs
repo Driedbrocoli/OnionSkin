@@ -141,6 +141,28 @@ pub const PAGE_PRESETS: &[(&str, f64, f64)] = &[
     ("a7", 74.0, 105.0),
 ];
 
+/// The smallest measurement that is paper, in millimetres.
+///
+/// Not a round number chosen for tidiness: the smallest stationery anybody
+/// really feeds through a printer is a 25 mm address label, and this is well
+/// under that. Its job is to stop a mistyped size — `0.0001x0.0001` — becoming a
+/// page, not to have an opinion about small labels.
+pub const SMALLEST_PAPER_MM: f64 = 5.0;
+
+/// A page size written the way somebody would read it out.
+///
+/// Rounded, because these appear in error messages and `1e300` written out in
+/// full is three hundred digits of nothing anybody needs.
+fn measured(width: f64, height: f64) -> String {
+    let one = |value: f64| match value {
+        v if !v.is_finite() => "∞".to_string(),
+        v if v >= 100_000.0 => format!("{v:.3e}"),
+        v if v.fract() == 0.0 => format!("{v:.0}"),
+        v => format!("{v:.2}"),
+    };
+    format!("{}×{}", one(width), one(height))
+}
+
 /// Which named paper sizes are this shape, longest side down.
 ///
 /// A scan does not say how big the paper was — a bare PNG carries no
@@ -205,8 +227,26 @@ pub fn parse_page(spec: &str) -> Result<PageSize, String> {
     if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
         return Err(unknown_page(spec));
     }
+    // A lower bound as well as an upper one. Nothing rejected `0.0001x0.0001`,
+    // so a page a ten-thousandth of a millimetre across went all the way
+    // through to a delta — a paper size no printer has and no scan can be
+    // registered against. The smallest thing anybody really prints on is a
+    // 25 mm label, and five is well under that with room to spare.
+    if width < SMALLEST_PAPER_MM || height < SMALLEST_PAPER_MM {
+        return Err(format!(
+            "{} mm is smaller than any paper. The smallest thing Onionskin \
+             prints on is about a {SMALLEST_PAPER_MM:.0} mm label.",
+            measured(width, height)
+        ));
+    }
     if width > 2000.0 || height > 2000.0 {
-        return Err(format!("{width}×{height} mm is not a paper size"));
+        // Written to a sensible number of figures rather than in full: an
+        // absurd size used to print six hundred digits of it, twice, which is
+        // an error message nobody can read past.
+        return Err(format!(
+            "{} mm is not a paper size",
+            measured(width, height)
+        ));
     }
     Ok(PageSize::new(width, height))
 }
@@ -877,5 +917,42 @@ mod tests {
     fn px_size_is_stable() {
         assert_eq!(A4.px_size(300.0), (2480, 3508));
         assert_eq!(PageSize::new(0.001, 0.001).px_size(72.0), (1, 1));
+    }
+
+    /// A page has a smallest size as well as a largest.
+    ///
+    /// Nothing rejected `0.0001x0.0001`, so a page a ten-thousandth of a millimetre
+    /// across went all the way through to a delta: a paper size no printer has, no
+    /// scan can be registered against, and nothing downstream would have questioned.
+    #[test]
+    fn a_page_smaller_than_any_paper_is_refused() {
+        for spec in ["0.0001x0.0001", "1x1", "4.9x100", "100x4.9"] {
+            let why = parse_page(spec).unwrap_err();
+            assert!(why.contains("smaller than any paper"), "{spec}: {why}");
+        }
+        // And the smallest thing that is paper still is: a 25 mm label, and the
+        // bound itself.
+        for spec in ["25x15", "5x5"] {
+            assert!(parse_page(spec).is_ok(), "'{spec}' was refused");
+        }
+    }
+
+    /// An absurd size says so in a sentence somebody can read.
+    ///
+    /// `1e300x1e300` used to print six hundred digits of it, twice, which is an
+    /// error message nobody gets past.
+    #[test]
+    fn an_absurd_size_does_not_print_six_hundred_digits() {
+        let why = parse_page("1e300x1e300").unwrap_err();
+        assert!(why.contains("not a paper size"), "{why}");
+        assert!(
+            why.len() < 120,
+            "the message is {} characters long: {why}",
+            why.len()
+        );
+        // The ordinary too-big case reads plainly too.
+        let why = parse_page("3000x3000").unwrap_err();
+        assert!(why.contains("3000×3000"), "{why}");
+        assert!(why.len() < 120, "{why}");
     }
 }

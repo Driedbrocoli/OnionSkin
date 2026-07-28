@@ -294,6 +294,19 @@ pub enum DocumentError {
     NoFont,
 }
 
+/// The largest type size that is a type size, in points.
+///
+/// A ceiling as well as a floor, because only the floor was there and only the
+/// floor was obvious. `1e300` is a perfectly finite number and passed every
+/// check — and then arrived at the PDF writer, where the arithmetic that turns
+/// points into user space overflowed and put the literal word `inf` into the
+/// file. PDF has no such number. The document was corrupt, and nothing between
+/// the typing and the file had a word to say about it.
+///
+/// Four thousand points is about a metre and a half: far past anything anybody
+/// sets type at, and far short of anything that overflows.
+pub const BIGGEST_TYPE_PT: f64 = 4000.0;
+
 impl Document {
     /// A blank document, ready to be written on.
     pub fn blank(page: PageSize, pages: usize) -> Document {
@@ -419,10 +432,17 @@ impl Document {
                     item.id
                 )));
             }
-            if item.size_pt <= 0.0 {
+            if item.size_pt <= 0.0 || item.size_pt > BIGGEST_TYPE_PT {
                 return Err(DocumentError::Invalid(format!(
                     "item {} is set at {} pt, which cannot be printed",
-                    item.id, item.size_pt
+                    item.id,
+                    // Rounded rather than written out: `1e300` in full is three
+                    // hundred digits, and an error nobody can read past is an
+                    // error that does not help.
+                    match item.size_pt.abs() >= 100_000.0 {
+                        true => format!("{:.3e}", item.size_pt),
+                        false => format!("{}", item.size_pt),
+                    }
                 )));
             }
             if item.page == 0 || item.page > self.pages {
