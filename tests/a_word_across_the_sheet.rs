@@ -118,6 +118,19 @@ impl Ink {
         ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
     }
 
+    /// The box the ink occupies: left, top, right, bottom.
+    fn box_mm(&self) -> (f64, f64, f64, f64) {
+        let span = |v: Vec<f64>| {
+            (
+                v.iter().cloned().fold(f64::MAX, f64::min),
+                v.iter().cloned().fold(f64::MIN, f64::max),
+            )
+        };
+        let (left, right) = span(self.spots.iter().map(|s| s.0).collect());
+        let (top, bottom) = span(self.spots.iter().map(|s| s.1).collect());
+        (left, top, right, bottom)
+    }
+
     fn darkest(&self) -> u8 {
         self.spots.iter().map(|s| s.2).min().unwrap_or(255)
     }
@@ -418,4 +431,65 @@ fn a_rehearsal_writes_nothing() {
     assert!(ok, "{said}");
     assert!(said.contains("DRAFT"), "{said}");
     assert!(!delta.exists(), "a rehearsal left a file behind");
+}
+
+/// A size somebody insisted on is taken at their word, and checked against the
+/// paper.
+///
+/// The worked-out size always fits — that is what working it out is for. A size
+/// given by hand need not: `--size 400` sets NOT FOR CIRCULATION about a metre
+/// long, and the delta came out with the first and last letters clipped off by
+/// the edge of the paper. A watermark nobody can read, and nothing said so.
+#[test]
+fn a_size_too_large_for_the_paper_is_said_out_loud() {
+    let work = Work::new();
+    let printed = a_printed_sheet(&work.home, work.dir.path(), "a4", 1);
+
+    let delta = work.at("huge.pdf");
+    let (ok, said) = run(
+        &work.home,
+        &[
+            "watermark",
+            &at(&printed),
+            "--text",
+            "NOT FOR CIRCULATION",
+            "--size",
+            "400",
+            "-o",
+            &at(&delta),
+        ],
+    );
+    assert!(ok, "{said}");
+    assert!(
+        said.contains("edge of the paper"),
+        "a word set a metre long on A4 said nothing: {said}"
+    );
+
+    // And the ink really does reach the edge, which is what the warning is
+    // about — so it is not warning about nothing.
+    let ink = Ink::drawn(&delta, 1);
+    let (left, top, right, bottom) = ink.box_mm();
+    assert!(
+        left < 2.0 || top < 2.0 || right > ink.width_mm - 2.0 || bottom > ink.height_mm - 2.0,
+        "nothing reached an edge: {left:.0},{top:.0} to {right:.0},{bottom:.0}"
+    );
+
+    // The size Onionskin works out for itself fits, and is not warned about.
+    let fitted = work.at("fitted.pdf");
+    let (ok, said) = run(
+        &work.home,
+        &[
+            "watermark",
+            &at(&printed),
+            "--text",
+            "NOT FOR CIRCULATION",
+            "-o",
+            &at(&fitted),
+        ],
+    );
+    assert!(ok, "{said}");
+    assert!(
+        !said.contains("edge of the paper"),
+        "a watermark that fits was warned about: {said}"
+    );
 }

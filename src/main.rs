@@ -6545,6 +6545,29 @@ fn cmd_watermark(args: WatermarkArgs) -> Result<ExitCode, String> {
         });
     }
 
+    // A size worked out from the word always fits; a size somebody insisted on
+    // may not. `--size 400` sets NOT FOR CIRCULATION a metre long, and the
+    // delta comes out with the first and last letters clipped off by the edge
+    // of the paper — a watermark nobody can read, and nothing said so.
+    let margin_mm = onionskin::settings::load()
+        .defaults
+        .margin_mm
+        .unwrap_or(onionskin::safety::DEFAULT_MARGIN_MM);
+    let mut checks = Vec::new();
+    for (index, page) in lines.iter().enumerate() {
+        for mut check in onionskin::safety::check_placements(sizes[index], page, margin_mm) {
+            check.page = Some(index + 1);
+            checks.push(check);
+        }
+    }
+    onionskin::safety::sort_checks(&mut checks);
+    if let Some(stop) = checks
+        .iter()
+        .find(|check| check.severity == onionskin::safety::Severity::Blocker)
+    {
+        return Err(stop.format());
+    }
+
     onionskin::pdf::write_delta(
         &rehearsal.instead_of(&output),
         &sizes,
@@ -6559,6 +6582,9 @@ fn cmd_watermark(args: WatermarkArgs) -> Result<ExitCode, String> {
     }
     for line in &said {
         println!("{line}");
+    }
+    for check in &checks {
+        println!("{}", check.format());
     }
 
     // The one thing about this that is not like a word processor, said where
