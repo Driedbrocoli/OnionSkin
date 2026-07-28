@@ -396,3 +396,24 @@ fn a_blank_sheet_in_the_stack_does_not_lose_the_others() {
         "a blank sheet was blamed on the fonts: {said}"
     );
 }
+
+/// Asking for no sheets says so, rather than blaming the scan.
+///
+/// `--first 0` used to come back with "scans.pdf has no pages on it", which is
+/// untrue and sends somebody to look at the wrong thing.
+#[test]
+fn asking_for_no_sheets_says_so_rather_than_blaming_the_scan() {
+    let work = Work::new();
+    let filled = work.a_stack_of_filled_forms("Name,Date,Amount\nJ. Bezzina,27 July 2024,240.00\n");
+
+    let (ok, said) = run(
+        &work.home,
+        &["harvest", &at(&filled), "--field", "Name", "--first", "0"],
+    );
+    assert!(!ok, "{said}");
+    assert!(said.contains("--first 0"), "{said}");
+    assert!(
+        !said.contains("no pages on it"),
+        "it blamed the scan: {said}"
+    );
+}

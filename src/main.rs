@@ -6650,6 +6650,13 @@ fn cmd_harvest(args: HarvestArgs) -> Result<ExitCode, String> {
         .map(|spec| onionskin::harvest::Field::parse(spec))
         .collect::<Result<_, _>>()?;
 
+    if args.first == Some(0) {
+        return Err(
+            "--first 0 would read no sheets at all. Leave it out to read the \
+             whole stack."
+                .into(),
+        );
+    }
     let pages = onionskin::recipe::pages_in(&args.scan)?;
     let wanted = args.first.unwrap_or(pages).min(pages);
     if wanted == 0 {
