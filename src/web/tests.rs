@@ -1358,3 +1358,30 @@ fn the_page_offers_the_harvest_and_says_handwriting_is_not_read() {
         );
     }
 }
+
+/// The browser refuses a placement off the paper, the same as the command line.
+///
+/// The check was added to the command and not to the other two interfaces, so
+/// for a while the same request written on the web page still wrote a delta with
+/// the words off the side of the sheet. One check, three places that need it.
+#[test]
+fn the_browser_refuses_words_placed_off_the_paper() {
+    let request = posted(&[
+        ("sheet", Some("letter.pdf"), &a_page("Invoice")),
+        ("text", None, b"off the page"),
+        ("x", None, b"300"),
+        ("y", None, b"400"),
+    ]);
+    let why = the_back_of_the_sheet(&request).unwrap_err();
+    assert!(why.contains("off the"), "{why}");
+    assert!(why.contains("300,400"), "it did not say where: {why}");
+
+    // And an ordinary one still goes through.
+    let request = posted(&[
+        ("sheet", Some("letter.pdf"), &a_page("Invoice")),
+        ("text", None, b"Terms overleaf"),
+        ("x", None, b"20"),
+        ("y", None, b"40"),
+    ]);
+    assert!(the_back_of_the_sheet(&request).is_ok());
+}

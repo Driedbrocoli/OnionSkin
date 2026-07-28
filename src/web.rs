@@ -793,6 +793,18 @@ fn the_back_of_the_sheet(request: &Request) -> Result<(Vec<u8>, String), String>
         );
     }
 
+    // Written straight rather than diffed, so nothing upstream has looked at
+    // where the words land. Off the paper prints as a blank sheet.
+    for (index, page) in lines.iter().enumerate() {
+        for check in
+            crate::safety::check_placements(sizes[index], page, crate::safety::DEFAULT_MARGIN_MM)
+        {
+            if check.severity == crate::safety::Severity::Blocker {
+                return Err(check.format());
+            }
+        }
+    }
+
     let out = workspace.path.join("back.pdf");
     crate::pdf::write_delta(&out, &sizes, &lines, "Onionskin back", None)
         .map_err(|e| e.to_string())?;

@@ -366,6 +366,28 @@ fn write_the_backs(state: &mut State, room: &mut Room) {
             }
         }
 
+        // Where the words really land. This delta is written straight rather
+        // than diffed, so nothing upstream has looked at it, and words off the
+        // side of the paper print as a blank sheet and a wasted pass.
+        let margin_mm = onionskin::settings::load()
+            .defaults
+            .margin_mm
+            .unwrap_or(onionskin::safety::DEFAULT_MARGIN_MM);
+        let mut checks = Vec::new();
+        for (index, page) in lines.iter().enumerate() {
+            for mut check in onionskin::safety::check_placements(sizes[index], page, margin_mm) {
+                check.page = Some(index + 1);
+                checks.push(check);
+            }
+        }
+        onionskin::safety::sort_checks(&mut checks);
+        if let Some(stop) = checks
+            .iter()
+            .find(|check| check.severity == onionskin::safety::Severity::Blocker)
+        {
+            return Outcome::refused(stop.format());
+        }
+
         let placed: usize = lines.iter().map(Vec::len).sum();
         if placed == 0 {
             return Outcome::refused(
@@ -392,6 +414,7 @@ fn write_the_backs(state: &mut State, room: &mut Room) {
             ],
         };
         let mut notes = notes;
+        notes.extend(checks.iter().map(onionskin::safety::Check::format));
         if !left_out.is_empty() {
             notes.push(format!(
                 "Nothing went on the back of sheet {} — {} has {pages} page(s), \
