@@ -162,18 +162,44 @@ fn no_file_reader_panics_on_a_file_that_lies_about_itself() {
     files.push(vec![0u8; 100_000]);
     files.push(b"PK\x03\x04".iter().copied().cycle().take(50_000).collect());
 
+    // A picture is a whole file too, and one people are handed by other people:
+    // a signature scanned by somebody else, a logo out of an email.
+    let dir = tempfile::tempdir().expect("somewhere to work");
+
     for bytes in &files {
         let one = bytes.clone();
+        let picture = dir.path().join("picture.png");
+        std::fs::write(&picture, bytes).expect("writing the file");
         if catch_unwind(move || {
             let _ = onionskin::sheets::is_a_spreadsheet(&one);
             let _ = onionskin::sheets::read(&one);
+            let _ = onionskin::office::read::docx::read(&one);
+            let _ = onionskin::office::read::odt::read(&one);
+            let _ = onionskin::picture::load(&picture);
         })
         .is_err()
         {
             panic!(
-                "sheets panicked on {} bytes starting {:?}",
+                "a reader panicked on {} bytes starting {:?}",
                 bytes.len(),
                 &bytes[..bytes.len().min(8)]
+            );
+        }
+    }
+
+    // And the two that take text rather than bytes.
+    let long = "<".repeat(50_000);
+    for text in ["", "\u{0}", "<a><b></a>", long.as_str(), "\u{feff}x"] {
+        let owned = text.to_string();
+        if catch_unwind(move || {
+            let _ = onionskin::office::read::odt::read_flat(&owned);
+            let _ = onionskin::office::read::plain::read(&owned, "txt");
+        })
+        .is_err()
+        {
+            panic!(
+                "a text reader panicked on {:?}",
+                &text[..text.len().min(40)]
             );
         }
     }
