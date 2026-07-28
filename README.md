@@ -1005,6 +1005,53 @@ And the same delta given twice is pointed out rather than refused — the merged
 file is fine, but every letter in it would be printed twice in the same place,
 which comes out heavier and blurred.
 
+### Several files, one after another
+
+The other half of `merge`. That one puts three files onto one sheet; this puts
+three files onto three sheets, in order.
+
+```bash
+onionskin join page-1.pdf page-2.pdf page-3.pdf -o stack.pdf
+```
+
+It is needed because almost everything upstream of this program produces one
+page at a time. A flatbed scanner does; so does a phone. Twenty sheets scanned
+is twenty files — and `onionskin stack`, which asks each sheet which document it
+belongs to, wants one file with twenty pages in it. Without a way to make that
+file the whole thing was out of reach unless you already had some other PDF tool,
+which is exactly the assumption this program exists to avoid.
+
+Mixed paper is fine here. Each page keeps its own size, so a stack of A4 with one
+Letter page in it joins without complaint and both sizes are reported. That is
+the opposite of `merge`, which refuses mixed paper — there the two are printed on
+*one* sheet, and one of them would run off the edge.
+
+Two things are pointed out rather than refused:
+
+```
+NOTE: page-10.pdf comes before page-2.pdf here, but 10 is the larger number.
+A shell expanding page-*.pdf sorts 10 before 2.
+```
+
+A shell sorts by character, so `page-*.pdf` hands the files over as 1, 10, 2. The
+join is exactly as asked either way — but a stack in that order is a stack in the
+wrong order, and it is much cheaper to notice here than after twenty sheets have
+gone through the printer. Rename them `page-01`, `page-02`, `page-10` and the
+shell gets it right by itself.
+
+```
+NOTE: contract.pdf has bookmarks, which live above the page and cannot come
+along. The pages themselves are all here.
+```
+
+Bookmarks, form fields and named destinations belong to a document rather than to
+any one page, and three documents' worth do not splice into one — two files can
+both have a field called `Name`, meaning different fields. So they are named
+rather than lost quietly.
+
+`--dry-run` does the whole join into a scratch file and throws it away, so it
+reports exactly what the real thing would, including a refusal.
+
 ### See what changed
 
 A delta prints only what is new, which is the point — and can make the change

@@ -110,6 +110,8 @@ enum Command {
     Proof(ProofArgs),
     /// Put several deltas onto one, so the sheet goes through once.
     Merge(MergeArgs),
+    /// Put several PDFs one after another, into one document.
+    Join(JoinArgs),
     /// Find the places on a form where something can be written.
     Blanks(BlanksArgs),
     /// What was added to which sheet, and when.
@@ -301,7 +303,7 @@ struct SendArgs {
 #[derive(clap::Args)]
 struct FetchArgs {
     /// Where to write the scan.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: PathBuf,
     /// Open the scan when it is written.
     #[arg(long)]
@@ -344,7 +346,7 @@ struct DeltaArgs {
     /// The edited copy.
     edited: PathBuf,
     /// Delta PDF to write. Without it, beside the edited copy as NAME-delta.pdf.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Open the delta when it is written.
     #[arg(long)]
@@ -572,6 +574,29 @@ struct VerifyArgs {
     learn: Option<String>,
 }
 
+/// Several PDFs, one after another.
+///
+/// The other half of `merge`. That one puts three files onto one sheet; this
+/// one puts three files onto three sheets, in order. Everything upstream of
+/// this program tends to produce one page at a time — a flatbed scanner does,
+/// a phone does — so twenty sheets scanned is twenty files, and `onionskin
+/// stack` wants one document with twenty pages in it.
+#[derive(clap::Args)]
+struct JoinArgs {
+    /// The files to join, in the order the pages should come out.
+    #[arg(required = true, num_args = 2..)]
+    files: Vec<PathBuf>,
+    /// Where to write the joined document. Without it, beside the first.
+    #[arg(short, long, alias = "out")]
+    output: Option<PathBuf>,
+    /// Say what would be written, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Open it when it is written.
+    #[arg(long)]
+    open: bool,
+}
+
 /// Several deltas, one pass through the printer.
 ///
 /// A day's work on one document arrives as more than one delta: the stamp is a
@@ -586,7 +611,7 @@ struct MergeArgs {
     #[arg(required = true, num_args = 2..)]
     deltas: Vec<PathBuf>,
     /// Where to write the merged delta. Without it, beside the first.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Send it straight to this printer once it is written: the name of one
     /// from `onionskin printers`, or a URI.
@@ -616,7 +641,7 @@ struct ProofArgs {
     #[arg(long)]
     delta: PathBuf,
     /// Where to write the proof. Without it, beside the delta.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Show the sheet as a faint hint, as though holding it up to the light.
     #[arg(long)]
@@ -727,7 +752,7 @@ struct LabelsArgs {
     #[arg(long, default_value = "#000000")]
     colour: String,
     /// Where to write the PDF.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Stop after this many, to try one sheet before committing the box.
     #[arg(long, value_name = "N")]
@@ -771,7 +796,7 @@ struct RunJobArgs {
     #[arg(long = "set", value_name = "NAME=VALUE")]
     set: Vec<String>,
     /// Delta PDF to write. Without it, beside the document.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Say what it would do without writing anything.
     #[arg(long)]
@@ -833,7 +858,7 @@ struct MeasureArgs {
 #[derive(clap::Args)]
 struct TargetArgs {
     /// Where to write the target.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: PathBuf,
     /// The paper it will be printed on.
     #[arg(long, default_value_t = default_page())]
@@ -942,7 +967,7 @@ struct CorrectArgs {
     /// Which page, counted from 1.
     #[arg(long, default_value_t = 1)]
     page: usize,
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Write a proof image here, showing what will be covered and written.
     #[arg(long)]
@@ -974,7 +999,7 @@ struct CoverArgs {
     #[arg(long, default_value_t = 1)]
     page: usize,
     /// Where to write the delta.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Write proof images here, showing what will be covered.
     #[arg(long)]
@@ -1047,7 +1072,7 @@ struct BatchArgs {
     #[arg(long, default_value_t = 1.2)]
     leading: f64,
     /// Where to write the stack of deltas.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Write proof images here, showing where the words land.
     #[arg(long)]
@@ -1122,7 +1147,7 @@ struct WriteArgs {
     // nothing to name and nothing to open.
     /// Delta PDF to write, when writing on a Word file, PDF or scan. Without
     /// it, beside the document as NAME-delta.pdf.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Write proof images here, showing where the words land.
     #[arg(long)]
@@ -1184,7 +1209,7 @@ struct DrawArgs {
     // changes that document, so there is nothing to name and nothing to open.
     /// Delta PDF to write, when drawing on a Word file, PDF or scan. Without
     /// it, beside the document as NAME-delta.pdf.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Write proof images here, showing where the drawing lands.
     #[arg(long)]
@@ -1260,7 +1285,7 @@ struct PrintArgs {
     /// The document to print.
     document: PathBuf,
     /// PDF to write. Without it, beside the document, named after it.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Open the PDF when it is written.
     #[arg(long)]
@@ -1334,7 +1359,7 @@ struct ReadArgs {
 #[derive(clap::Args)]
 struct AcquireArgs {
     /// Where to write the scan.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: PathBuf,
     /// Open the scan when it is written.
     #[arg(long)]
@@ -1377,7 +1402,7 @@ struct AddArgs {
     /// The scan: PNG, JPEG, TIFF or BMP.
     scan: PathBuf,
     /// Delta PDF to write. Without it, beside the scan as NAME-delta.pdf.
-    #[arg(short, long)]
+    #[arg(short, long, alias = "out")]
     output: Option<PathBuf>,
     /// Open the delta when it is written.
     #[arg(long)]
@@ -1730,6 +1755,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Stack(args) => cmd_stack(args),
         Command::Proof(args) => cmd_proof(args),
         Command::Merge(args) => cmd_merge(args),
+        Command::Join(args) => cmd_join(args),
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
@@ -5913,6 +5939,82 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
 }
 
 /// Put several deltas onto one, so the sheet goes through the printer once.
+/// Put several PDFs into one, page after page.
+fn cmd_join(args: JoinArgs) -> Result<ExitCode, String> {
+    for file in &args.files {
+        if !file.is_file() {
+            return Err(format!("no such file: {}", file.display()));
+        }
+    }
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.files[0], "-joined", "pdf"));
+
+    let inputs: Vec<(&Path, &str)> = args
+        .files
+        .iter()
+        .map(|file| (file.as_path(), "file"))
+        .collect();
+    refuse_to_clobber(&output, "joined document", &inputs)?;
+    check_writable(&output, "joined document")?;
+
+    // --dry-run still does the whole join, into a scratch file that is thrown
+    // away. Anything less would be a different piece of code answering a
+    // different question: a page whose size cannot be read is refused by the
+    // join itself, and a rehearsal that skipped it would say "fine" and then
+    // fail for real.
+    let rehearsal = match args.dry_run {
+        true => Some(
+            tempfile::tempdir().map_err(|why| format!("could not make a scratch folder: {why}"))?,
+        ),
+        false => None,
+    };
+    let writing_to = match &rehearsal {
+        Some(scratch) => scratch.path().join("rehearsal.pdf"),
+        None => output.clone(),
+    };
+
+    let joined = onionskin::join::join(&args.files, &writing_to, "Onionskin joined document")
+        .map_err(|e| e.to_string())?;
+
+    if !args.dry_run {
+        println!("{}", output.display());
+    }
+    println!("{}", joined.describe());
+
+    // A shell expanding page-*.pdf hands them over as 1, 10, 2. The join is
+    // exactly as asked either way, but a stack in that order is a stack in the
+    // wrong order, and this is much cheaper to notice here than after twenty
+    // sheets have gone through the printer.
+    if let Some(muddled) = joined.out_of_order() {
+        println!("\nNOTE: {muddled}");
+        println!(
+            "  If that is not what you meant, name them in order, or rename \
+             them so the\n  numbers are the same length: page-01, page-02, \
+             page-10."
+        );
+    }
+
+    // Bookmarks and form fields belong to a document, not to a page, and three
+    // documents' worth do not splice into one. Said rather than lost quietly.
+    for (path, what) in &joined.left_behind {
+        println!(
+            "\nNOTE: {} has {what}, which live above the page and cannot come \
+             along.\n  The pages themselves are all here.",
+            path.display()
+        );
+    }
+
+    if args.dry_run {
+        println!("\nNothing written — --dry-run.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    open_if_asked(args.open, &output);
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_merge(args: MergeArgs) -> Result<ExitCode, String> {
     for delta in &args.deltas {
         if !delta.is_file() {
@@ -7809,5 +7911,57 @@ mod naming_tests {
         // The names that promise nothing say nothing.
         assert_eq!(misleading_name(Path::new("letter.onion")), None);
         assert_eq!(misleading_name(Path::new("letter")), None);
+    }
+
+    /// Both spellings of the output flag work, on every command that has one.
+    ///
+    /// `package` and `apt-repo` have always taken `--out`; everything else took
+    /// `--output`. Which meant `merge`'s own documentation gave a command line
+    /// that did not run — it said `--out all.pdf`, and the program answered
+    /// "unexpected argument". Rather than correct the prose and leave the trap,
+    /// both spellings are accepted, so whichever one somebody learns first is
+    /// the one that keeps working.
+    #[test]
+    fn the_output_flag_is_spelt_both_ways() {
+        // Walked out of clap itself rather than listed here, so a command
+        // added next year is covered the day it is added.
+        let cli = <Cli as clap::CommandFactory>::command();
+        let mut checked = 0;
+        for command in cli.get_subcommands() {
+            for arg in command.get_arguments() {
+                let long = arg.get_long().unwrap_or_default();
+                if long != "output" {
+                    continue;
+                }
+                let spellings: Vec<&str> = arg.get_all_aliases().unwrap_or_default();
+                assert!(
+                    spellings.contains(&"out"),
+                    "`onionskin {} --out` is not accepted, only --output",
+                    command.get_name()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 10, "only {checked} commands were checked");
+
+        // And one of them end to end, because an alias clap knows about is
+        // still no use if it does not reach the field.
+        for flag in ["--output", "--out", "-o"] {
+            let parsed =
+                Cli::try_parse_from(["onionskin", "join", "a.pdf", "b.pdf", flag, "o.pdf"])
+                    .unwrap_or_else(|why| panic!("join would not take {flag}: {why}"));
+            let Some(Command::Join(args)) = parsed.command else {
+                panic!("{flag} parsed as something else");
+            };
+            assert_eq!(args.output, Some(PathBuf::from("o.pdf")), "{flag}");
+        }
+    }
+
+    /// Joining needs two files, and clap must say so before anything opens a
+    /// file — `onionskin join one.pdf` is a typo, not a request to copy it.
+    #[test]
+    fn joining_one_file_is_refused_by_the_parser() {
+        assert!(Cli::try_parse_from(["onionskin", "join", "only.pdf"]).is_err());
+        assert!(Cli::try_parse_from(["onionskin", "join", "a.pdf", "b.pdf"]).is_ok());
     }
 }

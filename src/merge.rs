@@ -59,7 +59,7 @@ pub const SAME_SHEET_PT: f64 = 1.0;
 
 /// One page of one of the files being merged.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Sheet {
+pub(crate) struct Sheet {
     /// The page box, in points: left, bottom, right, top.
     box_pt: (f64, f64, f64, f64),
     /// Quarter turns the reader is asked to apply, normalised to 0, 90, 180
@@ -68,7 +68,7 @@ struct Sheet {
 }
 
 impl Sheet {
-    fn size(&self) -> PageSize {
+    pub(crate) fn size(&self) -> PageSize {
         let (left, bottom, right, top) = self.box_pt;
         PageSize::from_pt(right - left, top - bottom)
     }
@@ -400,7 +400,7 @@ fn told_apart(sources: &[(PathBuf, Document, Vec<ObjectId>)]) -> Vec<Contributio
 ///
 /// A merged file that claims to be older than its contents is a small lie that
 /// some readers take seriously, so it claims the newest of them instead.
-fn newest_version(sources: &[(PathBuf, Document, Vec<ObjectId>)]) -> String {
+pub(crate) fn newest_version(sources: &[(PathBuf, Document, Vec<ObjectId>)]) -> String {
     let ordered = |version: &str| -> (u32, u32) {
         let mut parts = version.split('.');
         let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(1);
@@ -416,7 +416,7 @@ fn newest_version(sources: &[(PathBuf, Document, Vec<ObjectId>)]) -> String {
 
 /// The page box and rotation of one page, taking both from the page tree above
 /// it when the page itself does not say.
-fn sheet_of(doc: &Document, page_id: ObjectId) -> Option<Sheet> {
+pub(crate) fn sheet_of(doc: &Document, page_id: ObjectId) -> Option<Sheet> {
     let media = inherited(doc, page_id, b"MediaBox")?;
     // The box itself may be a reference to an array, which is legal and does
     // happen — a producer that shares one box between five hundred pages.
@@ -454,7 +454,7 @@ fn sheet_of(doc: &Document, page_id: ObjectId) -> Option<Sheet> {
 ///
 /// `MediaBox`, `Resources` and `Rotate` are all inheritable, and a PDF that
 /// puts them on the page tree rather than the page is perfectly ordinary.
-fn inherited(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Object> {
+pub(crate) fn inherited(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Object> {
     let mut at = page_id;
     // Bounded rather than followed to the end: a page tree with a loop in it
     // would otherwise hang here, and a broken file should not be able to do
@@ -574,7 +574,13 @@ fn resources_of(doc: &Document, page_id: ObjectId) -> Option<Object> {
 /// made the trip: it keeps a font shared by twenty pages a single font, and —
 /// because a number is written into it *before* what it points at is followed —
 /// it stops a document that refers back to itself from going round forever.
-fn import(
+///
+/// Shared with [`crate::join`], which needs the same deep copy for a different
+/// purpose: this one carries a page's furniture across so it can be drawn on
+/// top of another, that one carries a whole page across so it can follow one.
+/// Two spellings of "copy this object and its children" would be two places for
+/// a cycle to hang or a font to go missing.
+pub(crate) fn import(
     from: &Document,
     into: &mut Document,
     object: &Object,
