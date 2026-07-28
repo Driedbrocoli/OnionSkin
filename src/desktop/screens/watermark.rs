@@ -260,6 +260,28 @@ fn stamp(state: &mut State, room: &mut Room) {
             });
         }
 
+        // A size worked out from the word always fits; one set by hand may not,
+        // and this screen's counter goes to 400 pt. At that size a long phrase
+        // is clipped by the edge of the paper and reads as nothing.
+        let margin_mm = onionskin::settings::load()
+            .defaults
+            .margin_mm
+            .unwrap_or(onionskin::safety::DEFAULT_MARGIN_MM);
+        let mut checks = Vec::new();
+        for (index, page) in lines.iter().enumerate() {
+            for mut check in onionskin::safety::check_placements(sizes[index], page, margin_mm) {
+                check.page = Some(index + 1);
+                checks.push(check);
+            }
+        }
+        onionskin::safety::sort_checks(&mut checks);
+        if let Some(stop) = checks
+            .iter()
+            .find(|check| check.severity == onionskin::safety::Severity::Blocker)
+        {
+            return Outcome::refused(stop.format());
+        }
+
         report.saying("Writing the delta…");
         if let Err(why) =
             onionskin::pdf::write_delta(&output, &sizes, &lines, "Onionskin watermark", None)
@@ -280,6 +302,7 @@ fn stamp(state: &mut State, room: &mut Room) {
             ));
         }
         notes.extend(said.iter().cloned());
+        notes.extend(checks.iter().map(onionskin::safety::Check::format));
 
         Outcome::Done {
             message: format!("'{text}' across {} page(s).", wanted.len()),
