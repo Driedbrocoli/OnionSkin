@@ -1396,11 +1396,11 @@ fn the_browser_refuses_words_placed_off_the_paper() {
 /// whole run at the wrong end of the paper, by somebody who has already
 /// answered the question once.
 ///
-/// The remembered case is not exercised here on purpose: reading it means
-/// pointing `ONIONSKIN_HOME` somewhere, the tests in this file share a process,
-/// and a test that reaches into the environment of the ones beside it is a
-/// worse thing than the case it covers. The command line's own tests set a home
-/// per run and check it there.
+/// Reading the remembered answer means pointing `ONIONSKIN_HOME` somewhere, and
+/// that is one variable for a process full of tests running beside each other.
+/// `borrow_home` is the answer this program already had for that — it holds
+/// everything else off while the variable is pointed elsewhere — so the case is
+/// covered rather than skipped.
 #[test]
 fn the_feed_the_form_asks_for_is_the_one_that_is_used() {
     let a_sheet = a_page("Invoice");
@@ -1440,10 +1440,20 @@ fn the_feed_the_form_asks_for_is_the_one_that_is_used() {
         "'turned' did not land on the far side: {turned:.0} mm"
     );
 
-    // And the form's own "whatever this machine was told" is an empty value,
-    // which has to produce a delta rather than a refusal.
-    let unsaid = asked(b"");
-    assert!(unsaid.is_finite(), "an unsaid feed wrote nothing");
+    // And the form's own "whatever this machine was told" is an empty value.
+    // With this machine told 'turned', that is the answer it has to use — a
+    // page that went back to its own default would be a setting that only
+    // worked on the command line, and the cost of that is the whole run at the
+    // wrong end of the paper by somebody who has already answered once.
+    let home = tempfile::tempdir().expect("a home of its own");
+    let held = crate::calibrate::borrow_home(home.path());
+    crate::settings::set_default("feed", Some("turned")).expect("it should remember");
+    let remembered = asked(b"");
+    drop(held);
+    assert!(
+        remembered > 100.0,
+        "the remembered answer was ignored: {remembered:.0} mm"
+    );
 
     // The page offers exactly the words the parser understands, plus the empty
     // one that means "ask the settings".
