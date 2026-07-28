@@ -17,6 +17,7 @@ pub mod doctor;
 pub mod document;
 pub mod draw;
 pub mod fits;
+pub mod harvest;
 pub mod history;
 pub mod jobs;
 pub mod join;
@@ -123,6 +124,7 @@ pub enum Screen {
     Watermark,
     Barcode,
     Back,
+    Harvest,
     Proof,
     Merge,
     Join,
@@ -153,6 +155,7 @@ impl Screen {
         Screen::Watermark,
         Screen::Barcode,
         Screen::Back,
+        Screen::Harvest,
         Screen::Proof,
         Screen::Merge,
         Screen::Join,
@@ -190,6 +193,7 @@ impl Screen {
             Screen::Watermark => "watermark",
             Screen::Barcode => "barcode",
             Screen::Back => "back",
+            Screen::Harvest => "harvest",
             Screen::Fits => "fits",
             Screen::Stack => "stack",
             Screen::Verify => "verify",
@@ -227,6 +231,7 @@ impl Screen {
             Screen::Watermark => "Stamp a word across it",
             Screen::Barcode => "A barcode or a QR code",
             Screen::Back => "The back of the sheet",
+            Screen::Harvest => "Forms into a spreadsheet",
             Screen::Fits => "Check before printing",
             Screen::Stack => "Sort a stack",
             Screen::Verify => "Check a sheet or a run",
@@ -258,6 +263,7 @@ impl Screen {
             Screen::Watermark => "DRAFT, COPY or VOID, corner to corner",
             Screen::Barcode => "An asset number or a link, worked out here",
             Screen::Back => "Terms, an address, \"continued overleaf\"",
+            Screen::Harvest => "Read the sheets back instead of typing them",
             Screen::Fits => "Is this the sheet the delta was made for?",
             Screen::Stack => "Which document is each sheet from the feeder?",
             Screen::Verify => "Did it come out of the printer right — one sheet, or all of them?",

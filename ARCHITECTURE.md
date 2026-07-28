@@ -28,6 +28,7 @@ went with it.
 | `watermark`| A word laid corner to corner across a sheet |
 | `barcode`  | Code 128 and QR codes, worked out rather than fetched |
 | `duplex`   | Which page is which side of which sheet, and which way up the back comes out |
+| `harvest`  | Filled-in forms read back into a spreadsheet |
 | `office`   | Reading and writing `.docx` and `.odt`, without a word processor |
 | `printer`  | Printing over IPP and scanning over eSCL, both spoken directly |
 | `acquire`  | Driving a scanner through SANE |
@@ -931,6 +932,52 @@ macOS is unsigned, and says so in the archive's README: Gatekeeper stops a
 downloaded program the first time it runs and the message it gives reads like
 the file is broken. Saying so up front is cheaper than the alternative, which
 is paying Apple for a certificate.
+
+## Reading a form back, and the ring that is three characters
+
+`harvest` is `batch` run backwards, and it is harder in one specific way that is
+worth writing down.
+
+Finding the values is easy and almost uninteresting: a form prints its own field
+names next to the fields, so the label is what gets named and the value is what
+follows it. The one real decision is where a value *stops*. Read a line naively
+and `Name` on a row that also carries `Date:` comes back as everything to the end
+of the line. That failure has a nasty property: `J. Bezzina Date: 27 July 2024`
+in a spreadsheet cell does not look like a bug, it looks like a name. So every
+label on the sheet is found before any value is taken, and a value runs from its
+own label to the next label along.
+
+### The ring
+
+The hard part is that a ring on paper is a capital O, a lower-case o and a nought
+at the same time. `anchor` already knows this and folds them together on purpose,
+which is exactly right for finding a word on a page and exactly wrong for filling
+in a cell: `24O.OO` is not a sum of money and `27 July 2O24` is not a date.
+
+Undoing it needs a rule, and the tempting rule — "if a word is mostly digits,
+read the letters in it as digits" — is a guess about how much of a word was
+misread. It turns `B2B` into `828`.
+
+The rule that works is not about proportions at all. It is that some of those
+confusions are not confusions: `O`/`o`/`0` and `l`/`I`/`1` are the *same marks*
+in most faces, carrying no information whatever about which they are, while `S`
+against `5` and `B` against `8` are different shapes that a reader is merely
+sometimes wrong about. So a word made only of digits and information-free marks
+is a figure read imperfectly — `5OO`, `1,2OO.5O`, `2O24` — and a word containing
+anything else is a word. `B2B` survives because `B` is a real shape.
+
+### What the caller knows that the page does not
+
+`Amount/number` is the other half. "This column is money" is knowledge that does
+not exist anywhere in the ink, and it earns a second, harder pass: every
+ambiguous shape read as the digit it could be, not merely the information-free
+ones.
+
+And when even that does not produce a figure, nothing is invented. The reading is
+kept in the cell and named in a list of things to check, with its sheet number.
+A person correcting three cells out of six hundred is the feature. A person
+finding out six months later that `J7.25` was silently written as `17.25` is
+what the feature is designed not to be.
 
 ## The one question about a printer nobody can answer
 

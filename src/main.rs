@@ -118,6 +118,8 @@ enum Command {
     Barcode(BarcodeArgs),
     /// Write on the back of a printed sheet.
     Back(BackArgs),
+    /// Read filled-in forms back into a spreadsheet.
+    Harvest(HarvestArgs),
     /// Find the places on a form where something can be written.
     Blanks(BlanksArgs),
     /// What was added to which sheet, and when.
@@ -588,6 +590,41 @@ struct VerifyArgs {
     /// waiting for two hundred.
     #[arg(long, value_name = "N")]
     first: Option<usize>,
+}
+
+/// Filled-in forms, back into a spreadsheet.
+///
+/// `batch` goes one way: a list of two hundred names becomes two hundred sheets.
+/// This is the other way — the sheets come back filled in, and somebody has to
+/// get what is on them into a spreadsheet. That somebody is currently a person
+/// with a keyboard and a stack of paper.
+///
+/// A field is named by the label printed beside it on the form, and its value is
+/// what follows that label — stopping where the next label starts, which is what
+/// keeps two fields on one line from running into each other.
+#[derive(clap::Args)]
+struct HarvestArgs {
+    /// The scanned stack: one PDF with a page per sheet.
+    scan: PathBuf,
+    /// A column, and the label that finds it: 'Name', or
+    /// 'Name=Full name of applicant', or 'Address/below' for a value under its
+    /// caption rather than beside it.
+    #[arg(long = "field", value_name = "SPEC", required = true)]
+    field: Vec<String>,
+    /// Where to write the spreadsheet. Comma-separated, which every
+    /// spreadsheet opens.
+    #[arg(short, long, alias = "out")]
+    output: Option<PathBuf>,
+    /// Stop after this many sheets, to see the shape of it before waiting for
+    /// two hundred.
+    #[arg(long, value_name = "N")]
+    first: Option<usize>,
+    /// Print the spreadsheet instead of writing it.
+    #[arg(long)]
+    stdout: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 /// Words on the back of a sheet that is already printed.
@@ -2032,6 +2069,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Watermark(args) => cmd_watermark(args),
         Command::Barcode(args) => cmd_barcode(args),
         Command::Back(args) => cmd_back(args),
+        Command::Harvest(args) => cmd_harvest(args),
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
@@ -6595,6 +6633,98 @@ fn which_feed(asked: Option<&str>) -> Result<onionskin::duplex::Feed, String> {
         .as_deref()
         .and_then(onionskin::duplex::Feed::parse)
         .unwrap_or_default())
+}
+
+fn cmd_harvest(args: HarvestArgs) -> Result<ExitCode, String> {
+    let fields: Vec<onionskin::harvest::Field> = args
+        .field
+        .iter()
+        .map(|spec| onionskin::harvest::Field::parse(spec))
+        .collect::<Result<_, _>>()?;
+
+    let pages = onionskin::recipe::pages_in(&args.scan)?;
+    let wanted = args.first.unwrap_or(pages).min(pages);
+    if wanted == 0 {
+        return Err(format!("{} has no pages on it.", args.scan.display()));
+    }
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.scan, "-harvested", "csv"));
+    if !args.stdout {
+        refuse_to_clobber(&output, "spreadsheet", &[(&args.scan, "scan")])?;
+        check_writable(&output, "spreadsheet")?;
+    }
+    let rehearsal = Rehearsal::new(args.dry_run)?;
+
+    println!("Reading {wanted} sheet(s) of {}:", args.scan.display());
+    for field in &fields {
+        println!("  {}", field.describe());
+    }
+    println!();
+
+    let mut sheets = Vec::with_capacity(wanted);
+    for page in 1..=wanted {
+        let (gray, registration) = onionskin::recipe::draw_page(&args.scan, page)?;
+        let Some((text, _)) = onionskin::typeface::read_and_match_in(&gray, &registration) else {
+            return Err(
+                "There is no font on this machine to read the pages against, so \
+                 Onionskin cannot find\n  the labels. Install a common face — \
+                 DejaVu, Liberation — and try again."
+                    .into(),
+            );
+        };
+        let values = onionskin::harvest::pick_from(&text, &fields);
+        // Said as it goes, because two hundred sheets is minutes and a run that
+        // says nothing until it finishes is a run people stop trusting.
+        println!(
+            "  sheet {page}: {}",
+            values
+                .iter()
+                .map(|value| match value.is_read() {
+                    true => value.cell(),
+                    false => "—".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        sheets.push(onionskin::harvest::Sheet { page, values });
+    }
+
+    let harvest = onionskin::harvest::Harvest { fields, sheets };
+    println!("\n{}", harvest.verdict());
+
+    let gaps = harvest.gaps();
+    if !gaps.is_empty() {
+        println!("\nNothing to put in these, so they need checking on the paper:");
+        for line in gaps.iter().take(40) {
+            println!("{line}");
+        }
+        if gaps.len() > 40 {
+            println!("  ... and {} more.", gaps.len() - 40);
+        }
+    }
+
+    if args.stdout {
+        println!();
+        print!("{}", harvest.csv());
+    } else {
+        std::fs::write(rehearsal.instead_of(&output), harvest.csv())
+            .map_err(|e| format!("{}: {e}", output.display()))?;
+        if !rehearsal.pretending() {
+            println!("\n{}", output.display());
+        }
+    }
+
+    println!(
+        "\nHandwriting is not read. Onionskin matches printed letter shapes \
+         against the fonts on\n  this machine, and a signature has nothing to \
+         match — so a hand-filled form comes back\n  mostly empty, and that is \
+         the honest answer rather than a guess."
+    );
+    rehearsal.say_nothing_was_written();
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_back(args: BackArgs) -> Result<ExitCode, String> {

@@ -1331,6 +1331,67 @@ every time.
 `--sheet 3` does one sheet instead of all of them, `--image` puts a signature or
 a logo on the back, and `--size` and `--font` set the type.
 
+### Filled-in forms, back into a spreadsheet
+
+`batch` goes one way: a list of two hundred names becomes two hundred sheets.
+This is the other way. The sheets come back, and somebody has to get what is on
+them into a spreadsheet — which is currently a person with a keyboard and a stack
+of paper, and where a day goes and where the typing mistakes come from.
+
+```bash
+onionskin harvest scans.pdf --field Name --field Date --field Amount/number
+```
+
+Fields are named by the label printed beside them on the form, because that is
+what a form already tells you. The value is whatever follows that label.
+
+**The part that makes it work is knowing where a value stops.** Read naively,
+`Name` on a line that also carries `Date:` comes back as the whole rest of the
+line — and "J. Bezzina Date: 27 July 2024" does not look wrong in a spreadsheet,
+it looks like somebody's name. So every label is found first, and a value runs
+from its own label to the next label along. Two fields on one line is the
+commonest form layout there is.
+
+`Address/below` takes the value from the line *under* the caption instead of
+beside it. `Name=Full name of applicant` gives the column a short heading and
+still looks for the long label. `--first 5` reads five sheets so you can see the
+shape of a run before waiting for two hundred.
+
+#### Noughts and letter O
+
+A ring on paper is a capital O, a lower-case o and a nought all at once. There is
+nothing in the ink to tell them apart, and the reader says so — which is right
+for finding a word and useless for a spreadsheet, where `24O.OO` is not a sum of
+money.
+
+So the ambiguous shapes are resolved where the surrounding characters settle it.
+`27 July 2O24` comes back as `27 July 2024`; `July` keeps its `l`, because
+`Ju1y` is not a month. The line is drawn at the marks that carry no information
+at all — `O`/`o`/`0` and `l`/`I`/`1` are the same shape in most faces — rather
+than at a guess about how much of a word was misread. `B2B` stays `B2B`.
+
+`Amount/number` says a column holds figures, which is real knowledge the marks on
+the page do not carry, and that buys a harder try: every ambiguous shape read as
+the digit it could be. And if the result still is not a figure, it is **not
+written down as though it were**:
+
+```
+8 of 9 cell(s) read, off 3 sheet(s).
+
+Nothing to put in these, so they need checking on the paper:
+  sheet 3: Amount — 'J7.25' is not a number
+```
+
+The text is kept in the cell, because handing somebody `J7.25` to correct beats
+handing them an empty cell to go and find on the paper. A field whose label is
+missing, a field with nothing written after it, and a label found twice are all
+told apart in that list — they are all an empty cell in the spreadsheet, and a
+spreadsheet has only one way of saying empty.
+
+**Handwriting is not read.** Onionskin matches printed letter shapes against the
+fonts on this machine, and a signature has nothing to match. A hand-filled form
+comes back mostly empty, and that is the honest answer rather than a guess.
+
 ### A rehearsal, before the paper goes in
 
 Every command that writes a file takes `--dry-run`:

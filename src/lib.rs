@@ -13,6 +13,7 @@ pub mod duplex;
 pub mod fits;
 pub mod font;
 pub mod geometry;
+pub mod harvest;
 pub mod history;
 pub mod install;
 pub mod jobs;
