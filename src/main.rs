@@ -727,28 +727,34 @@ struct LabelsArgs {
     /// a line break: '{name}\n{address}'.
     #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
     text: String,
-    /// How the stock is cut: columns across by rows down.
-    #[arg(long, value_name = "COLSxROWS")]
-    grid: String,
+    /// How the stock is cut: columns across by rows down. Not needed with
+    /// --stock.
+    #[arg(long, value_name = "COLSxROWS", required_unless_present = "stock")]
+    grid: Option<String>,
+    /// The label stock by its code — `--stock l7160` — instead of measuring.
+    /// `--stock list` says which are known. Anything you also give wins over
+    /// the code.
+    #[arg(long, value_name = "CODE")]
+    stock: Option<String>,
     /// The paper the labels are on.
-    #[arg(long, default_value_t = default_page())]
-    page: String,
+    #[arg(long)]
+    page: Option<String>,
     /// Each label's size in millimetres, as WIDTHxHEIGHT. Without it, the
     /// labels are made to fill the page inside the margins.
     #[arg(long, value_name = "WxH")]
     label: Option<String>,
-    /// From the paper's left edge to the first label.
-    #[arg(long, default_value_t = 7.0)]
-    margin_x: f64,
-    /// From the paper's top edge to the first label.
-    #[arg(long, default_value_t = 15.0)]
-    margin_y: f64,
-    /// Between one label and the next, across.
-    #[arg(long, default_value_t = 2.5)]
-    gap_x: f64,
-    /// Between one label and the next, down.
-    #[arg(long, default_value_t = 0.0)]
-    gap_y: f64,
+    /// From the paper's left edge to the first label. [default: 7]
+    #[arg(long)]
+    margin_x: Option<f64>,
+    /// From the paper's top edge to the first label. [default: 15]
+    #[arg(long)]
+    margin_y: Option<f64>,
+    /// Between one label and the next, across. [default: 2.5]
+    #[arg(long)]
+    gap_x: Option<f64>,
+    /// Between one label and the next, down. [default: 0]
+    #[arg(long)]
+    gap_y: Option<f64>,
     /// Start at this label, counting from 1 — for a sheet with the first few
     /// already peeled off.
     #[arg(long, default_value_t = 1)]
@@ -5515,10 +5521,46 @@ fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
 
 /// A sheet of labels from a list.
 fn cmd_labels(args: LabelsArgs) -> Result<ExitCode, String> {
-    let page = parse_page(&args.page).map_err(|e| e.to_string())?;
-    let (columns, rows) = parse_grid(&args.grid)?;
-    let label = match &args.label {
-        Some(spec) => {
+    // A code, if one was given, and nothing else changes if it was not.
+    let stock = match args.stock.as_deref().map(str::trim) {
+        None => None,
+        // Somebody who does not know the codes has to be able to find out,
+        // and a flag that only ever refuses is a poor way to be told.
+        Some("list") | Some("?") => {
+            println!(
+                "Label stock Onionskin knows:\n  {}",
+                onionskin::stock::every_code().join("\n  ")
+            );
+            println!(
+                "\nGive one as --stock l7160. Anything else is four numbers off the \
+                 box:\n  --grid 3x7 --label 63.5x38.1 --margin-x 7.2 --margin-y 15.1"
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        Some(code) => {
+            Some(onionskin::stock::find(code).ok_or_else(|| onionskin::stock::not_known(code))?)
+        }
+    };
+
+    // What was typed beats the code, which beats Onionskin's own answer. So a
+    // sheet that is a millimetre out is corrected rather than abandoned.
+    let page = parse_page(
+        &args
+            .page
+            .clone()
+            .or_else(|| stock.map(|s| s.paper.to_string()))
+            .unwrap_or_else(default_page),
+    )
+    .map_err(|e| e.to_string())?;
+    let (columns, rows) = match (&args.grid, stock) {
+        (Some(given), _) => parse_grid(given)?,
+        (None, Some(stock)) => (stock.across, stock.down),
+        // clap requires one or the other, so this cannot be reached from the
+        // command line — but a message beats a panic if it ever is.
+        (None, None) => return Err("give --grid, or --stock and a code".into()),
+    };
+    let label = match (&args.label, stock) {
+        (Some(spec), _) => {
             let (width_mm, height_mm) = parse_size(spec)?;
             if width_mm <= 0.0 || height_mm <= 0.0 {
                 return Err(format!(
@@ -5528,19 +5570,63 @@ fn cmd_labels(args: LabelsArgs) -> Result<ExitCode, String> {
             }
             Some((width_mm, height_mm))
         }
-        None => None,
+        (None, Some(stock)) => Some(stock.label_mm),
+        (None, None) => None,
     };
     let grid = onionskin::labels::Grid {
         page,
         columns,
         rows,
-        margin_x_mm: args.margin_x,
-        margin_y_mm: args.margin_y,
-        gap_x_mm: args.gap_x,
-        gap_y_mm: args.gap_y,
+        margin_x_mm: args
+            .margin_x
+            .or(stock.map(|s| s.margin_mm.0))
+            .unwrap_or(7.0),
+        margin_y_mm: args
+            .margin_y
+            .or(stock.map(|s| s.margin_mm.1))
+            .unwrap_or(15.0),
+        gap_x_mm: args.gap_x.or(stock.map(|s| s.gap_mm.0)).unwrap_or(2.5),
+        gap_y_mm: args.gap_y.or(stock.map(|s| s.gap_mm.1)).unwrap_or(0.0),
         label,
     };
     grid.check()?;
+
+    // Said before anything else, because the whole risk in taking a code is
+    // that it means something different where you live — and the only defence
+    // is somebody reading the numbers it stood for.
+    if let Some(stock) = stock {
+        println!("--stock {}: {}", stock.code, stock.describe());
+        // And what was not the code's, said too. A description that still read
+        // "15.1 mm down from the top" after somebody typed --margin-y 20 would
+        // be the same silent wrongness in a new place.
+        let mut instead: Vec<String> = Vec::new();
+        let mut differs = |what: &str, mine: f64, theirs: f64| {
+            if (mine - theirs).abs() > 0.01 {
+                instead.push(format!("{what} {mine} mm, not {theirs}"));
+            }
+        };
+        differs(
+            "labels",
+            grid.label.map(|l| l.0).unwrap_or(stock.label_mm.0),
+            stock.label_mm.0,
+        );
+        differs(
+            "and",
+            grid.label.map(|l| l.1).unwrap_or(stock.label_mm.1),
+            stock.label_mm.1,
+        );
+        differs("in from the left", grid.margin_x_mm, stock.margin_mm.0);
+        differs("down from the top", grid.margin_y_mm, stock.margin_mm.1);
+        differs("between columns", grid.gap_x_mm, stock.gap_mm.0);
+        differs("between rows", grid.gap_y_mm, stock.gap_mm.1);
+        if grid.columns != stock.across || grid.rows != stock.down {
+            instead.push(format!("{} across by {} down", grid.columns, grid.rows));
+        }
+        if !instead.is_empty() {
+            println!("  Overridden by what you gave: {}.", instead.join(", "));
+        }
+        println!();
+    }
 
     if args.start == 0 {
         return Err(
@@ -8142,6 +8228,58 @@ mod naming_tests {
             };
             assert_eq!(args.output, Some(PathBuf::from("o.pdf")), "{flag}");
         }
+    }
+
+    /// A label code fills in the measurements, and what it filled in is on
+    /// the screen before any paper moves.
+    ///
+    /// `labels` argues, correctly, that a table of codes would be wrong for
+    /// somebody, silently, on paper. The answer is not to refuse codes — they
+    /// go and measure a label with a ruler, and get it wrong by a millimetre —
+    /// it is to take away the silence.
+    #[test]
+    fn a_stock_code_fills_the_measurements_in_and_says_which() {
+        let with_a_code = Cli::try_parse_from([
+            "onionskin",
+            "labels",
+            "--from",
+            "a.csv",
+            "--text",
+            "{name}",
+            "--stock",
+            "l7160",
+        ]);
+        assert!(
+            with_a_code.is_ok(),
+            "--stock alone was refused: {:?}",
+            with_a_code.err().map(|e| e.to_string())
+        );
+
+        // And --grid still stands on its own, so nothing that worked before
+        // needs a code now.
+        assert!(Cli::try_parse_from([
+            "onionskin",
+            "labels",
+            "--from",
+            "a.csv",
+            "--text",
+            "{name}",
+            "--grid",
+            "3x8",
+        ])
+        .is_ok());
+
+        // One or the other, though: without either there is no way to know how
+        // the stock is cut, and guessing would be a sheet of ruined labels.
+        assert!(Cli::try_parse_from([
+            "onionskin",
+            "labels",
+            "--from",
+            "a.csv",
+            "--text",
+            "{name}",
+        ])
+        .is_err());
     }
 
     /// Every command that writes a file takes `--dry-run`.

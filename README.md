@@ -1436,6 +1436,27 @@ Address labels, file labels, shelf labels. The stock comes pre-cut in a grid and
 the job is always the same: take a column of names and put one in each label.
 
 ```bash
+onionskin labels --from addresses.xlsx --stock l7160 --text '{name}\n{address}' \
+    -o labels.pdf
+```
+
+```
+--stock l7160: Avery L7160 — address labels, 21 to a sheet.
+  A4, 3 across by 7 down, labels 63.5 × 38.1 mm,
+  7.2 mm in from the left, 15.1 mm down from the top, 2.5 mm between columns.
+  These are the published measurements. The box is the authority: print one
+  sheet on plain paper and hold it up to the stock before committing the box.
+```
+
+`--stock list` names the codes it knows. The numbers it filled in are printed
+every time, because that is the whole risk in taking a code at all: the same
+code means different sizes in different countries and changes between years, and
+a table nobody checks is a sheet of ruined stock. Printed, it is caught by
+somebody reading. Anything you give as well wins over the code, and is called
+out as an override — so a stock that is a millimetre out is corrected rather
+than abandoned, and the measurements off your own box always work:
+
+```bash
 onionskin labels --from addresses.xlsx --grid 3x8 --label 63.5x33.9 \
   --text '{name}\n{address}\n{town} {postcode}'
 ```

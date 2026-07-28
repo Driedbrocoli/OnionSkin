@@ -18,14 +18,22 @@
 //! sixth. `--start 6` does that, and it is the difference between this being
 //! useful and being a thing people go back to a word processor for.
 //!
-//! # Why the grid is given rather than guessed
+//! # The grid, and the code that stands for it
 //!
 //! Label stock is sold by a code — Avery 5160, L7160, and a hundred others —
 //! and those codes mean different sizes in different countries and change
-//! between years. A table of them would be wrong for somebody, silently, on
-//! paper. The measurements are printed on the box, they are four numbers, and
-//! being asked for them once beats a sheet of labels printed half a
-//! millimetre off because a code meant something else where you live.
+//! between years. So a table of them is a way to be wrong for somebody,
+//! silently, on paper: the danger this module was originally written to avoid
+//! by asking for the four numbers off the box instead.
+//!
+//! It avoided the danger and kept the failure. Nobody reads the box. They
+//! measure a label with a ruler and are half a millimetre out, which is the
+//! same ruined sheet arrived at more slowly.
+//!
+//! [`crate::stock`] has the codes, and takes away the silence rather than the
+//! codes: `--stock l7160` prints the measurements it filled in, says the box is
+//! the authority, and calls out anything you overrode. The four numbers still
+//! work, and still win — which is what makes a code safe to offer.
 
 use crate::geometry::PageSize;
 
@@ -93,8 +101,7 @@ impl Grid {
         if let Some(size) = self.label {
             return size;
         }
-        let across = self.page.width_mm - self.margin_x_mm * 2.0
-            + self.gap_x_mm
+        let across = self.page.width_mm - self.margin_x_mm * 2.0 + self.gap_x_mm
             - self.gap_x_mm * self.columns as f64;
         let down = self.page.height_mm - self.margin_y_mm * 2.0 + self.gap_y_mm
             - self.gap_y_mm * self.rows as f64;

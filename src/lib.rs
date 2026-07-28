@@ -33,6 +33,7 @@ pub mod scan;
 pub mod settings;
 pub mod sheets;
 pub mod split;
+pub mod stock;
 pub mod typeface;
 pub mod web;
 pub mod which;
