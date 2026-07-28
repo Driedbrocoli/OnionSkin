@@ -10,6 +10,12 @@
 //! from a crate: the format is small, the rules that matter are the quoting
 //! ones, and they are written down below where they can be read.
 //!
+//! It also reads `.xlsx` and `.ods` directly — see [`crate::sheets`] — because
+//! nobody *keeps* their list as a CSV, and telling somebody to go and save it
+//! again is asking them to do a conversion this program could do. The columns
+//! come out the same either way, so everything below this point neither knows
+//! nor cares which it was.
+//!
 //! The rules, from RFC 4180 and from what spreadsheets really emit:
 //!
 //!   * Fields are separated by commas and records by line breaks.
@@ -46,6 +52,17 @@ pub enum RowsError {
     NotCsv {
         path: std::path::PathBuf,
         why: String,
+    },
+    #[error("could not read the spreadsheet {path}: {why}")]
+    BadSpreadsheet {
+        path: std::path::PathBuf,
+        why: String,
+    },
+    #[error("{path} has no sheet called '{wanted}'. It has: {names}")]
+    NoSuchSheet {
+        path: std::path::PathBuf,
+        wanted: String,
+        names: String,
     },
     #[error("{path} has no columns at all — the first line names them, and it is empty")]
     NoColumns { path: std::path::PathBuf },
@@ -93,8 +110,17 @@ pub struct List {
 }
 
 impl List {
-    /// Read a CSV file.
+    /// Read a list: a CSV file, or a spreadsheet.
     pub fn read(path: &Path) -> Result<List, RowsError> {
+        List::read_sheet(path, None)
+    }
+
+    /// The same, naming which tab of a spreadsheet to read.
+    ///
+    /// `None` takes the first tab with anything on it — not simply the first,
+    /// because a book whose first tab is an empty "Notes" is common and
+    /// reporting "no columns at all" about it would be a lie about the file.
+    pub fn read_sheet(path: &Path, sheet: Option<&str>) -> Result<List, RowsError> {
         if !path.is_file() {
             return Err(RowsError::Missing(path.to_path_buf()));
         }
@@ -102,13 +128,24 @@ impl List {
             path: path.to_path_buf(),
             source,
         })?;
-        // A spreadsheet saved as .xlsx or .ods is a zip, and a helpful message
-        // about that is worth more than a screen of mojibake.
+
+        // A spreadsheet is a zip. Told apart by what is inside it rather than
+        // by its name, because a `.csv` that is really a workbook happens
+        // every time somebody renames a file to make a program accept it.
+        if crate::sheets::is_a_spreadsheet(&bytes) {
+            return List::from_spreadsheet(&bytes, path, sheet);
+        }
+        // A zip that is not a spreadsheet is not a list either, and control
+        // characters are valid UTF-8 — so without this the CSV reader would
+        // take a Word document apart into one column of rubbish and complain
+        // that it has no rows.
         if bytes.starts_with(b"PK\x03\x04") {
             return Err(RowsError::NotCsv {
                 path: path.to_path_buf(),
-                why: "it is a spreadsheet file, not a CSV. Open it and choose \
-                      File → Save As → CSV"
+                why: "it is a zip file — a Word document, a damaged \
+                      spreadsheet, or something else packed up — and not a \
+                      list of values. Onionskin reads .xlsx, .ods and CSV; \
+                      open it and save it again as one of those"
                     .into(),
             });
         }
@@ -119,6 +156,77 @@ impl List {
                 .into(),
         })?;
         List::parse(&text, path)
+    }
+
+    /// A list out of a spreadsheet's cells.
+    fn from_spreadsheet(
+        bytes: &[u8],
+        path: &Path,
+        wanted: Option<&str>,
+    ) -> Result<List, RowsError> {
+        let book = crate::sheets::read(bytes).map_err(|why| RowsError::BadSpreadsheet {
+            path: path.to_path_buf(),
+            why: why.to_string(),
+        })?;
+        let sheet = match wanted {
+            Some(name) => book.named(name).ok_or_else(|| RowsError::NoSuchSheet {
+                path: path.to_path_buf(),
+                wanted: name.to_string(),
+                names: book.names().join(", "),
+            })?,
+            None => book
+                .first_with_anything()
+                .ok_or_else(|| RowsError::NoColumns {
+                    path: path.to_path_buf(),
+                })?,
+        };
+
+        let mut cells = sheet.rows.iter();
+        let Some(header) = cells.next() else {
+            return Err(RowsError::NoColumns {
+                path: path.to_path_buf(),
+            });
+        };
+        let columns: Vec<String> = header.iter().map(|name| name.trim().to_string()).collect();
+        if columns.iter().all(|name| name.is_empty()) {
+            return Err(RowsError::NoColumns {
+                path: path.to_path_buf(),
+            });
+        }
+
+        let mut rows = Vec::new();
+        for record in cells {
+            // A row of nothing is a gap in the sheet, not a person to print a
+            // certificate for.
+            if record.iter().all(|value| value.trim().is_empty()) {
+                continue;
+            }
+            // Short rows are ordinary in a spreadsheet — the cells to the
+            // right were simply never filled in — so they are padded rather
+            // than refused, unlike a ragged CSV where a missing field means a
+            // comma in the wrong place.
+            let values = columns
+                .iter()
+                .cloned()
+                .zip(
+                    record
+                        .iter()
+                        .map(|value| value.trim().to_string())
+                        .chain(std::iter::repeat(String::new())),
+                )
+                .collect();
+            rows.push(Row {
+                values,
+                number: rows.len() + 1,
+            });
+        }
+
+        if rows.is_empty() {
+            return Err(RowsError::NoRows {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(List { columns, rows })
     }
 
     /// The same, from text already in hand.

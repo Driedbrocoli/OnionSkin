@@ -703,9 +703,14 @@ struct BlanksArgs {
 /// millimetres, and being right about it.
 #[derive(clap::Args)]
 struct LabelsArgs {
-    /// The list, as a CSV file. Its first line names the columns.
-    #[arg(long = "from", value_name = "LIST.csv")]
+    /// The list: a CSV file, or a spreadsheet (.xlsx, .ods). Its first line
+    /// names the columns.
+    #[arg(long = "from", value_name = "LIST")]
     from: PathBuf,
+    /// Which tab of a spreadsheet to read. Without it, the first one with
+    /// anything on it.
+    #[arg(long, value_name = "NAME")]
+    sheet: Option<String>,
     /// What goes on each label, with {column} for each row's own. Use \n for
     /// a line break: '{name}\n{address}'.
     #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
@@ -1022,9 +1027,14 @@ struct BatchArgs {
     /// The printed sheet everybody's copy goes onto: the blank certificate,
     /// the form, the ticket.
     document: PathBuf,
-    /// The list, as a CSV file. Its first line names the columns.
-    #[arg(long = "from", value_name = "LIST.csv")]
+    /// The list: a CSV file, or a spreadsheet (.xlsx, .ods). Its first line
+    /// names the columns.
+    #[arg(long = "from", value_name = "LIST")]
     from: PathBuf,
+    /// Which tab of a spreadsheet to read. Without it, the first one with
+    /// anything on it.
+    #[arg(long, value_name = "NAME")]
+    sheet: Option<String>,
     /// Where the words go, in millimetres, with {column} standing for each
     /// person's own: '60,120:{name}'.
     #[arg(long = "at", value_name = "X,Y:WORDS", allow_hyphen_values = true)]
@@ -2201,7 +2211,8 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
                 .into(),
         );
     }
-    let list = onionskin::rows::List::read(&args.from).map_err(|e| e.to_string())?;
+    let list = onionskin::rows::List::read_sheet(&args.from, args.sheet.as_deref())
+        .map_err(|e| e.to_string())?;
 
     // Every template checked against the columns before a single sheet is
     // made. Two hundred certificates reading "{nmae}" is a discovery to make
@@ -5390,7 +5401,8 @@ fn cmd_labels(args: LabelsArgs) -> Result<ExitCode, String> {
         ));
     }
 
-    let list = onionskin::rows::List::read(&args.from).map_err(|e| e.to_string())?;
+    let list = onionskin::rows::List::read_sheet(&args.from, args.sheet.as_deref())
+        .map_err(|e| e.to_string())?;
     let unknown: Vec<String> =
         onionskin::rows::unknown_columns(std::slice::from_ref(&args.text), &list)
             .into_iter()

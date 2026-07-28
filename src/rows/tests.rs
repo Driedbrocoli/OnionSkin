@@ -72,13 +72,115 @@ fn a_row_with_the_wrong_number_of_values_says_which_line_and_why() {
     assert!(said.contains("inside quotes"), "{said}");
 }
 
+/// A spreadsheet is read rather than refused, which is the whole point of
+/// [`crate::sheets`] — and it is recognised by what is inside it, so a
+/// workbook somebody renamed to `.csv` to make a program accept it is read
+/// correctly too.
 #[test]
-fn a_spreadsheet_file_is_named_as_such_rather_than_read_as_gibberish() {
+fn a_spreadsheet_is_read_whatever_it_is_called() {
+    let dir = tempfile::tempdir().unwrap();
+    let book = an_xlsx(&[&["name", "seat"], &["J. Bezzina", "4A"]]);
+
+    for name in ["people.xlsx", "people.csv", "people"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, &book).unwrap();
+        let list = List::read(&path).unwrap_or_else(|why| panic!("{name}: {why}"));
+        assert_eq!(list.columns, vec!["name", "seat"]);
+        assert_eq!(list.rows[0].get("seat"), Some("4A"), "{name}");
+    }
+}
+
+/// A zip that is not a spreadsheet is not a list either. Control characters
+/// are valid UTF-8, so left to the CSV reader a Word document comes apart
+/// into one column of rubbish and the complaint is that it has no rows.
+#[test]
+fn a_zip_that_is_not_a_spreadsheet_is_named_as_such_rather_than_read_as_gibberish() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("people.xlsx");
     std::fs::write(&path, b"PK\x03\x04rest-of-a-zip").unwrap();
     let said = List::read(&path).unwrap_err().to_string();
-    assert!(said.contains("Save As"), "{said}");
+    assert!(said.contains("zip file"), "{said}");
+    assert!(said.contains(".xlsx"), "{said}");
+}
+
+/// Which tab, for a workbook that has more than one.
+#[test]
+fn a_tab_can_be_named_and_a_tab_that_is_not_there_is_refused_with_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("people.xlsx");
+    std::fs::write(&path, an_xlsx(&[&["name"], &["J. Bezzina"]])).unwrap();
+
+    assert!(List::read_sheet(&path, Some("Staff")).is_ok());
+    let said = List::read_sheet(&path, Some("Payroll"))
+        .unwrap_err()
+        .to_string();
+    assert!(said.contains("no sheet called 'Payroll'"), "{said}");
+    assert!(
+        said.contains("Staff"),
+        "the tabs it does have are not named: {said}"
+    );
+}
+
+/// Short rows are ordinary in a spreadsheet — the cells to the right were
+/// never filled in — so they are padded rather than refused, unlike a ragged
+/// CSV where a missing field means a comma in the wrong place.
+#[test]
+fn a_short_row_in_a_spreadsheet_is_filled_out_rather_than_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("people.xlsx");
+    std::fs::write(
+        &path,
+        an_xlsx(&[&["name", "seat"], &["J. Bezzina"], &["A. Borg", "4A"]]),
+    )
+    .unwrap();
+    let list = List::read(&path).unwrap();
+    assert_eq!(list.rows.len(), 2);
+    assert_eq!(list.rows[0].get("seat"), Some(""));
+    assert_eq!(list.rows[1].get("seat"), Some("4A"));
+}
+
+/// A one-tab workbook of rows of text, written the way a real one is.
+fn an_xlsx(rows: &[&[&str]]) -> Vec<u8> {
+    let body: String = rows
+        .iter()
+        .enumerate()
+        .map(|(row, values)| {
+            let cells: String = values
+                .iter()
+                .enumerate()
+                .map(|(column, value)| {
+                    format!(
+                        "<c r=\"{}{}\" t=\"inlineStr\"><is><t>{value}</t></is></c>",
+                        (b'A' + column as u8) as char,
+                        row + 1
+                    )
+                })
+                .collect();
+            format!("<row r=\"{}\">{cells}</row>", row + 1)
+        })
+        .collect();
+    let part = |name: &str, xml: &str| crate::package::Entry {
+        name: name.to_string(),
+        bytes: xml.as_bytes().to_vec(),
+        mode: 0o644,
+        directory: false,
+    };
+    crate::package::zip(&[
+        part(
+            "xl/workbook.xml",
+            "<workbook><sheets><sheet name=\"Staff\" r:id=\"rId1\"/></sheets></workbook>",
+        ),
+        part(
+            "xl/_rels/workbook.xml.rels",
+            "<Relationships><Relationship Id=\"rId1\" \
+             Target=\"worksheets/sheet1.xml\"/></Relationships>",
+        ),
+        part("xl/styles.xml", "<styleSheet/>"),
+        part(
+            "xl/worksheets/sheet1.xml",
+            &format!("<worksheet><sheetData>{body}</sheetData></worksheet>"),
+        ),
+    ])
 }
 
 #[test]
@@ -143,7 +245,10 @@ fn a_misspelt_column_is_left_visible_rather_than_printed_as_nothing() {
     // reading nothing at all is worse: the stack looks right until somebody
     // reads one.
     let list = list_of("name\nJ. Bezzina\n");
-    assert_eq!(fill("Awarded to {nmae}", &list.rows[0]), "Awarded to {nmae}");
+    assert_eq!(
+        fill("Awarded to {nmae}", &list.rows[0]),
+        "Awarded to {nmae}"
+    );
 
     // And it is caught before a single sheet is made.
     let missing = unknown_columns(&["Awarded to {nmae} of {place}".to_string()], &list);

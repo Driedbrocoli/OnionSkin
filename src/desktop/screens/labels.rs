@@ -20,7 +20,7 @@ use crate::widgets;
 use onionskin::labels::Grid;
 
 pub struct State {
-    /// The list: a CSV with a heading row.
+    /// The list: a spreadsheet or a CSV, with a heading row.
     list: Option<std::path::PathBuf>,
     output: Option<std::path::PathBuf>,
     /// What goes on each label, with {column} for the values.
@@ -75,8 +75,8 @@ pub fn show(state: &mut State, room: &mut Room) {
 
     widgets::hint(
         room.ui,
-        "A spreadsheet saved as CSV, with a heading row. Whatever the headings \
-         are called, {in braces}, is filled in from each line.",
+        "A spreadsheet — .xlsx, .ods or a CSV — with a heading row. Whatever \
+         the headings are called, {in braces}, is filled in from each line.",
     );
     room.ui.add_space(10.0);
 
@@ -85,7 +85,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         room.picker,
         "The list",
         &mut state.list,
-        &["csv"],
+        &["csv", "xlsx", "ods"],
         room.dropped,
     );
     widgets::save_row(

@@ -522,10 +522,31 @@ onionskin batch certificate.pdf --from people.csv \
 certificates.pdf: 3 sheets, 6 additions in all.
 ```
 
-The list is an ordinary spreadsheet saved as CSV. Its first line names the
-columns, and `{name}` anywhere in a placement means that person's own. There
-is also `{number}`, which counts the sheets for you — invoice numbers, ticket
-numbers and asset tags need no column of their own.
+The list is a spreadsheet: `.xlsx` from Excel, `.ods` from LibreOffice, or a
+CSV. Its first line names the columns, and `{name}` anywhere in a placement
+means that person's own. There is also `{number}`, which counts the sheets for
+you — invoice numbers, ticket numbers and asset tags need no column of their
+own.
+
+```bash
+onionskin batch certificate.pdf --from staff.xlsx --sheet 'Class of 2026' \
+    --after 'Awarded to:{name}'
+```
+
+`--sheet` names the tab. Without it the first tab with anything on it is used,
+which is what you want on the ordinary workbook that has only one.
+
+There is no conversion step, and nothing about Onionskin's reading of a
+spreadsheet needs Excel or LibreOffice installed — both formats are a zip of
+XML, and Onionskin opens them itself.
+
+What comes out of a cell is what the spreadsheet **shows**, not the number
+underneath it. A date column reads back as a date rather than as 45487, which
+is what Excel actually stores; a percentage reads as `7.5%` rather than
+`0.075`. One thing is worth knowing: an `.ods` carries the text it displays and
+Onionskin uses it, so `£1,234.50` comes across whole — an `.xlsx` does not, so
+the same cell comes across as `1234.5`. If the currency symbol matters, save as
+`.ods`, or put it in the placement: `--at '60,140:£{fee}'`.
 
 Out comes one PDF with one page per person: a stack through the printer once,
 not two hundred separate jobs.
@@ -1398,7 +1419,7 @@ Address labels, file labels, shelf labels. The stock comes pre-cut in a grid and
 the job is always the same: take a column of names and put one in each label.
 
 ```bash
-onionskin labels --from addresses.csv --grid 3x8 --label 63.5x33.9 \
+onionskin labels --from addresses.xlsx --grid 3x8 --label 63.5x33.9 \
   --text '{name}\n{address}\n{town} {postcode}'
 ```
 
