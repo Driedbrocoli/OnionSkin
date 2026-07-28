@@ -5440,7 +5440,19 @@ fn cmd_fits(args: FitsArgs) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
     // Exit 2, like the other refusals to print: a script that feeds a stack
-    // can stop on it rather than carry on through the box of letterhead.
+    // can stop on it rather than carry on through the box of letterhead. The
+    // sheet that has already been stamped stops too — it is the right sheet,
+    // but printing it again is almost never what was meant, and a script
+    // feeding two hundred of them should not decide that on its own.
+    if fit.already_stamped() && fit.paper_matches() {
+        eprintln!(
+            "\nThis sheet has been through already. Print it again only if you \
+             mean to:\n  onionskin proof {} --delta {}",
+            args.sheet.display(),
+            delta.display()
+        );
+        return Ok(ExitCode::from(2));
+    }
     eprintln!(
         "\nDo not print this onto that sheet without looking at it first:\n  \
          onionskin proof {} --delta {}",

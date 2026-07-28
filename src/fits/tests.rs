@@ -21,14 +21,32 @@ fn sheet(dpi: f64, ink: &[(f64, f64, f64, f64)]) -> (Vec<u8>, usize) {
     (gray, w)
 }
 
+/// How much of its own box a line of text actually inks.
+///
+/// Under a third, for every face and size there is: letters are strokes with
+/// paper between them, and the box is the rectangle they sit in. It matters
+/// here because an addition is told from a black rectangle in the same place
+/// by how much ink each one is, and a test that says a word fills its box has
+/// made the two the same thing.
+const TEXT_SHARE: f64 = 0.3;
+
 /// An addition the delta would put in the given box.
 fn asked(box_mm: (f64, f64, f64, f64)) -> Asked {
     let (x0, y0, x1, y1) = box_mm;
     Asked {
         centre_mm: ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
         bounds_mm: box_mm,
-        ink_mm2: (x1 - x0) * (y1 - y0),
+        ink_mm2: (x1 - x0) * (y1 - y0) * TEXT_SHARE,
     }
+}
+
+/// The ink a word actually leaves in its box: a stripe down the middle of it,
+/// covering the share of the box that letters cover.
+fn as_text(box_mm: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let (x0, y0, x1, y1) = box_mm;
+    let height = (y1 - y0) * TEXT_SHARE;
+    let middle = (y0 + y1) / 2.0;
+    (x0, middle - height / 2.0, x1, middle + height / 2.0)
 }
 
 const DPI: f64 = 100.0;
@@ -330,4 +348,162 @@ fn all_of_them_in_trouble_is_said_as_all_of_them() {
     let said = fit.describe();
     assert!(said.contains("All 3 additions would land"), "{said}");
     assert!(!said.contains("3 of the 3"), "{said}");
+}
+
+// ---------------------------------------------------------------------------
+// The sheet that has been through already
+// ---------------------------------------------------------------------------
+
+/// The same sheet, fed a second time. It looks like a pile of collisions and
+/// is nothing of the sort: every addition is landing on itself.
+///
+/// Worth telling from the wrong sheet, because the two want opposite things
+/// done. The wrong sheet wants swapping. This one is the right sheet, and
+/// printing it again lays every letter down twice in the same place.
+#[test]
+fn a_sheet_that_already_carries_the_delta_is_told_from_the_wrong_sheet() {
+    let additions = [
+        (60.0, 38.0, 78.0, 42.0),
+        (150.0, 38.0, 162.0, 42.0),
+        (60.0, 68.0, 76.0, 72.0),
+    ];
+    // The sheet with the delta already printed on it: the ink is exactly where
+    // the delta puts it, and the form's own rules are under it as well.
+    let mut already: Vec<(f64, f64, f64, f64)> = additions.iter().copied().map(as_text).collect();
+    already.push((55.0, 42.0, 110.0, 42.6));
+    let (gray, width) = sheet(DPI, &already);
+    let fit = against(
+        &additions.map(asked),
+        &gray,
+        width,
+        DPI,
+        A4,
+        A4,
+        crate::diff::DiffOptions::default().ink_threshold,
+    );
+    assert!(fit.already_stamped(), "{:?}", fit.landings);
+    assert!(!fit.belongs(), "a stamped sheet is not clear to print onto");
+
+    let said = fit.describe();
+    assert!(said.contains("already has this delta on it"), "{said}");
+    // Said, not refused: stamping a sheet twice is somebody's decision.
+    assert!(said.contains("allowed"), "{said}");
+    assert!(
+        !said.contains("wrong sheet is in the tray"),
+        "the right sheet was called the wrong one: {said}"
+    );
+}
+
+/// The wrong sheet has its own text under the additions, in amounts that have
+/// nothing to do with them — and most of the additions land on nothing.
+#[test]
+fn the_wrong_sheet_is_not_mistaken_for_one_that_has_been_stamped() {
+    let additions = [
+        (60.0, 38.0, 78.0, 42.0),
+        (150.0, 38.0, 162.0, 42.0),
+        (60.0, 68.0, 76.0, 72.0),
+    ];
+    // Somebody else's document: a line of print that happens to run under the
+    // first addition, and nothing under the other two.
+    let (gray, width) = sheet(DPI, &[(20.0, 39.0, 70.0, 41.0)]);
+    let fit = against(
+        &additions.map(asked),
+        &gray,
+        width,
+        DPI,
+        A4,
+        A4,
+        crate::diff::DiffOptions::default().ink_threshold,
+    );
+    assert!(
+        !fit.already_stamped(),
+        "the wrong sheet was called an already-stamped one: {:?}",
+        fit.landings
+    );
+    assert!(fit.describe().contains("wrong sheet is in the tray"));
+}
+
+/// The right, blank sheet, whose ruled lines run under the additions. Ink
+/// underneath, but far less than the additions themselves would put down —
+/// which is the whole reason the measure is one-sided.
+#[test]
+fn a_ruled_form_waiting_to_be_filled_in_is_not_an_already_stamped_one() {
+    let additions = [(60.0, 38.0, 78.0, 42.0), (60.0, 68.0, 76.0, 72.0)];
+    // The rules the answers are written on, crossing the bottom of each box.
+    let (gray, width) = sheet(DPI, &[(55.0, 41.4, 110.0, 42.0), (55.0, 71.4, 110.0, 72.0)]);
+    let fit = against(
+        &additions.map(asked),
+        &gray,
+        width,
+        DPI,
+        A4,
+        A4,
+        crate::diff::DiffOptions::default().ink_threshold,
+    );
+    assert!(
+        !fit.already_stamped(),
+        "a blank ruled form was called already stamped: {:?}",
+        fit.landings
+    );
+}
+
+/// The thresholds are measured, not chosen, and the measurements are the
+/// reason to believe them. A change that narrows the gap has to say so here.
+#[test]
+fn the_thresholds_sit_in_the_gaps_the_measurements_left() {
+    // Held against a real ruled form: the blank sheet gave 0.42 and 0.46 of
+    // each addition's own ink, the wrong sheet 0.61, and the sheet that had
+    // already been printed 1.33, 1.86 and 1.86.
+    let not_stamped = [0.42, 0.46, 0.61];
+    let stamped = [1.33, 1.86, 1.86];
+    let highest_that_is_not = not_stamped.iter().copied().fold(f64::MIN, f64::max);
+    let lowest_that_is = stamped.iter().copied().fold(f64::MAX, f64::min);
+
+    assert!(
+        highest_that_is_not < ALREADY_THERE,
+        "{highest_that_is_not} of an addition's ink now counts as already there"
+    );
+    assert!(
+        lowest_that_is > ALREADY_THERE,
+        "{lowest_that_is} of an addition's ink no longer counts as already there"
+    );
+    // A margin either side, so the two are not one measurement apart.
+    assert!(
+        ALREADY_THERE - highest_that_is_not > 0.1,
+        "the lower threshold is too close to the wrong sheet"
+    );
+    assert!(
+        lowest_that_is - ALREADY_THERE > 0.1,
+        "the lower threshold is too close to the stamped sheet"
+    );
+
+    // The upper bound has the same job in the other direction: it stands
+    // between a sheet that really has been through and a black rectangle in
+    // the same place, which is 1 / TEXT_SHARE times the addition's own ink.
+    let highest_that_is = stamped.iter().copied().fold(f64::MIN, f64::max);
+    let a_solid_block = 1.0 / TEXT_SHARE;
+    assert!(
+        MUCH_MORE_THAN_ASKED > highest_that_is,
+        "a sheet that has been through is now called something else"
+    );
+    assert!(
+        MUCH_MORE_THAN_ASKED < a_solid_block,
+        "a solid block over a word now counts as that word"
+    );
+}
+
+/// A delta with nothing on it cannot have been stamped onto anything.
+#[test]
+fn a_delta_with_no_additions_is_not_already_stamped() {
+    let (gray, width) = sheet(DPI, &[(20.0, 20.0, 190.0, 280.0)]);
+    let fit = against(
+        &[],
+        &gray,
+        width,
+        DPI,
+        A4,
+        A4,
+        crate::diff::DiffOptions::default().ink_threshold,
+    );
+    assert!(!fit.already_stamped());
 }

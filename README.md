@@ -907,9 +907,32 @@ That is what happens when the wrong sheet is in the tray. Check it is the one
 this delta was made for.
 ```
 
-It exits 2 when it refuses, so a script feeding a stack stops on it rather than
-carrying on through the box. The sheet can be a scan, a photograph, or the PDF
-the form came as — a PDF is better, having no skew to measure.
+And on the sheet that has already been through:
+
+```
+This sheet already has this delta on it. All 3 additions are sitting where they
+were asked to go, in about the amount of ink they put down.
+Printing it again lays every letter down twice in the same place, which comes out
+  heavier and a little blurred. That is allowed — a faint first pass is a real reason
+  to want it — but it is rarely what somebody meant. Check the sheet in your hand.
+```
+
+Those last two are the same thing to the eye — an addition landing on ink — and
+they want opposite things done. The wrong sheet wants swapping. The stamped one
+is the right sheet and has simply been through. They are told apart by how much
+ink is underneath: the wrong sheet has whatever it happens to say there, in
+amounts unrelated to the addition, and most additions land on nothing at all; a
+stamped sheet has the addition's own ink under every one of them.
+
+Stamping a sheet twice is **allowed**. It is said, not refused — a faint first
+pass is a real reason to want a second, and nothing here cannot be undone by
+looking at the paper.
+
+It exits 2 when it will not vouch for the sheet, so a script feeding a stack
+stops on it rather than carrying on through the box — including on a sheet that
+has been through already, which a script should not decide about on its own. The
+sheet can be a scan, a photograph, or the PDF the form came as — a PDF is
+better, having no skew to measure.
 
 This is evidence, not proof. It can say the paper is a different size and it can
 say an addition would land on existing ink; it cannot know that two sheets of

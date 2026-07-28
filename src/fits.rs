@@ -16,6 +16,27 @@
 //! paper, because that is what an overlay is for. On the wrong one they land on
 //! top of the text that is already there, and it shows immediately.
 //!
+//! # The sheet that has been through already
+//!
+//! There are two ways for an addition to land on ink, and they want opposite
+//! things done. On the wrong sheet it lands on somebody else's text, and the
+//! answer is to swap the sheet. On the *right* sheet, fed a second time, it
+//! lands on itself — and the answer is to stop and think, because printing it
+//! again lays every letter down twice in the same place, which comes out
+//! heavier and a little blurred.
+//!
+//! They are told apart by how much ink is underneath. The wrong sheet has
+//! whatever it happens to say there, in amounts that have nothing to do with
+//! the addition, and most additions land on nothing at all. A sheet that has
+//! been through has the addition's own ink under every one of them, plus
+//! whatever the form had there to begin with — measurably more than the
+//! addition alone, and measurably less than a black rectangle.
+//!
+//! It is said and not refused. A faint first pass is a real reason to want a
+//! second, and there is nothing here that cannot be recovered from by looking
+//! at the paper. The one thing that is not left to chance is a script feeding
+//! two hundred sheets, which stops.
+//!
 //! # What this can and cannot say
 //!
 //! It can say the paper is a different size, and it can say an addition would
@@ -42,6 +63,14 @@ pub struct Landing {
     /// Nought where the addition lands on top of something. Large where the
     /// addition sits in the middle of an empty half of the page.
     pub clearance_mm: f64,
+    /// How much ink the delta itself puts in this box.
+    ///
+    /// The measure that tells the two collisions apart. An addition landing on
+    /// the wrong sheet lands on whatever that sheet happens to say, and the
+    /// amount of ink under it has nothing to do with the amount the addition
+    /// would put down. An addition landing on a sheet that already carries this
+    /// delta lands on *itself*, and the two amounts agree.
+    pub asked_mm2: f64,
 }
 
 impl Landing {
@@ -53,6 +82,20 @@ impl Landing {
     /// warning.
     pub fn lands_on_something(&self) -> bool {
         self.under_mm2 >= ON_TOP_MM2
+    }
+
+    /// Whether the ink under this addition looks like the addition itself.
+    ///
+    /// Not proof — a box of the right size full of somebody else's text would
+    /// pass — but every addition on the sheet agreeing at once is a coincidence
+    /// nobody should expect. On the wrong sheet the additions land where they
+    /// land, and most of them land on nothing at all.
+    pub fn looks_already_stamped(&self) -> bool {
+        if self.asked_mm2 <= 0.0 || !self.lands_on_something() {
+            return false;
+        }
+        let share = self.under_mm2 / self.asked_mm2;
+        (ALREADY_THERE..=MUCH_MORE_THAN_ASKED).contains(&share)
     }
 
     pub fn describe(&self) -> String {
@@ -77,6 +120,31 @@ impl Landing {
 /// the edge of a printed rule, and a check that cries wolf is a check people
 /// learn to pass over.
 pub const ON_TOP_MM2: f64 = 1.5;
+
+/// How much of an addition's own ink must already be under it before the sheet
+/// counts as having been stamped already.
+///
+/// One-sided on purpose. A sheet that has been through carries the addition's
+/// ink *and* whatever the form had there to begin with, so the amount
+/// underneath is more than the addition alone, not equal to it.
+///
+/// Four fifths, and the number is measured rather than chosen. Held against a
+/// form whose ruled lines run under the additions: the blank sheet gives 0.42
+/// and 0.46 of each addition's ink, the wrong sheet 0.61, and the sheet that
+/// has already been printed 1.33, 1.86 and 1.86. Four fifths sits in the gap
+/// with room on both sides of it.
+pub const ALREADY_THERE: f64 = 0.8;
+
+/// And how much more than its own ink is too much to be that ink.
+///
+/// The lower bound alone lets a solid black rectangle stand in for a word:
+/// there is certainly enough ink under the addition, and it is not the
+/// addition. Text covers something under a third of the box it sits in, so a
+/// block that fills the box is three or four times what the addition would
+/// put down — while a sheet that really has been through gives 1.33 to 1.86,
+/// the extra being the form's own rules underneath. Three sits above the one
+/// and below the other.
+pub const MUCH_MORE_THAN_ASKED: f64 = 3.0;
 
 /// How far out the paper may be and still be the same paper.
 ///
@@ -114,6 +182,29 @@ impl Fit {
         self.paper_matches() && self.collisions().is_empty()
     }
 
+    /// Whether the sheet already has this delta on it.
+    ///
+    /// Every addition landing on ink, and every one of them landing on about as
+    /// much ink as it would itself put down. That is not what the wrong sheet
+    /// looks like — the wrong sheet has its own text under the additions, in
+    /// amounts that have nothing to do with them.
+    ///
+    /// Worth telling apart, because the two want opposite things done. The
+    /// wrong sheet wants swapping. This one is the right sheet; it has simply
+    /// been through already, and printing it again lays every letter down twice
+    /// in the same place, which comes out heavier and blurred.
+    ///
+    /// It is said, not refused. Stamping a sheet twice is somebody\'s decision
+    /// to make — a faint first pass is a real reason to want it — and there is
+    /// nothing here that could not be recovered from by looking at the paper.
+    pub fn already_stamped(&self) -> bool {
+        !self.landings.is_empty()
+            && self
+                .landings
+                .iter()
+                .all(|landing| landing.looks_already_stamped())
+    }
+
     /// The smallest gap between any addition and the ink already on the sheet.
     ///
     /// `None` when the delta has no additions to measure.
@@ -142,6 +233,29 @@ impl Fit {
             ));
         }
         let collisions = self.collisions();
+        // The sheet that has been through already, which looks like a pile of
+        // collisions and is nothing of the sort.
+        if self.already_stamped() && self.paper_matches() {
+            said.push(match self.landings.len() {
+                1 => "This sheet already has this delta on it. The addition is \
+                      sitting where it was asked to go, in about the amount of \
+                      ink it puts down."
+                    .to_string(),
+                all => format!(
+                    "This sheet already has this delta on it. All {all} additions \
+                     are sitting where they were asked to go, in about the amount \
+                     of ink they put down."
+                ),
+            });
+            said.push(
+                "Printing it again lays every letter down twice in the same \
+                 place, which comes out\n  heavier and a little blurred. That is \
+                 allowed — a faint first pass is a real reason\n  to want it — but \
+                 it is rarely what somebody meant. Check the sheet in your hand."
+                    .to_string(),
+            );
+            return said.join("\n");
+        }
         if !collisions.is_empty() {
             // Counted the way a person counts. "1 of the 1 addition would
             // land" is what arithmetic produces and nobody says.
@@ -214,6 +328,7 @@ pub fn against(
             Landing {
                 box_mm: (x0, y0, x1, y1),
                 under_mm2,
+                asked_mm2: mark.ink_mm2,
                 // Only worth working out when nothing is underneath: the answer
                 // for an addition sitting on top of something is nought, and
                 // searching outwards for it would be a hundred times the work
