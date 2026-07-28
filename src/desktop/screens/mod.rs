@@ -9,6 +9,7 @@ pub mod blanks;
 pub mod calibrate;
 pub mod compare;
 pub mod correct;
+pub mod cover;
 pub mod devices;
 pub mod doctor;
 pub mod document;
@@ -22,6 +23,7 @@ pub mod merge;
 pub mod proof;
 pub mod read;
 pub mod scan;
+pub mod stack;
 pub mod verify;
 
 use eframe::egui;
@@ -84,6 +86,7 @@ pub enum Screen {
     Read,
     Blanks,
     Correct,
+    Cover,
     Proof,
     Merge,
     Join,
@@ -91,6 +94,7 @@ pub enum Screen {
     Labels,
     Jobs,
     Fits,
+    Stack,
     Verify,
     History,
     Devices,
@@ -109,6 +113,7 @@ impl Screen {
         Screen::Read,
         Screen::Blanks,
         Screen::Correct,
+        Screen::Cover,
         Screen::Proof,
         Screen::Merge,
         Screen::Join,
@@ -116,6 +121,7 @@ impl Screen {
         Screen::Labels,
         Screen::Jobs,
         Screen::Fits,
+        Screen::Stack,
         Screen::Verify,
         Screen::History,
         Screen::Devices,
@@ -141,7 +147,9 @@ impl Screen {
             Screen::Jobs => "jobs",
             Screen::Batch => "batch",
             Screen::Correct => "correct",
+            Screen::Cover => "cover",
             Screen::Fits => "fits",
+            Screen::Stack => "stack",
             Screen::Verify => "verify",
             Screen::History => "history",
             Screen::Devices => "devices",
@@ -173,7 +181,9 @@ impl Screen {
             Screen::Jobs => "Saved jobs",
             Screen::Batch => "One each, from a list",
             Screen::Correct => "Fix a mistake",
+            Screen::Cover => "Cover something up",
             Screen::Fits => "Check before printing",
+            Screen::Stack => "Sort a stack",
             Screen::Verify => "Check a sheet or a run",
             Screen::History => "What was added",
             Screen::Devices => "Printers and scanners",
@@ -199,7 +209,9 @@ impl Screen {
             Screen::Jobs => "The same stamp on today's document, in two clicks",
             Screen::Batch => "Two hundred certificates, two hundred names",
             Screen::Correct => "Cover the wrong words and set the right ones",
+            Screen::Cover => "Print solid over what must not be read",
             Screen::Fits => "Is this the sheet the delta was made for?",
+            Screen::Stack => "Which document is each sheet from the feeder?",
             Screen::Verify => "Did it come out of the printer right — one sheet, or all of them?",
             Screen::History => "Have I printed this delta already?",
             Screen::Devices => "Print and scan over the network",

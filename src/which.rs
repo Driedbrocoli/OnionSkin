@@ -360,3 +360,170 @@ where
 #[cfg(test)]
 #[path = "which/tests.rs"]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// A whole stack
+// ---------------------------------------------------------------------------
+
+/// One sheet of a scanned stack, and which document it turned out to be.
+#[derive(Debug, Clone)]
+pub struct Placed {
+    /// Counted from 1, the way somebody talks about the fourth sheet.
+    pub sheet: usize,
+    pub ranking: Ranking,
+}
+
+impl Placed {
+    /// The document this sheet belongs with, where the answer is worth acting
+    /// on without somebody looking at the paper.
+    pub fn settled(&self) -> Option<&Candidate> {
+        self.ranking
+            .confident()
+            .then(|| self.ranking.best())
+            .flatten()
+    }
+
+    /// One line, for a list somebody reads down.
+    pub fn line(&self) -> String {
+        let sheet = self.sheet;
+        match self.settled() {
+            Some(best) => format!("  sheet {sheet:>3}  {}", best.path.display()),
+            None => format!(
+                "  sheet {sheet:>3}  ?  {}",
+                self.ranking
+                    .best()
+                    .map(|best| format!(
+                        "closest is {} at {:.4}",
+                        best.path.display(),
+                        best.distance
+                    ))
+                    .unwrap_or_else(|| "nothing to compare it with".to_string())
+            ),
+        }
+    }
+}
+
+/// What sorting a stack came to.
+#[derive(Debug, Clone)]
+pub struct Sorted {
+    pub placed: Vec<Placed>,
+    /// The documents the sheets were compared against.
+    pub among: Vec<PathBuf>,
+}
+
+impl Sorted {
+    /// The sheets nobody should file without looking at them.
+    ///
+    /// A sheet filed under the wrong document is worse than one left in the
+    /// pile, which is why these are named rather than guessed at.
+    pub fn unplaced(&self) -> Vec<usize> {
+        self.placed
+            .iter()
+            .filter(|placed| placed.settled().is_none())
+            .map(|placed| placed.sheet)
+            .collect()
+    }
+
+    pub fn all_placed(&self) -> bool {
+        self.unplaced().is_empty()
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        self.placed.iter().map(Placed::line).collect()
+    }
+
+    pub fn verdict(&self) -> String {
+        let unplaced = self.unplaced();
+        if unplaced.is_empty() {
+            return "Every sheet was placed.".to_string();
+        }
+        format!(
+            "{} of the {} sheet{} could not be placed — {} {}.\n  \
+             Look at those yourself — a sheet filed under the wrong document is\n  \
+             worse than one left in the pile.",
+            unplaced.len(),
+            self.placed.len(),
+            if self.placed.len() == 1 { "" } else { "s" },
+            if unplaced.len() == 1 {
+                "sheet"
+            } else {
+                "sheets"
+            },
+            crate::split::sheets(&unplaced)
+        )
+    }
+}
+
+/// Ask every sheet of a scanned stack which document it is.
+///
+/// The single place that knows how a stack is sorted, so the command line and
+/// the window cannot drift apart on it.
+///
+/// `saying` is called with each sheet as it starts, because forty sheets
+/// against ten documents takes long enough that a silent program looks like a
+/// stopped one.
+pub fn sort_a_stack(
+    scan: &Path,
+    among: &[PathBuf],
+    saying: &mut dyn FnMut(usize, usize),
+) -> Result<Sorted, String> {
+    let threshold = crate::diff::DiffOptions::default().ink_threshold;
+    let sheets = crate::recipe::pages_in(scan)?;
+    if sheets == 0 {
+        return Err(format!("there are no pages in '{}'.", scan.display()));
+    }
+
+    // The candidates are drawn once, not once a sheet. Forty sheets against
+    // ten documents would otherwise open and render the same ten files forty
+    // times.
+    let mut drawn: Vec<(PathBuf, Result<Signature, String>)> = Vec::new();
+    for path in among {
+        let signature = crate::recipe::draw_page(path, 1).map(|(gray, registration)| {
+            let width = gray.width() as usize;
+            Signature::of(
+                gray.as_raw(),
+                width,
+                registration.px_per_mm * 25.4,
+                registration.page,
+                threshold,
+            )
+        });
+        drawn.push((path.clone(), signature));
+    }
+
+    let mut placed = Vec::new();
+    for sheet in 1..=sheets {
+        saying(sheet, sheets);
+        let (gray, registration) = crate::recipe::draw_page(scan, sheet)?;
+        let width = gray.width() as usize;
+        let signature = Signature::of(
+            gray.as_raw(),
+            width,
+            registration.px_per_mm * 25.4,
+            registration.page,
+            threshold,
+        );
+        let ranking = among_drawn(&signature, among, &drawn);
+        placed.push(Placed { sheet, ranking });
+    }
+
+    Ok(Sorted {
+        placed,
+        among: among.to_vec(),
+    })
+}
+
+/// The ranking for one sheet, against candidates that have already been drawn.
+fn among_drawn(
+    sheet: &Signature,
+    candidates: &[PathBuf],
+    drawn: &[(PathBuf, Result<Signature, String>)],
+) -> Ranking {
+    among(sheet, candidates, |path| {
+        drawn
+            .iter()
+            .find(|(candidate, _)| candidate == path)
+            .map(|(_, signature)| signature.clone())
+            .unwrap_or_else(|| Err("it was not drawn".to_string()))
+    })
+}

@@ -5161,12 +5161,6 @@ fn read_a_document(path: &Path) -> Result<onionskin::letters::PageText, String> 
 /// their number and are listed at the end, because a sheet filed under the
 /// wrong document is worse than one left in the pile.
 fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
-    let threshold = onionskin::diff::DiffOptions::default().ink_threshold;
-    let sheets = onionskin::recipe::pages_in(&args.scan)?;
-    if sheets == 0 {
-        return Err(format!("there are no pages in '{}'.", args.scan.display()));
-    }
-
     let rehearsal = Rehearsal::new(args.dry_run)?;
     // Where the sheets really land. In a rehearsal that is a scratch folder,
     // so the report says exactly what it would say — including a sheet that
@@ -5179,112 +5173,57 @@ fn cmd_stack(args: StackArgs) -> Result<ExitCode, String> {
             .map_err(|e| format!("could not make '{}': {e}", folder.display()))?;
     }
 
+    // The sorting itself is in the library, because the window sorts stacks
+    // too and two spellings of "which document is this sheet" is one place for
+    // them to disagree.
+    let sorted = onionskin::which::sort_a_stack(&args.scan, &args.among, &mut |sheet, of| {
+        if of > 10 {
+            eprint!("\r  … sheet {sheet} of {of}");
+        }
+    })?;
+    if sorted.placed.len() > 10 {
+        eprint!("\r                              \r");
+    }
+
     println!(
-        "{}: {sheets} sheet{}, against {} document{}.\n",
+        "{}: {} sheet{}, against {} document{}.\n",
         args.scan.display(),
-        if sheets == 1 { "" } else { "s" },
+        sorted.placed.len(),
+        if sorted.placed.len() == 1 { "" } else { "s" },
         args.among.len(),
         if args.among.len() == 1 { "" } else { "s" }
     );
 
-    // The candidates are drawn once, not once a sheet. Forty sheets against ten
-    // documents would otherwise open and render the same ten files forty times.
-    let mut drawn: Vec<(PathBuf, Result<onionskin::which::Signature, String>)> = Vec::new();
-    for path in &args.among {
-        let signature = onionskin::recipe::draw_page(path, 1).map(|(gray, registration)| {
-            let width = gray.width() as usize;
-            onionskin::which::Signature::of(
-                gray.as_raw(),
-                width,
-                registration.px_per_mm * 25.4,
-                registration.page,
-                threshold,
-            )
-        });
-        drawn.push((path.clone(), signature));
-    }
-
-    let mut unplaced: Vec<usize> = Vec::new();
-    for sheet in 1..=sheets {
-        let (gray, registration) = onionskin::recipe::draw_page(&args.scan, sheet)?;
-        let width = gray.width() as usize;
-        let signature = onionskin::which::Signature::of(
-            gray.as_raw(),
-            width,
-            registration.px_per_mm * 25.4,
-            registration.page,
-            threshold,
-        );
-        let ranking = onionskin::which::among(&signature, &args.among, |path| {
-            drawn
-                .iter()
-                .find(|(candidate, _)| candidate == path)
-                .map(|(_, signature)| signature.clone())
-                .unwrap_or_else(|| Err("it was not drawn".to_string()))
-        });
-
-        match (ranking.confident(), ranking.best()) {
-            (true, Some(best)) => {
-                print!("  sheet {sheet:>3}  {}", best.path.display());
-                if let Some(folder) = &writing_to {
-                    let named = sheet_named(&best.path, sheet);
-                    match onionskin::split::keep_only(&args.scan, &[sheet], &folder.join(&named)) {
-                        // The path somebody is told about is the one they
-                        // asked for, even when a rehearsal put the file
-                        // somewhere else and then threw it away.
-                        Ok(()) => print!("  → {}", meant.join(&named).display()),
-                        Err(e) => print!("  (could not write it: {e})"),
-                    }
-                }
-                println!();
-            }
-            _ => {
-                unplaced.push(sheet);
-                println!(
-                    "  sheet {sheet:>3}  ?  {}",
-                    ranking
-                        .best()
-                        .map(|best| format!(
-                            "closest is {} at {:.4}",
-                            best.path.display(),
-                            best.distance
-                        ))
-                        .unwrap_or_else(|| "nothing to compare it with".to_string())
-                );
-                if let Some(folder) = &writing_to {
-                    let named = format!("sheet-{sheet:03}.pdf");
-                    let out = folder.join(&named);
-                    if let Err(e) = onionskin::split::keep_only(&args.scan, &[sheet], &out) {
-                        println!("          (could not write it: {e})");
-                    } else {
-                        println!("          → {}", meant.join(&named).display());
-                    }
-                }
+    for placed in &sorted.placed {
+        print!("{}", placed.line());
+        // Written out under the document's name where it was placed, and under
+        // its sheet number where it was not — a sheet nobody could place still
+        // has to come out somewhere, or it is lost in the middle of the PDF.
+        if let Some(folder) = &writing_to {
+            let named = match placed.settled() {
+                Some(best) => sheet_named(&best.path, placed.sheet),
+                None => format!("sheet-{:03}.pdf", placed.sheet),
+            };
+            match onionskin::split::keep_only(&args.scan, &[placed.sheet], &folder.join(&named)) {
+                // The path somebody is told about is the one they asked for,
+                // even when a rehearsal put the file somewhere else and then
+                // threw it away.
+                Ok(()) => print!("  → {}", meant.join(&named).display()),
+                Err(e) => print!("  (could not write it: {e})"),
             }
         }
+        println!();
     }
 
-    if unplaced.is_empty() {
-        println!("\nEvery sheet was placed.");
-        rehearsal.say_nothing_was_written();
-        return Ok(ExitCode::SUCCESS);
-    }
-    println!(
-        "\n{} of the {sheets} sheet{} could not be placed — {} {}.",
-        unplaced.len(),
-        if sheets == 1 { "" } else { "s" },
-        if unplaced.len() == 1 {
-            "sheet"
-        } else {
-            "sheets"
-        },
-        onionskin::split::sheets(&unplaced)
-    );
-    println!("  Look at those yourself — a sheet filed under the wrong document is");
-    println!("  worse than one left in the pile.");
+    println!("\n{}", sorted.verdict());
     rehearsal.say_nothing_was_written();
+
     // Exit 2, so a script sorting a stack stops on the ones that need a person.
-    Ok(ExitCode::from(2))
+    Ok(if sorted.all_placed() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
 }
 
 /// What to call a sheet that matched a document, keeping its place in the

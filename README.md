@@ -253,6 +253,7 @@ Down the side, in the order somebody meets them:
 | **Read a scan** | Turn a scan into a Word document |
 | **Where there is room** | Ask the form where you can write, in millimetres |
 | **Fix a mistake** | Cover the wrong words and set the right ones |
+| **Cover something up** | Print solid over what must not be read |
 | **See it before you print** | The sheet and the delta together, on screen |
 | **Merge deltas** | Several onto one, so the sheet goes through once |
 | **Join files** | Several one after another, into one document |
@@ -260,6 +261,7 @@ Down the side, in the order somebody meets them:
 | **Sheet of labels** | Addresses and files, one per label, from a list |
 | **Saved jobs** | The same stamp on today's document, in two clicks |
 | **Check before printing** | Is this the sheet the delta was made for? |
+| **Sort a stack** | Which document is each sheet from the feeder? |
 | **Check a sheet or a run** | Did it come out right — one sheet, or all of them? |
 | **What was added** | Have I printed this delta already? |
 | **Printers and scanners** | Print and scan over the network |
@@ -284,6 +286,12 @@ its column headings on the screen as buttons, so `{name}` is a click rather than
 a guess — and a placement naming a column the list has not got is caught while
 the screen is still on the screen, not after two hundred sheets have printed
 saying `{name}`.
+
+**Sort a stack** and **Join files** are two halves of the same afternoon. A
+flatbed gives one file per sheet; join makes the single document the sorter
+wants, and the sorter asks each sheet which document it belongs with and files
+it under that name. Nothing is written until you tick the box — reporting on a
+stack is the safe thing to do first.
 
 **Where there is room** is the one that matters most if you have never measured
 anything in millimetres. Give it the form — as a PDF, or a photograph of the
