@@ -89,6 +89,16 @@ pub struct Defaults {
     /// The paper to assume for a scan.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
+    /// The printer to send to when none is named.
+    ///
+    /// An office has one printer and types its address every time. It is the
+    /// longest thing anybody types at this program — `ipp://printer.local/ipp/
+    /// print` — and it is the same every day.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub printer: Option<String>,
+    /// The scanner to fetch from when none is named, for the same reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanner: Option<String>,
 }
 
 /// A number as somebody would write it: 300 rather than 300.
@@ -139,6 +149,16 @@ impl Defaults {
                 "the calibration profile to use when none is named",
             ),
             ("page", self.page.clone(), "the paper to assume for a scan"),
+            (
+                "printer",
+                self.printer.clone(),
+                "the printer to send to when none is named",
+            ),
+            (
+                "scanner",
+                self.scanner.clone(),
+                "the scanner to fetch from when none is named",
+            ),
         ]
     }
 }
@@ -208,6 +228,18 @@ pub fn set_default(name: &str, value: Option<&str>) -> Result<(), String> {
         "page" => {
             let page = value.map(|text| text.trim().to_string());
             remember(|s| s.defaults.page = page);
+        }
+        // Addresses are kept as they were typed. `send` and `fetch` already
+        // know what a usable one looks like and say so in full when it is
+        // wrong; checking here as well would mean two answers to one question,
+        // and the one further from the device would be the worse of them.
+        "printer" => {
+            let printer = value.map(|text| text.trim().to_string());
+            remember(|s| s.defaults.printer = printer);
+        }
+        "scanner" => {
+            let scanner = value.map(|text| text.trim().to_string());
+            remember(|s| s.defaults.scanner = scanner);
         }
         other => {
             let known: Vec<&str> = Defaults::default()

@@ -190,6 +190,28 @@ onionskin --help             # everything it can do
 onionskin-desktop            # the window
 ```
 
+### Set the printer once
+
+The address of a printer is the longest thing anybody types at this program, and
+it is the same every day.
+
+```bash
+onionskin config set printer ipp://printer.local/ipp/print
+onionskin send delta.pdf                 # no --printer needed again
+```
+
+`onionskin printers` finds the address in the first place, and `config set
+scanner` does the same for `fetch`. A flag still beats the setting, for the day
+somebody uses a different machine.
+
+`--delta last` means the delta written most recently, which saves going to look
+for a file that was put in Onionskin's own folder under a name nobody chose:
+
+```bash
+onionskin proof sheet.pdf --delta last
+onionskin verify scan.png --delta last
+```
+
 `onionskin uninstall` removes exactly what was put there and says what it
 removed.
 

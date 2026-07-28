@@ -285,7 +285,32 @@ fn every_setting_is_listed_with_something_to_read() {
     // setting missing from it is a setting nobody can discover.
     let _home = elsewhere();
     let listed = Defaults::default().each();
-    assert_eq!(listed.len(), 7, "{listed:?}");
+
+    // As many as the struct has fields, counted through serde rather than
+    // written down. A number written down here breaks every time a setting is
+    // added, which trains people to change it without looking — and it never
+    // caught the bug it was there for, because a field added to `Defaults` and
+    // to `set_default` but missing from `each()` leaves the count where it was.
+    let everything = Defaults {
+        dpi: Some(300.0),
+        margin_mm: Some(5.0),
+        mode: Some("raster".into()),
+        outline: Some(true),
+        outline_colour: Some("red".into()),
+        profile: Some("office".into()),
+        page: Some("a4".into()),
+        printer: Some("ipp://printer/ipp/print".into()),
+        scanner: Some("http://printer/eSCL".into()),
+    };
+    let as_json = serde_json::to_value(&everything).expect("settings serialise");
+    let fields = as_json.as_object().expect("an object").len();
+    assert_eq!(
+        listed.len(),
+        fields,
+        "{fields} settings can be stored and {} are listed, so one cannot be \
+         discovered: {listed:?}",
+        listed.len()
+    );
     for (name, value, what) in &listed {
         assert!(!name.is_empty());
         assert!(
@@ -399,4 +424,42 @@ fn a_setting_that_makes_no_sense_is_left_alone() {
         ..Default::default()
     });
     assert_eq!(options.mode, crate::pipeline::Mode::Vector);
+}
+
+/// The printer is the longest thing anybody types at this program, and it is
+/// the same every day. Setting it once is the point.
+#[test]
+fn the_printer_and_scanner_are_remembered_like_anything_else() {
+    let _home = elsewhere();
+    set_default("printer", Some("ipp://printer.local/ipp/print")).unwrap();
+    set_default("scanner", Some("http://printer.local/eSCL")).unwrap();
+
+    let mine = load().defaults;
+    assert_eq!(
+        mine.printer.as_deref(),
+        Some("ipp://printer.local/ipp/print")
+    );
+    assert_eq!(mine.scanner.as_deref(), Some("http://printer.local/eSCL"));
+
+    // And they are on the list somebody sees, with a reason.
+    let listed = Defaults::default().each();
+    assert!(listed.iter().any(|(name, _, _)| *name == "printer"));
+    assert!(listed.iter().any(|(name, _, _)| *name == "scanner"));
+}
+
+/// An address is kept as it was typed. `send` and `fetch` know what a usable
+/// one looks like and say so in full; a second opinion further from the device
+/// would only be the worse of the two.
+#[test]
+fn an_address_is_kept_as_it_was_written() {
+    let _home = elsewhere();
+    set_default("printer", Some("  ipp://desk/ipp/print  ")).unwrap();
+    assert_eq!(
+        load().defaults.printer.as_deref(),
+        Some("ipp://desk/ipp/print")
+    );
+
+    // And unsetting takes it away rather than leaving an empty string behind.
+    set_default("printer", None).unwrap();
+    assert!(load().defaults.printer.is_none());
 }

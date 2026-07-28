@@ -139,6 +139,23 @@ pub fn recent(limit: usize) -> Vec<Entry> {
 }
 
 /// Forget everything. Returns how many were forgotten.
+/// The delta written most recently that is still on disk.
+///
+/// `verify` and `proof` both want a delta that was written minutes ago, often
+/// into a scratch folder under a name nobody chose and nobody remembers. The
+/// record already knows what it was.
+///
+/// Still on disk, because a delta is temporary by default and `tidy` takes
+/// them away: naming a file that is no longer there would be worse than saying
+/// nothing, and the caller can then ask for one by name.
+pub fn last_delta() -> Option<PathBuf> {
+    read()
+        .into_iter()
+        .rev()
+        .map(|entry| PathBuf::from(entry.delta))
+        .find(|path| path.is_file())
+}
+
 pub fn forget() -> usize {
     let had = read().len();
     let _ = std::fs::remove_file(path());

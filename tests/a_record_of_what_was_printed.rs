@@ -371,3 +371,106 @@ fn printing_only_what_was_added_is_recorded_but_printing_the_whole_thing_is_not(
         "the record does not name the document it came from: {said}"
     );
 }
+
+/// `verify` and `proof` both want a delta written minutes ago, often into a
+/// scratch folder under a generated name nobody chose. The record already
+/// knows what it was, so `last` means it.
+#[test]
+fn the_delta_written_last_can_be_named_as_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let sheet = a_sheet_with_a_salary_on_it(&home, dir.path());
+
+    // Nothing written yet: `last` is a refusal that says what to do.
+    let nothing = run(
+        &home,
+        &[
+            "proof",
+            &sheet.to_string_lossy(),
+            "--delta",
+            "last",
+            "-o",
+            &dir.path().join("p.pdf").to_string_lossy(),
+        ],
+    );
+    assert!(!nothing.ok, "{}", nothing.said());
+    assert!(
+        nothing.said().contains("no delta to use"),
+        "{}",
+        nothing.said()
+    );
+
+    // Then one is written, and `last` finds it.
+    let covered = dir.path().join("covered.pdf");
+    assert!(
+        run(
+            &home,
+            &[
+                "cover",
+                &sheet.to_string_lossy(),
+                "--over",
+                "18,55:80x10",
+                "-o",
+                &covered.to_string_lossy()
+            ],
+        )
+        .ok
+    );
+
+    let proof = dir.path().join("proof.pdf");
+    let made = run(
+        &home,
+        &[
+            "proof",
+            &sheet.to_string_lossy(),
+            "--delta",
+            "last",
+            "-o",
+            &proof.to_string_lossy(),
+        ],
+    );
+    assert!(made.ok, "`last` did not find the delta: {}", made.said());
+    assert!(proof.is_file(), "{}", made.said());
+}
+
+/// A delta that has been tidied away is not named — a path to a file that is
+/// no longer there is worse than saying there is nothing.
+#[test]
+fn a_delta_that_is_gone_is_not_offered_as_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let sheet = a_sheet_with_a_salary_on_it(&home, dir.path());
+    let covered = dir.path().join("covered.pdf");
+    assert!(
+        run(
+            &home,
+            &[
+                "cover",
+                &sheet.to_string_lossy(),
+                "--over",
+                "18,55:80x10",
+                "-o",
+                &covered.to_string_lossy()
+            ],
+        )
+        .ok
+    );
+    std::fs::remove_file(&covered).unwrap();
+
+    let gone = run(
+        &home,
+        &[
+            "proof",
+            &sheet.to_string_lossy(),
+            "--delta",
+            "last",
+            "-o",
+            &dir.path().join("p.pdf").to_string_lossy(),
+        ],
+    );
+    assert!(
+        !gone.ok,
+        "a delta that is no longer on disk was offered: {}",
+        gone.said()
+    );
+}

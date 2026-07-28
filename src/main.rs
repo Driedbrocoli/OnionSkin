@@ -276,8 +276,9 @@ struct SendArgs {
     /// The PDF to print.
     file: PathBuf,
     /// The printer: 'ipp://printer.local/ipp/print', or the name of one from
-    /// `onionskin printers`.
-    #[arg(long)]
+    /// `onionskin printers`. Without it, whatever `config set printer` was
+    /// told.
+    #[arg(long, default_value_t = default_printer())]
     printer: String,
     /// The print server to look a name up on.
     #[arg(long, default_value = "ipp://127.0.0.1:631/")]
@@ -305,8 +306,9 @@ struct FetchArgs {
     /// Open the scan when it is written.
     #[arg(long)]
     open: bool,
-    /// The scanner: 'http://printer.local/eSCL'.
-    #[arg(long)]
+    /// The scanner: 'http://printer.local/eSCL'. Without it, whatever
+    /// `config set scanner` was told.
+    #[arg(long, default_value_t = default_scanner())]
     scanner: String,
     /// Dots per inch.
     #[arg(long, default_value_t = 300)]
@@ -461,7 +463,8 @@ enum CalibrateCommand {
 struct LearnArgs {
     /// A scan of the sheet after the delta was printed onto it.
     scan: PathBuf,
-    /// The delta that was printed onto it.
+    /// The delta that was printed onto it. `last` means the one written most
+    /// recently.
     #[arg(long)]
     delta: PathBuf,
     /// Which profile to teach. Without it, the one in your settings.
@@ -526,7 +529,8 @@ struct FitsArgs {
     /// A scan or photograph of the sheet you are about to feed, or the
     /// document it was printed from.
     sheet: PathBuf,
-    /// The delta you are about to print onto it.
+    /// The delta you are about to print onto it. `last` means the one written
+    /// most recently.
     #[arg(long)]
     delta: PathBuf,
     /// The paper it is. Not needed for a PDF, which says what size it is.
@@ -547,7 +551,8 @@ struct FitsArgs {
 struct VerifyArgs {
     /// A scan of the sheet after the delta was printed onto it.
     scan: PathBuf,
-    /// The delta that was printed onto it.
+    /// The delta that was printed onto it. `last` means the one written most
+    /// recently.
     #[arg(long)]
     delta: PathBuf,
     /// The paper it was printed on.
@@ -606,7 +611,8 @@ struct MergeArgs {
 struct ProofArgs {
     /// The sheet as it is now: the PDF that was printed.
     sheet: PathBuf,
-    /// The delta that would be printed onto it.
+    /// The delta that would be printed onto it. `last` means the one written
+    /// most recently.
     #[arg(long)]
     delta: PathBuf,
     /// Where to write the proof. Without it, beside the delta.
@@ -3826,6 +3832,40 @@ fn expert_options(
 /// the same answer.
 const LOOKING_AT_DPI: f64 = 150.0;
 
+/// The printer somebody set, or nothing — in which case the commands say what
+/// to do about it, which is better than a default that is certainly wrong.
+/// A delta given by path, or the last one written if that word was used.
+///
+/// `verify` and `proof` both want a delta made minutes ago, often in a scratch
+/// folder under a generated name. Onionskin already wrote down what it was, so
+/// asking somebody to go and find it again is asking a question that has been
+/// answered.
+fn the_delta(given: &Path) -> Result<PathBuf, String> {
+    if given != Path::new("last") {
+        return Ok(given.to_path_buf());
+    }
+    onionskin::history::last_delta().ok_or_else(|| {
+        "there is no delta to use — nothing has been written yet, or what was \
+         written has been tidied away.\n    Give the file by name, or make one \
+         with `onionskin delta`."
+            .to_string()
+    })
+}
+
+fn default_printer() -> String {
+    onionskin::settings::load()
+        .defaults
+        .printer
+        .unwrap_or_default()
+}
+
+fn default_scanner() -> String {
+    onionskin::settings::load()
+        .defaults
+        .scanner
+        .unwrap_or_default()
+}
+
 fn default_page() -> String {
     onionskin::settings::load()
         .defaults
@@ -5133,14 +5173,15 @@ fn cmd_which(args: WhichArgs) -> Result<ExitCode, String> {
 /// document it was never made for. Ink does not come off paper, and there is no
 /// undo at a printer.
 fn cmd_fits(args: FitsArgs) -> Result<ExitCode, String> {
-    let asked = calibrate::marks_on_delta(&args.delta).map_err(|e| e.to_string())?;
+    let delta = the_delta(&args.delta)?;
+    let asked = calibrate::marks_on_delta(&delta).map_err(|e| e.to_string())?;
     if asked.is_empty() {
         return Err(format!(
             "{} has nothing on it, so there is nothing to hold against the sheet.",
-            args.delta.display()
+            delta.display()
         ));
     }
-    let delta_page = onionskin::recipe::draw_page(&args.delta, 1)?.1.page;
+    let delta_page = onionskin::recipe::draw_page(&delta, 1)?.1.page;
 
     // The sheet, however it arrives. A PDF of the form is as good as a scan of
     // it and rather better, having no skew to measure — and it is what
@@ -5193,7 +5234,7 @@ fn cmd_fits(args: FitsArgs) -> Result<ExitCode, String> {
         println!(
             "\nThis looks like the sheet '{}' was made for. Print at 100%, with \
              \"Fit to page\" off.",
-            args.delta.display()
+            delta.display()
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -5203,18 +5244,19 @@ fn cmd_fits(args: FitsArgs) -> Result<ExitCode, String> {
         "\nDo not print this onto that sheet without looking at it first:\n  \
          onionskin proof {} --delta {}",
         args.sheet.display(),
-        args.delta.display()
+        delta.display()
     );
     Ok(ExitCode::from(2))
 }
 
 fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
     let page = parse_page(&args.page).map_err(|e| e.to_string())?;
-    let asked = calibrate::marks_on_delta(&args.delta).map_err(|e| e.to_string())?;
+    let delta = the_delta(&args.delta)?;
+    let asked = calibrate::marks_on_delta(&delta).map_err(|e| e.to_string())?;
     if asked.is_empty() {
         return Err(format!(
             "{} has nothing on it, so there is nothing to check for.",
-            args.delta.display()
+            delta.display()
         ));
     }
 
@@ -5247,7 +5289,7 @@ fn cmd_verify(args: VerifyArgs) -> Result<ExitCode, String> {
             "    Calibrate this printer and it will come down: \
              onionskin calibrate learn {} --delta {}",
             args.scan.display(),
-            args.delta.display()
+            delta.display()
         );
     }
 
@@ -5830,14 +5872,15 @@ fn page_in_grey(
 
 /// Draw the sheet with the delta on it, so it can be looked at.
 fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
+    let delta = the_delta(&args.delta)?;
     let output = args
         .output
         .clone()
-        .unwrap_or_else(|| beside(&args.delta, "-proof", "pdf"));
+        .unwrap_or_else(|| beside(&delta, "-proof", "pdf"));
     refuse_to_clobber(
         &output,
         "proof",
-        &[(&args.sheet, "sheet"), (&args.delta, "delta")],
+        &[(&args.sheet, "sheet"), (&delta, "delta")],
     )?;
     check_writable(&output, "proof")?;
 
@@ -5856,7 +5899,7 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
         options = options.tracing();
     }
 
-    let pages = onionskin::proof::write_proof(&args.sheet, &args.delta, &output, &options)
+    let pages = onionskin::proof::write_proof(&args.sheet, &delta, &output, &options)
         .map_err(|e| e.to_string())?;
 
     println!(

@@ -86,7 +86,13 @@ impl Address {
     ) -> Result<Address, PrinterError> {
         let text = text.trim();
         if text.is_empty() {
-            return Err(PrinterError::Address("no printer address given".into()));
+            return Err(PrinterError::Address(
+                "no address given.\n    Find the device and set it once:\n      \
+                 onionskin printers\n      onionskin config set printer \
+                 ipp://printer.local/ipp/print\n    After that, --printer is \
+                 only needed to use a different one."
+                    .into(),
+            ));
         }
         let (scheme, rest) = match text.split_once("://") {
             Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
