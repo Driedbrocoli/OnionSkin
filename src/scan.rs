@@ -485,11 +485,91 @@ pub fn sheet_shape(image: &image::DynamicImage) -> Option<f64> {
 }
 
 pub fn find_sheet(gray: &GrayImage) -> Option<Bounds> {
-    let (width, height) = gray.dimensions();
     let threshold = otsu_threshold(gray);
     // Paper is the bright side of the split. Bias upward so heavy text does
     // not drag the level into the paper itself.
     let global_paper = threshold.saturating_add((255 - threshold) / 4);
+    let found = find_sheet_above(gray, global_paper)?;
+
+    // If that came back as the whole picture, it may be right — a scan already
+    // cropped to the sheet is exactly that — or it may be the three-cluster
+    // trap. Otsu separates two things; a scan of a printed sheet has three, and
+    // on a page with a good deal of ink on it the split falls between the ink
+    // and everything else. The lid then sits on the paper side, every row and
+    // column of it counts as sheet, and the whole image comes back as the
+    // paper. The same page with less printing on it registers within a pixel.
+    //
+    // Asked only when the first answer is the whole picture, so nothing that
+    // already finds a sheet can be changed by this — and the second answer is
+    // taken only if it finds a real sheet with real space around it. A cropped
+    // scan has no lid to separate, so nothing happens there either.
+    if !fills_the_picture(gray, &found) {
+        return Some(found);
+    }
+    let Some(above_the_lid) = paper_against_the_lid(gray, global_paper) else {
+        return Some(found);
+    };
+    match find_sheet_above(gray, above_the_lid) {
+        Some(better) if !fills_the_picture(gray, &better) && is_a_sheet(gray, &better) => {
+            Some(better)
+        }
+        _ => Some(found),
+    }
+}
+
+/// Whether these bounds are the whole picture, give or take a pixel either way.
+fn fills_the_picture(gray: &GrayImage, bounds: &Bounds) -> bool {
+    let (width, height) = gray.dimensions();
+    bounds.x0 <= 1 && bounds.y0 <= 1 && bounds.x1 + 1 >= width && bounds.y1 + 1 >= height
+}
+
+/// Whether bounds are big enough to be a sheet rather than a stray bright patch.
+///
+/// Half the picture each way. A sheet with a margin around it is most of what
+/// was scanned; anything much smaller is a window, a photograph on the page, or
+/// a reflection, and taking it for the paper would be worse than the answer this
+/// is trying to improve on.
+fn is_a_sheet(gray: &GrayImage, bounds: &Bounds) -> bool {
+    let (width, height) = gray.dimensions();
+    bounds.width() * 2 >= width && bounds.height() * 2 >= height
+}
+
+/// Where paper stops and the lid behind it begins, among the pixels the first
+/// split already called paper.
+///
+/// `None` when what is there is one population rather than two — a scan already
+/// cropped to the sheet has no lid in it, and splitting paper against its own
+/// grain would put the level above the paper and find no sheet at all.
+fn paper_against_the_lid(gray: &GrayImage, above: u8) -> Option<u8> {
+    let mut histogram = [0u64; 256];
+    for pixel in gray.pixels() {
+        if pixel.0[0] >= above {
+            histogram[pixel.0[0] as usize] += 1;
+        }
+    }
+    let between = otsu_of_histogram(&histogram);
+    let mean = |from: usize, to: usize| -> Option<f64> {
+        let count: u64 = histogram.get(from..to)?.iter().sum();
+        (count > 0).then(|| {
+            histogram[from..to]
+                .iter()
+                .enumerate()
+                .map(|(offset, tally)| (from + offset) as f64 * *tally as f64)
+                .sum::<f64>()
+                / count as f64
+        })
+    };
+    let dim = mean(above as usize, between as usize)?;
+    let bright = mean(between as usize, 256)?;
+    // Twenty-five levels apart, which is a tenth of the range: comfortably more
+    // than a scanner's grain and comfortably less than any lid worth telling
+    // from paper.
+    (bright - dim >= 25.0).then_some(between)
+}
+
+/// The sheet, taking anything this bright or brighter for paper.
+fn find_sheet_above(gray: &GrayImage, global_paper: u8) -> Option<Bounds> {
+    let (width, height) = gray.dimensions();
 
     let min_run_x = (width / 100).max(16).min(width);
     let min_run_y = (height / 100).max(16).min(height);
