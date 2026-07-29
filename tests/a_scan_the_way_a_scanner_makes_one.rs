@@ -99,7 +99,7 @@ impl Glass {
     /// is under it — the inverse of what registration has to work out, so the
     /// two cannot agree by sharing a mistake.
     fn scan(&self, lid: u8) -> image::DynamicImage {
-        self.scan_with(lid, &BANDS.to_vec())
+        self.scan_with(lid, BANDS.as_ref())
     }
 
     /// The same, with the printing said outright rather than taken from
@@ -257,6 +257,9 @@ fn a_sheet_is_found_wherever_it_was_put_on_the_glass() {
     );
 }
 
+/// One of the things a scanner does to a page on its way through.
+type Spoiling = Box<dyn Fn(&image::DynamicImage) -> image::DynamicImage>;
+
 /// The same sheets, through what a scanner does to them.
 ///
 /// **Ignored, and left here on purpose.** It measures 3.07 mm at 1.2° of skew,
@@ -275,10 +278,7 @@ fn a_sheet_is_found_wherever_it_was_put_on_the_glass() {
 #[test]
 #[ignore = "measures 3 mm at 1.2 degrees and I have not traced why: see the comment"]
 fn a_sheet_is_still_found_through_grain_and_soft_focus_and_a_bad_exposure() {
-    let spoilings: Vec<(
-        &str,
-        Box<dyn Fn(&image::DynamicImage) -> image::DynamicImage>,
-    )> = vec![
+    let spoilings: Vec<(&str, Spoiling)> = vec![
         ("grain", Box::new(|s: &image::DynamicImage| grainy(s, 18))),
         (
             "heavy grain",
