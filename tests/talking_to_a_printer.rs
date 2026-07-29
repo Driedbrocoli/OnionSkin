@@ -356,3 +356,173 @@ fn doctor_names_the_printer_that_was_set_and_says_how_to_set_one_when_none_is() 
         "the made-up address is still there beside the real one: {said}"
     );
 }
+
+/// A printer that answers with something other than an answer.
+///
+/// This is the one part of Onionskin that talks to a machine it did not write
+/// and cannot see. A printer on an office network may be twelve years old, may
+/// be a print server pretending to be a printer, or may be something else
+/// entirely on the port somebody typed — and whatever comes back down the socket
+/// is parsed before anything has had a chance to check it.
+///
+/// What is being asked of it is not that it understands these. It is that it
+/// **comes back**. A hang is worse than a crash here: a crash says something is
+/// wrong, and a program stopped at a socket with a job half sent says nothing at
+/// all while somebody waits for their printing.
+///
+/// It does come back. The one worth naming is a printer that promises a hundred
+/// thousand bytes and sends five, then holds the socket open — Onionskin waits
+/// out its own sixty-second read timeout and reports the printer unreachable,
+/// which is the right answer and takes a full minute to give. That minute is
+/// deliberate and documented in `printer`: a printer waking from sleep takes its
+/// time, and a spurious timeout looks exactly like a printer that is switched
+/// off. So this test allows longer than the program's own patience rather than
+/// calling patience a hang.
+fn a_printer_that_answers_badly(reply: Vec<u8>, then_hang: bool) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        // Read what it feels like reading and no more, then answer.
+        let mut scratch = [0u8; 4096];
+        let _ = stream.read(&mut scratch);
+        let _ = stream.write_all(&reply);
+        let _ = stream.flush();
+        if then_hang {
+            // Promised a body and never sends it. The socket stays open, which
+            // is the case a client waiting for `Content-Length` bytes never
+            // wakes up from.
+            std::thread::sleep(std::time::Duration::from_secs(90));
+        }
+    });
+    format!("{}:{}", address.ip(), address.port())
+}
+
+/// Run the binary, and insist it finishes.
+///
+/// `output()` waits for ever, which is exactly the failure being looked for —
+/// so the child is watched and killed, and a kill is a failed test rather than a
+/// quiet pass.
+fn run_before(home: &Path, args: &[&str], seconds: u64) -> Result<String, String> {
+    let mut child = Command::new(binary())
+        .args(args)
+        .env("ONIONSKIN_HOME", home)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary should start");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("still going after {seconds} seconds"));
+            }
+            Err(why) => return Err(why.to_string()),
+        }
+    }
+    let out = child.wait_with_output().expect("the binary should finish");
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+#[test]
+fn nothing_a_printer_can_answer_leaves_onionskin_waiting() {
+    let dir = tempfile::tempdir().expect("a place to work");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("a home of its own");
+    let delta = a_delta(&home, dir.path());
+
+    let replies: Vec<(&str, Vec<u8>, bool)> = vec![
+        ("nothing at all", Vec::new(), false),
+        ("a closed socket", Vec::new(), false),
+        (
+            "headers and no body",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            false,
+        ),
+        (
+            "a promise it does not keep",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\nshort".to_vec(),
+            true,
+        ),
+        (
+            "a web page",
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 44\r\n\r\n\
+              <html><body>Printer web interface</body></html>"
+                .to_vec(),
+            false,
+        ),
+        (
+            "an IPP reply cut off mid-attribute",
+            [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n".to_vec(),
+                vec![0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01],
+            ]
+            .concat(),
+            false,
+        ),
+        (
+            "an IPP attribute longer than the reply",
+            [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\n".to_vec(),
+                vec![
+                    0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x47, 0xFF, 0xFF, 0x41,
+                    0x42,
+                ],
+            ]
+            .concat(),
+            false,
+        ),
+        (
+            "every byte there is",
+            [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 256\r\n\r\n".to_vec(),
+                (0u8..=255).collect(),
+            ]
+            .concat(),
+            false,
+        ),
+        ("not http at all", b"greetings\n".to_vec(), false),
+        (
+            "a status nobody defines",
+            b"HTTP/1.1 799 Nonsense\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            false,
+        ),
+    ];
+
+    for (name, reply, then_hang) in replies {
+        let address = a_printer_that_answers_badly(reply, then_hang);
+        let said = run_before(
+            &home,
+            &[
+                "send",
+                delta.to_str().unwrap(),
+                "--printer",
+                &format!("ipp://{address}/ipp/print"),
+            ],
+            // Longer than the program's own sixty-second read timeout, so a
+            // failure here means it really never came back.
+            90,
+        )
+        .unwrap_or_else(|why| panic!("'{name}': {why}"));
+
+        // Whatever it decided, it has to have said something a person can act
+        // on rather than stopping with an empty screen.
+        assert!(
+            said.trim().len() > 10,
+            "'{name}' came back with almost nothing to say: {said:?}"
+        );
+    }
+}
