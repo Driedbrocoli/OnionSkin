@@ -402,3 +402,126 @@ mod last_delta_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod drawing {
+    use super::*;
+
+    /// Every screen, drawn.
+    ///
+    /// The screens have tests for what they decide — which columns are named,
+    /// which grey is the default, where the delta lands. None of them had a test
+    /// for *drawing*, because drawing appeared to need a window and a graphics
+    /// card, and this program is tested on machines with neither.
+    ///
+    /// It does not. egui lays a frame out in software and only hands the result
+    /// to a graphics card afterwards, so `Context::run` walks every widget on a
+    /// screen — every range, every slider, every identifier — with nothing on the
+    /// screen at all.
+    ///
+    /// What it catches is a panic on the way to the screen: an index into a list
+    /// the layout code assumed was not empty, an unwrap on a state that is empty
+    /// when a screen first opens, arithmetic that overflows on a default value.
+    /// Checked against exactly that — reaching past the end of a screen's own
+    /// list of rows turns this red, naming the file and the line.
+    ///
+    /// What it does not catch is a widget that is merely wrong. An inverted
+    /// range was tried and egui takes it without complaint, so this is a test
+    /// for falling over rather than for looking right. Looking right needs eyes,
+    /// and nothing here claims otherwise.
+    ///
+    /// Every screen is drawn twice. The first pass is the one that lays out; the
+    /// second is where egui compares what it laid out against what it laid out
+    /// last time, which is where a clashing identifier is noticed.
+    fn draw(screen: Screen) {
+        let ctx = egui::Context::default();
+        let mut app = Screens::default();
+        let mut jobs = Jobs::new(&ctx);
+        let mut previews = Previews::default();
+        let mut picker = crate::picker::Picker::default();
+        let mut dropped = Vec::new();
+
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut room = Room {
+                    picker: &mut picker,
+                    jobs: &mut jobs,
+                    previews: &mut previews,
+                    dropped: &mut dropped,
+                    ui,
+                };
+                app.show(screen, &mut room);
+            });
+        }
+    }
+
+    /// One of each screen's state, so a screen can be drawn without the whole
+    /// window being built.
+    #[derive(Default)]
+    struct Screens {
+        compare: compare::State,
+        scan: scan::State,
+        document: document::State,
+        draw: draw::State,
+        read: read::State,
+        verify: verify::State,
+        blanks: blanks::State,
+        proof: proof::State,
+        merge: merge::State,
+        join: join::State,
+        fits: fits::State,
+        stack: stack::State,
+        correct: correct::State,
+        cover: cover::State,
+        watermark: watermark::State,
+        barcode: barcode::State,
+        back: back::State,
+        harvest: harvest::State,
+        batch: batch::State,
+        labels: labels::State,
+        jobs: jobs::State,
+        history: history::State,
+        devices: devices::State,
+        calibrate: calibrate::State,
+        doctor: doctor::State,
+    }
+
+    impl Screens {
+        fn show(&mut self, screen: Screen, room: &mut Room) {
+            match screen {
+                Screen::Compare => compare::show(&mut self.compare, room),
+                Screen::Scan => scan::show(&mut self.scan, room),
+                Screen::Document => document::show(&mut self.document, room),
+                Screen::Draw => draw::show(&mut self.draw, room),
+                Screen::Read => read::show(&mut self.read, room),
+                Screen::Verify => verify::show(&mut self.verify, room),
+                Screen::Blanks => blanks::show(&mut self.blanks, room),
+                Screen::Proof => proof::show(&mut self.proof, room),
+                Screen::Merge => merge::show(&mut self.merge, room),
+                Screen::Join => join::show(&mut self.join, room),
+                Screen::Fits => fits::show(&mut self.fits, room),
+                Screen::Stack => stack::show(&mut self.stack, room),
+                Screen::Correct => correct::show(&mut self.correct, room),
+                Screen::Cover => cover::show(&mut self.cover, room),
+                Screen::Watermark => watermark::show(&mut self.watermark, room),
+                Screen::Barcode => barcode::show(&mut self.barcode, room),
+                Screen::Back => back::show(&mut self.back, room),
+                Screen::Harvest => harvest::show(&mut self.harvest, room),
+                Screen::Batch => batch::show(&mut self.batch, room),
+                Screen::Labels => labels::show(&mut self.labels, room),
+                Screen::Jobs => jobs::show(&mut self.jobs, room),
+                Screen::History => history::show(&mut self.history, room),
+                Screen::Devices => devices::show(&mut self.devices, room),
+                Screen::Calibrate => calibrate::show(&mut self.calibrate, room),
+                Screen::Doctor => doctor::show(&mut self.doctor, room),
+            }
+        }
+    }
+
+    #[test]
+    fn every_screen_draws_without_falling_over() {
+        for screen in Screen::ALL {
+            draw(*screen);
+        }
+    }
+}
