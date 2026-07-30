@@ -559,3 +559,139 @@ fn the_record_is_trimmed_rather_than_growing_forever() {
         .any(|had| had.source.ends_with("newest.pdf")));
     assert!(!after.all().iter().any(|had| had.source.ends_with("/0.pdf")));
 }
+
+/// The record must be written with a path that means the same thing next time
+/// it is read. A relative one does not: `./Scan_0007.pdf`, written by
+/// `watch .` from the scans folder, resolves against whatever directory the
+/// program happens to be in the next time — so watching the same folder by its
+/// full name from somewhere else matches nothing and the whole folder gets a
+/// second delta.
+#[test]
+fn what_is_written_down_means_the_same_thing_tomorrow() {
+    let kept = tempfile::tempdir().unwrap();
+    let folder = kept.path().to_path_buf();
+    let home = folder.join("home");
+    let _home = crate::calibrate::borrow_home(&home);
+
+    let scans = folder.join("scans");
+    std::fs::create_dir_all(&scans).unwrap();
+    let file = scans.join("Scan_0007.pdf");
+    std::fs::write(&file, b"%PDF-1.4\n").unwrap();
+    let look = look_at(&file).unwrap();
+
+    // As it would be written from inside the folder: a path with a "." in it.
+    let as_listed = scans.join(".").join("Scan_0007.pdf");
+    let handled = Handled::of(&as_listed, look, None, String::new(), 1);
+    assert_eq!(
+        handled.source,
+        settled_name(&file),
+        "the record kept the path as it happened to be written"
+    );
+
+    write_down(&scans, &handled).unwrap();
+    // Read back, and asked about the file under its plain name.
+    let after = read_ledger(&scans);
+    assert!(
+        after.knows(&file, look).is_some(),
+        "the file it had already done was not recognised"
+    );
+    assert_eq!(
+        what_to_do(&Seen { path: file, look }, Some(look), &after),
+        Verdict::DoneBefore(1)
+    );
+}
+
+/// Trimming must never forget a file that is still in the folder. Dropping the
+/// oldest outright is the obvious rule and it is wrong in the one way that
+/// costs paper: those files get a second delta on the next sweep, push out the
+/// record of others, and the folder churns for the rest of the afternoon
+/// printing over sheets that were already printed on.
+#[test]
+fn trimming_forgets_only_the_files_that_have_gone() {
+    let kept = tempfile::tempdir().unwrap();
+    let folder = kept.path().to_path_buf();
+    let home = folder.join("home");
+    let _home = crate::calibrate::borrow_home(&home);
+    let scans = folder.join("scans");
+    std::fs::create_dir_all(&scans).unwrap();
+
+    // A record already at its limit, all of it about files that have gone.
+    let path = ledger_path(&scans);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut text = String::new();
+    for n in 0..KEEP {
+        let handled = Handled {
+            at: n as u64,
+            source: scans
+                .join(format!("gone-{n}.pdf"))
+                .to_string_lossy()
+                .into_owned(),
+            look: look(10, n as u64),
+            delta: String::new(),
+            trouble: String::new(),
+        };
+        text.push_str(&format!("{}\n", serde_json::to_string(&handled).unwrap()));
+    }
+    // And two about files that are really there — the oldest entries of all,
+    // so an age-only rule would drop exactly these.
+    let mut here = Vec::new();
+    for name in ["still-a.pdf", "still-b.pdf"] {
+        let file = scans.join(name);
+        std::fs::write(&file, b"%PDF-1.4\n").unwrap();
+        let look = look_at(&file).unwrap();
+        let handled = Handled::of(&file, look, None, String::new(), 0);
+        text.insert_str(
+            0,
+            &format!("{}\n", serde_json::to_string(&handled).unwrap()),
+        );
+        here.push((file, look));
+    }
+    std::fs::write(&path, text).unwrap();
+
+    write_down(
+        &scans,
+        &Handled::of(
+            &scans.join("newest.pdf"),
+            look(10, 10),
+            None,
+            String::new(),
+            99_999,
+        ),
+    )
+    .unwrap();
+
+    let after = read_ledger(&scans);
+    for (file, look) in &here {
+        assert!(
+            after.knows(file, *look).is_some(),
+            "{} is still in the folder and was forgotten — it would be done again",
+            file.display()
+        );
+    }
+    assert!(after.len() <= KEEP, "the record grew past its limit");
+}
+
+/// `report.pdf` and `report.docx` both ask for `report-delta.pdf`, and
+/// whichever is done second silently replaces the first. A folder holding a
+/// document and the Word file it came from is not exotic.
+#[test]
+fn two_files_wanting_the_same_delta_are_pointed_out() {
+    let now = vec![
+        seen("/scans/report.pdf", 100, 1),
+        seen("/scans/report.docx", 200, 2),
+        seen("/scans/invoice.pdf", 300, 3),
+        // Not a document, so not part of the question.
+        seen("/scans/report.jpg", 400, 4),
+    ];
+    let clashing = sharing_a_delta(&now, None);
+    assert_eq!(clashing.len(), 1, "{clashing:?}");
+    assert_eq!(clashing[0].0, PathBuf::from("/scans/report-delta.pdf"));
+    assert_eq!(clashing[0].1.len(), 2);
+    assert!(clashing[0].1.contains(&PathBuf::from("/scans/report.pdf")));
+    assert!(clashing[0].1.contains(&PathBuf::from("/scans/report.docx")));
+
+    // A folder with no clash says so by saying nothing.
+    assert!(sharing_a_delta(&now[2..], None).is_empty());
+    // And putting the deltas somewhere else does not make the clash go away.
+    assert_eq!(sharing_a_delta(&now, Some(Path::new("/out"))).len(), 1);
+}

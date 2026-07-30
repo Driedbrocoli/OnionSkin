@@ -60,6 +60,23 @@ pub enum SeriesError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error(
+        "{path} holds where every numbered series has got to, and it cannot be read ({why}).\n    \
+         Numbering from it now would start again at 1, on numbers that are already on paper. \
+         Move that file aside and use --start-at to say where this run begins."
+    )]
+    Unreadable { path: PathBuf, why: String },
+    #[error(
+        "the '{name}' series was at {started_at} when this run began and is at {now} now, so \
+         something else moved it while these sheets were being made.\n    They are numbered from \
+         {started_at}, and the other run's may be the same numbers. Check both before printing, \
+         and put the counter where it belongs with --start-at."
+    )]
+    MovedUnderneath {
+        name: String,
+        started_at: usize,
+        now: usize,
+    },
 }
 
 /// A name that can be typed and read back.
@@ -81,29 +98,82 @@ pub fn path() -> PathBuf {
     crate::calibrate::home_dir().join("series.json")
 }
 
-/// Every series and where it has got to.
+/// Every series and where it has got to, and whether the file could be read.
 ///
-/// An unreadable file is an empty one rather than an error: this is a
-/// convenience, and losing it costs somebody typing `--start-at` once. Refusing
-/// to print at all because a small JSON file went bad would be worse.
+/// The two cases have to be told apart. A file that is simply not there is the
+/// ordinary one — nobody has used a series yet. A file that is there and cannot
+/// be understood is a different thing entirely, and treating it as empty does
+/// two bad turns at once: this run starts at 1, printing numbers that are
+/// already on paper somewhere, and the save at the end writes an object holding
+/// only this series, **deleting the counters of every other series on the
+/// machine**. One bad file would take the lot.
+pub fn read() -> Result<Counters, SeriesError> {
+    let path = path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        // Never used, which is not a problem.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Counters::default()),
+        Err(source) => return Err(SeriesError::Io { path, source }),
+    };
+    if text.trim().is_empty() {
+        return Ok(Counters::default());
+    }
+    serde_json::from_str(&text).map_err(|source| SeriesError::Unreadable {
+        path,
+        why: source.to_string(),
+    })
+}
+
+/// The same, where a file that cannot be read is treated as empty.
+///
+/// For the places that only want to *show* what is there — `doctor`'s list of
+/// what Onionskin keeps. Never for anything that goes on to save, which would
+/// take the unreadable file's contents away with it.
 pub fn load() -> Counters {
-    std::fs::read_to_string(path())
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    read().unwrap_or_default()
 }
 
 /// The number this series will use next, or 1 if it has never been used.
-pub fn next_for(name: &str) -> usize {
-    load().next.get(name).copied().unwrap_or(1).max(1)
+///
+/// Returns an error rather than 1 when the file is there and unreadable, so
+/// that a run does not quietly start again at a number already on paper.
+pub fn next_for(name: &str) -> Result<usize, SeriesError> {
+    Ok(read()?.next.get(name).copied().unwrap_or(1).max(1))
 }
 
 /// Say that a series has reached this number, so the next run starts there.
 ///
-/// Called after the sheets exist, never before.
+/// Called after the sheets exist, never before. Refuses outright if the file
+/// cannot be read, because writing over it would take every other series with
+/// it — and the sheets are already made, so the caller can say so and move the
+/// file aside by hand.
 pub fn reached(name: &str, next: usize) -> Result<(), SeriesError> {
     check_name(name)?;
-    let mut counters = load();
+    let mut counters = read()?;
+    counters.next.insert(name.to_string(), next.max(1));
+    save(&counters)
+}
+
+/// Advance a series only if it is still where this run left it.
+///
+/// Two runs of the same series at once both read the counter, both number their
+/// sheets from it, and both write it — and there is no lock to prevent it,
+/// because there is no lock this program could take that would also work on the
+/// network share the counter might be sitting on. What it can do is notice: the
+/// number this run started from is passed back in, and if the counter has moved
+/// since, the sheets are already made and somebody has to be told rather than
+/// have it written over in silence.
+pub fn reached_from(name: &str, started_at: usize, next: usize) -> Result<(), SeriesError> {
+    check_name(name)?;
+    let mut counters = read()?;
+    let now = counters.next.get(name).copied().unwrap_or(1).max(1);
+    if now != started_at.max(1) {
+        return Err(SeriesError::MovedUnderneath {
+            name: name.to_string(),
+            started_at: started_at.max(1),
+            now,
+        });
+    }
     counters.next.insert(name.to_string(), next.max(1));
     save(&counters)
 }

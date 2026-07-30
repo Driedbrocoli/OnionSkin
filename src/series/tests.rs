@@ -14,15 +14,15 @@ fn somewhere() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
 fn the_second_run_carries_on_where_the_first_stopped() {
     let (_dir, _home) = somewhere();
 
-    let first = numbers(next_for("receipts"), 200);
+    let first = numbers(next_for("receipts").unwrap(), 200);
     assert_eq!(first, 1..201, "a series never used starts at one");
     reached("receipts", first.end).unwrap();
 
-    let second = numbers(next_for("receipts"), 200);
+    let second = numbers(next_for("receipts").unwrap(), 200);
     assert_eq!(second, 201..401);
     reached("receipts", second.end).unwrap();
 
-    assert_eq!(next_for("receipts"), 401);
+    assert_eq!(next_for("receipts").unwrap(), 401);
     // Which is the thing a receipt book must never contain: two of the same.
     let used: Vec<usize> = first.chain(second).collect();
     let mut once = used.clone();
@@ -39,9 +39,9 @@ fn two_series_count_separately() {
     reached("receipts", 201).unwrap();
     reached("tickets", 5_001).unwrap();
 
-    assert_eq!(next_for("receipts"), 201);
-    assert_eq!(next_for("tickets"), 5_001);
-    assert_eq!(next_for("never-used"), 1);
+    assert_eq!(next_for("receipts").unwrap(), 201);
+    assert_eq!(next_for("tickets").unwrap(), 5_001);
+    assert_eq!(next_for("never-used").unwrap(), 1);
     assert_eq!(
         all(),
         vec![
@@ -57,10 +57,10 @@ fn two_series_count_separately() {
 #[test]
 fn a_run_that_wrote_nothing_does_not_use_up_numbers() {
     let (_dir, _home) = somewhere();
-    let asked = numbers(next_for("receipts"), 200);
+    let asked = numbers(next_for("receipts").unwrap(), 200);
     assert_eq!(asked, 1..201);
     // Nothing is written down, because nothing was printed.
-    assert_eq!(next_for("receipts"), 1);
+    assert_eq!(next_for("receipts").unwrap(), 1);
 }
 
 /// Stopping after five to look at them uses five numbers, not two hundred:
@@ -68,12 +68,12 @@ fn a_run_that_wrote_nothing_does_not_use_up_numbers() {
 #[test]
 fn a_run_cut_short_uses_only_the_numbers_it_printed() {
     let (_dir, _home) = somewhere();
-    let asked = numbers(next_for("receipts"), 200);
+    let asked = numbers(next_for("receipts").unwrap(), 200);
     let printed = numbers(asked.start, 5);
     reached("receipts", printed.end).unwrap();
 
     assert_eq!(printed, 1..6);
-    assert_eq!(next_for("receipts"), 6);
+    assert_eq!(next_for("receipts").unwrap(), 6);
 }
 
 /// Put back to a number, which is how a mistake is undone and how a book that
@@ -82,15 +82,15 @@ fn a_run_cut_short_uses_only_the_numbers_it_printed() {
 fn a_series_can_be_started_anywhere_and_put_back() {
     let (_dir, _home) = somewhere();
     start_at("receipts", 4_471).unwrap();
-    assert_eq!(numbers(next_for("receipts"), 3), 4_471..4_474);
+    assert_eq!(numbers(next_for("receipts").unwrap(), 3), 4_471..4_474);
 
     start_at("receipts", 1).unwrap();
-    assert_eq!(next_for("receipts"), 1);
+    assert_eq!(next_for("receipts").unwrap(), 1);
 
     // Zero is not a receipt number. Asking for it gets one rather than a
     // sheet numbered 0.
     start_at("receipts", 0).unwrap();
-    assert_eq!(next_for("receipts"), 1);
+    assert_eq!(next_for("receipts").unwrap(), 1);
     assert_eq!(numbers(0, 3), 1..4);
 
     assert!(forget("receipts").unwrap());
@@ -98,7 +98,7 @@ fn a_series_can_be_started_anywhere_and_put_back() {
         !forget("receipts").unwrap(),
         "forgetting twice is not an error"
     );
-    assert_eq!(next_for("receipts"), 1);
+    assert_eq!(next_for("receipts").unwrap(), 1);
 }
 
 /// It survives the program being stopped, which is the whole point — the two
@@ -118,19 +118,79 @@ fn the_count_is_still_there_next_week() {
     assert!(dir.path().join("series.json").is_file());
 }
 
-/// A file that went bad costs somebody one `--start-at`, not the ability to
-/// print.
+/// A file that went bad must be said, not treated as empty. Treating it as
+/// empty does two bad turns at once: this run starts at 1, printing numbers
+/// that are already on paper somewhere, and the save at the end writes an
+/// object holding only this series — deleting the counters of every other
+/// series on the machine. One bad file would take the lot.
 #[test]
-fn a_broken_file_does_not_stop_the_printing() {
+fn a_broken_file_is_said_rather_than_taken_for_an_empty_one() {
     let (_dir, _home) = somewhere();
     reached("receipts", 201).unwrap();
+    reached("credit-notes", 7_001).unwrap();
+    let good = std::fs::read_to_string(path()).unwrap();
     std::fs::write(path(), "this is not json").unwrap();
 
-    assert_eq!(next_for("receipts"), 1, "it should fall back, not panic");
-    assert_eq!(all(), Vec::new());
-    // And writing to it again fixes it.
-    reached("receipts", 300).unwrap();
-    assert_eq!(next_for("receipts"), 300);
+    // Not 1, which is a number already printed on two hundred receipts.
+    let said = next_for("receipts").unwrap_err().to_string();
+    assert!(said.contains("cannot be read"), "{said}");
+    assert!(said.contains("--start-at"), "{said}");
+
+    // And nothing is written over it, so the other series survive the accident
+    // and are there again once the file is put back.
+    assert!(reached("receipts", 400).is_err());
+    assert_eq!(
+        std::fs::read_to_string(path()).unwrap(),
+        "this is not json",
+        "the unreadable file was written over, taking every other series with it"
+    );
+    std::fs::write(path(), good).unwrap();
+    assert_eq!(next_for("receipts").unwrap(), 201);
+    assert_eq!(next_for("credit-notes").unwrap(), 7_001);
+}
+
+/// A file that is simply not there is the ordinary case — nobody has used a
+/// series yet — and must not be confused with one that cannot be read.
+#[test]
+fn a_file_that_was_never_written_is_not_an_error() {
+    let (_dir, _home) = somewhere();
+    assert!(!path().exists());
+    assert_eq!(next_for("receipts").unwrap(), 1);
+    assert_eq!(read().unwrap(), Counters::default());
+    // Nor is an empty one, which is what an interrupted write can leave.
+    std::fs::create_dir_all(path().parent().unwrap()).unwrap();
+    std::fs::write(path(), "   \n").unwrap();
+    assert_eq!(next_for("receipts").unwrap(), 1);
+}
+
+/// Two runs of the same series at once both read the counter, both number
+/// their sheets from it, and both write it. There is no lock this program could
+/// take that would also work on the share the counter might sit on — but it can
+/// notice, and somebody has to be told rather than have it written over in
+/// silence.
+#[test]
+fn a_counter_that_moved_underneath_a_run_is_reported() {
+    let (_dir, _home) = somewhere();
+    // This run reads 1 and makes five sheets numbered 1 to 5.
+    let started_at = next_for("receipts").unwrap();
+    assert_eq!(started_at, 1);
+
+    // Another run finishes first and moves it.
+    reached("receipts", 21).unwrap();
+
+    let said = reached_from("receipts", started_at, 6)
+        .unwrap_err()
+        .to_string();
+    assert!(said.contains("was at 1"), "{said}");
+    assert!(said.contains("is at 21"), "{said}");
+    assert!(said.contains("--start-at"), "{said}");
+    // The other run's number is left alone rather than wound backwards.
+    assert_eq!(next_for("receipts").unwrap(), 21);
+
+    // Uncontested, it advances exactly as `reached` would.
+    let started_at = next_for("receipts").unwrap();
+    reached_from("receipts", started_at, 41).unwrap();
+    assert_eq!(next_for("receipts").unwrap(), 41);
 }
 
 /// A name that can be typed and read back, refused rather than cleaned up: a

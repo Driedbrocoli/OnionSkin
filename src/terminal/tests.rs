@@ -309,16 +309,82 @@ fn a_page_with_no_width_gets_no_ruler_rather_than_nonsense() {
 
 /// A drawing too narrow to hold the labels still says where the fifties are,
 /// rather than printing them over one another.
+///
+/// Two labels that abut run together into one number that says nothing —
+/// "100" ending where "150" begins reads as 100150, and somebody measuring off
+/// it has no idea which is which. So every width is checked: whatever labels
+/// survive have a space between them and can be read back as the numbers they
+/// were.
 #[test]
-fn a_narrow_ruler_drops_labels_rather_than_overlapping_them() {
-    let said = ruler(A4, 8);
-    let lines: Vec<&str> = said.lines().collect();
-    assert!(lines[0].contains('|'), "{said}");
-    // Whatever is left is still in order and still fits.
-    assert!(lines[1].chars().count() <= 8, "{said}");
-    let numbers: Vec<usize> = lines[1]
-        .split_whitespace()
-        .filter_map(|word| word.trim_end_matches("mm").parse().ok())
-        .collect();
-    assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]), "{said}");
+fn no_two_labels_ever_run_together_into_one_number() {
+    for across in [8usize, 12, 16, 20, 24, 30, 40, 60, ACROSS, 120, 200] {
+        for page in [A4, LANDSCAPE] {
+            let said = ruler(page, across);
+            let lines: Vec<&str> = said.lines().collect();
+            assert_eq!(lines.len(), 2, "{across}: {said}");
+            assert!(lines[0].contains('|'), "{across}: {said}");
+
+            // Every label that survived is one of the fifties, read back — not
+            // two of them stuck together.
+            let read: Vec<usize> = lines[1]
+                .split_whitespace()
+                .map(|word| {
+                    word.trim_end_matches("mm")
+                        .parse()
+                        .unwrap_or_else(|_| panic!("{across}: {word:?} in {said}"))
+                })
+                .collect();
+            for number in &read {
+                assert_eq!(
+                    number % 50,
+                    0,
+                    "{across}: {number} is two labels run together — {said}"
+                );
+                assert!(
+                    *number as f64 <= page.width_mm,
+                    "{across}: {number} is past the edge of the paper — {said}"
+                );
+            }
+            assert!(
+                read.windows(2).all(|pair| pair[0] < pair[1]),
+                "{across}: out of order — {said}"
+            );
+            assert!(!read.is_empty(), "{across}: no labels at all — {said}");
+        }
+    }
+}
+
+/// A page of an absurd shape must not ask for a drawing the machine cannot
+/// hold. A sliver a millimetre wide and a metre tall wants hundreds of
+/// thousands of rows; a width that has gone subnormal makes the ratio infinite,
+/// and `as usize` saturates rather than failing — so what comes out is a
+/// request to allocate usize::MAX rows and a panic reading "capacity overflow".
+#[test]
+fn a_page_of_an_absurd_shape_is_drawn_rather_than_crashed_on() {
+    let shapes = [
+        (1.0, 1000.0),
+        (0.001, 297.0),
+        (f64::MIN_POSITIVE, 297.0),
+        (1e-300, 1e300),
+        (210.0, f64::MAX),
+        (210.0, 0.0),
+        (210.0, -297.0),
+        (f64::MAX, 297.0),
+    ];
+    for (width_mm, height_mm) in shapes {
+        let page = PageSize {
+            width_mm,
+            height_mm,
+        };
+        let drawn = draw(&blank(40, 40), 40, 40, page, 40);
+        assert!(
+            (1..=DOWN_AT_MOST).contains(&drawn.down),
+            "{width_mm} × {height_mm} asked for {} rows",
+            drawn.down
+        );
+        assert_eq!(drawn.lines.len(), drawn.down);
+        // And the frame round it is still square.
+        let framed = drawn.framed("");
+        assert!(framed.lines().count() >= 3, "{width_mm} × {height_mm}");
+    }
 }

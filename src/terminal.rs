@@ -40,6 +40,13 @@ pub const SHADES: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '@'];
 /// in the one direction somebody was checking.
 pub const CELL_TALLER_BY: usize = 2;
 
+/// The most rows a drawing may have.
+///
+/// Two hundred is already several screens; past that nobody is reading it, and
+/// the number exists to stop a page of an absurd shape asking for a drawing
+/// the machine cannot hold.
+pub const DOWN_AT_MOST: usize = 200;
+
 /// How wide a drawing is, in characters, when nobody says.
 ///
 /// Eighty is the width every terminal has had since 1928, and it is the width a
@@ -90,9 +97,15 @@ pub fn draw(gray: &[u8], width: usize, height: usize, page: PageSize, across: us
     } else {
         1.0
     };
+    // Clamped at both ends. A page a millimetre wide and a metre tall is a
+    // real shape somebody can ask for by mistake, and unclamped it asks for
+    // hundreds of thousands of rows; a width that has gone subnormal makes the
+    // ratio infinite, and `as usize` saturates rather than failing, so what
+    // comes out is a request to allocate usize::MAX rows and a panic reading
+    // "capacity overflow".
     let down = ((across as f64 * tall) / CELL_TALLER_BY as f64)
         .round()
-        .max(1.0) as usize;
+        .clamp(1.0, DOWN_AT_MOST as f64) as usize;
 
     if width == 0 || height == 0 || gray.len() < width * height {
         return Drawing {
@@ -197,7 +210,11 @@ pub fn ruler(page: PageSize, across: usize) -> String {
     let drawn: String = line.into_iter().collect();
 
     let mut marks = String::new();
-    let mut written = 0usize;
+    // Where the last label ended, or nothing when none has been written. The
+    // difference matters at the left edge: the first label starts at column
+    // nought, and a rule that simply demanded a higher column than the last
+    // would drop it.
+    let mut ended: Option<usize> = None;
     let mut at_mm = 0.0;
     while at_mm <= page.width_mm {
         let column = at(at_mm);
@@ -209,10 +226,17 @@ pub fn ruler(page: PageSize, across: usize) -> String {
         } else {
             format!("{}", at_mm as usize)
         };
-        if column >= written && column + label.len() <= across {
-            marks.push_str(&" ".repeat(column - written));
+        // With a space between: two labels that abut run together into one
+        // number that says nothing — "100" ending where "150" begins reads as
+        // 100150, and somebody measuring off it has no idea which is which.
+        let room = match ended {
+            None => true,
+            Some(ended) => column > ended,
+        };
+        if room && column + label.len() <= across {
+            marks.push_str(&" ".repeat(column - ended.unwrap_or(0)));
             marks.push_str(&label);
-            written = column + label.len();
+            ended = Some(column + label.len());
         }
         at_mm += EVERY_MM;
     }

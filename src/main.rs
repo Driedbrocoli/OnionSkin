@@ -2609,6 +2609,15 @@ fn the_list_called(args: &BatchArgs) -> String {
 }
 
 /// The files this batch reads, for the check that refuses to write over one.
+/// The most sheets one `--count` makes.
+///
+/// More paper than one printer takes in a week. It is here because `--count`
+/// is a number somebody types, and a typed zero too many is answered by laying
+/// out two million sheets: minutes of work, gigabytes of memory, and a PDF
+/// nobody wanted. A list read with `--from` needs no such bound, because
+/// somebody had to build it a row at a time.
+const MOST_SHEETS: usize = 50_000;
+
 fn named_inputs(args: &BatchArgs) -> Vec<(&Path, &'static str)> {
     let mut inputs: Vec<(&Path, &'static str)> = vec![(args.document.as_path(), "sheet")];
     if let Some(from) = &args.from {
@@ -2640,11 +2649,31 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
                         you want, or a list with --from."
                 .into())
         }
+        // An upper bound as well as a lower one. `--count 2000000` is a typed
+        // zero too many, and without this it is answered by laying out two
+        // million sheets — minutes of work, gigabytes of memory, and a PDF
+        // nobody wanted. Fifty thousand is more paper than anybody feeds
+        // through one printer in a week.
+        (None, Some(how_many)) if how_many > MOST_SHEETS => {
+            return Err(format!(
+                "--count {how_many} is more sheets than this makes in one go — the limit is \
+                 {MOST_SHEETS}, which is more paper than one printer takes in a week.\n    \
+                 If you really want that many, do it in several runs; --series keeps the \
+                 numbering going across them."
+            ))
+        }
         (None, Some(how_many)) => onionskin::rows::List::counted(how_many),
         // clap requires one or the other, so this cannot be reached from the
         // command line — but a message beats a panic if it ever is.
         (None, None) => return Err("give --from and a list, or --count and a number".into()),
     };
+
+    // What the list says about itself, taken before a number is put anywhere
+    // near it. `duplicates` names rows by `Row::number`, and after the
+    // numbering has been moved to 201 or the first eighty dropped, those are
+    // sheet numbers rather than rows of anybody's spreadsheet — "rows 201, 203"
+    // about a file with three lines in it.
+    let repeats = list.describe_duplicates();
 
     // Where the numbering starts. Given outright, or carried on from where a
     // named series left off, or one.
@@ -2661,18 +2690,26 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         // wrongly and the wrongness is invisible until an accountant finds it.
         // The number is worked out and handed over rather than guessed at.
         (None, Some(name)) if resuming => {
-            let next = onionskin::series::next_for(name);
-            let likely = next.saturating_sub(list.rows.len()).max(1);
+            let next = onionskin::series::next_for(name).map_err(|e| e.to_string())?;
+            // Worked back from the counter and offered as a guess, said to be
+            // one. It is right when the run it is picking up made every sheet
+            // it was asked for, and wrong when that run was itself cut short by
+            // --first — the counter moved by what was printed, not by what was
+            // asked for, and nothing on this machine records which. Offering it
+            // as the answer would put a wrong number on paper with a straight
+            // face, so it is offered as a sum to check instead.
+            let guess = next.saturating_sub(list.rows.len()).max(1);
             return Err(format!(
                 "picking up a run of a series needs --start-at as well, because the '{name}' \
                  counter has already moved past this run's numbers — it is at {next} now, and \
                  numbering from there would put the wrong numbers on the paper.\n    \
-                 If this is the run of {} that used {likely} to {}, that is:  --start-at {likely}",
-                list.rows.len(),
-                next.saturating_sub(1).max(1)
+                 Give the number the *first* sheet of that run carried; it is printed on the \
+                 sheet.\n    If that run made all {} of its sheets and nothing has used the \
+                 series since, it was {guess}:  --start-at {guess}",
+                list.rows.len()
             ));
         }
-        (None, Some(name)) => onionskin::series::next_for(name),
+        (None, Some(name)) => onionskin::series::next_for(name).map_err(|e| e.to_string())?,
         (None, None) => 1,
     };
     let list = list.starting_at(first);
@@ -2748,7 +2785,7 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     // which of the two to hand over. Obvious in the list and invisible in the
     // stack of paper, so it is said here — and then the run goes on, because
     // two copies of a ticket is a real thing to want.
-    if let Some(said) = list.describe_duplicates() {
+    if let Some(said) = repeats {
         println!("{said}\n");
     }
 
@@ -2893,19 +2930,28 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     // stop-and-run-again, because after looking at the proof somebody wants to
     // print the rest — not to work out what they typed twenty minutes ago and
     // type it again with different flags.
+    //
+    // Nothing in here may return early. The stack is already written, and the
+    // things that come after this — the record of what was printed, and the
+    // series counter — are what stop it being printed twice and what stop the
+    // next box repeating these numbers. A proof that could not be made must not
+    // take either of them with it.
     if args.proof_first && wanted > 1 && !rehearsal.pretending() {
         let one = beside(&output, "-first", "pdf");
-        check_writable(&one, "first sheet")?;
-        match pipeline::compose_sheets_with_pictures(
-            &args.document,
-            args.page,
-            &per_sheet[..1],
-            pictures_per_sheet.get(..1).unwrap_or(&[]),
-            &one,
-            None,
-            &options,
-        ) {
-            Ok(_) => {
+        let made = check_writable(&one, "first sheet").and_then(|()| {
+            pipeline::compose_sheets_with_pictures(
+                &args.document,
+                args.page,
+                &per_sheet[..1],
+                pictures_per_sheet.get(..1).unwrap_or(&[]),
+                &one,
+                None,
+                &options,
+            )
+            .map_err(|e| e.to_string())
+        });
+        match made {
+            Ok(outcome) => {
                 println!("\n{}: the first sheet on its own.", one.display());
                 println!(
                     "  Print that one, hold it against a real {}, and then print the other {} \
@@ -2918,6 +2964,11 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
                     output.display(),
                     wanted
                 );
+                // Remembered like any other delta. It is a delta somebody will
+                // print, so "you have printed this already" has to be able to
+                // recognise it — and `history --asking-about` a folder of them
+                // would otherwise call it one that was never written.
+                note_the_delta(&args.document, &one, outcome.total_regions(), 1);
             }
             // The stack is written and is the thing that matters. A proof that
             // could not be made is a nuisance, not a failure of the run.
@@ -2949,7 +3000,7 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
                 "\nSeries '{name}' is unchanged — this is sheet {} onwards of a run whose \
                  numbers were already used. It still goes on from {}.",
                 args.from_sheet.unwrap_or(1),
-                onionskin::series::next_for(name)
+                onionskin::series::next_for(name).unwrap_or(first)
             );
         } else if rehearsal.pretending() {
             println!(
@@ -2957,7 +3008,7 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
                  still starts at {first}."
             );
         } else {
-            match onionskin::series::reached(name, numbered.end) {
+            match onionskin::series::reached_from(name, first, numbered.end) {
                 Ok(()) => println!(
                     "\n{}",
                     onionskin::series::where_it_got_to(name, numbered.clone())
@@ -6568,10 +6619,61 @@ fn cmd_watch(args: WatchArgs) -> Result<ExitCode, String> {
         println!("\n{}", watch::how_to_stop());
     }
 
+    // A folder that cannot be listed is not the end of the afternoon. The one
+    // this program is for is a share the office multifunction writes to, and
+    // shares go away for a few seconds at a time — a program that gave up on
+    // the first of those and left a message blaming the user for a folder that
+    // is plainly there would be worse than useless.
+    let mut in_a_row = 0usize;
+    const GIVE_UP_AFTER: usize = 10;
+
     loop {
-        let now = watch::listing(&args.folder).map_err(|e| e.to_string())?;
+        let now = match watch::listing(&args.folder) {
+            Ok(now) => {
+                in_a_row = 0;
+                now
+            }
+            Err(e) if args.once => return Err(e.to_string()),
+            Err(e) => {
+                in_a_row += 1;
+                if in_a_row >= GIVE_UP_AFTER {
+                    return Err(format!(
+                        "{e}\n    That is {in_a_row} times running, so this has stopped                          watching. Nothing was lost: start it again when the folder is back."
+                    ));
+                }
+                // Said once, not every two seconds for as long as it lasts.
+                if in_a_row == 1 {
+                    eprintln!("  {e}\n  Still watching — this will be tried again.");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(every));
+                continue;
+            }
+        };
         let verdicts = watch::decide(&now, &before, &done);
         before = watch::remember_looks(&now);
+
+        // Two files whose deltas would land on the same name. Said once each,
+        // and then both are left alone: doing them would mean one silently
+        // replacing the other, and somebody collecting one delta where they
+        // were expecting two with nothing to say which they got.
+        let clashing = watch::sharing_a_delta(&now, args.into.as_deref());
+        let mut clashed: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        for (delta, sources) in &clashing {
+            for source in sources {
+                clashed.insert(source.clone());
+            }
+            if said.insert(delta.clone()) {
+                eprintln!(
+                    "  {} would be the delta for {} — left alone until one of them is renamed.",
+                    short_name(delta),
+                    sources
+                        .iter()
+                        .map(|path| short_name(path))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                );
+            }
+        }
 
         for (seen, verdict) in &verdicts {
             match verdict {
@@ -6596,6 +6698,9 @@ fn cmd_watch(args: WatchArgs) -> Result<ExitCode, String> {
                 _ => continue,
             }
 
+            if clashed.contains(&seen.path) {
+                continue;
+            }
             let delta = watch::where_the_delta_goes(&seen.path, args.into.as_deref());
             if args.dry_run {
                 println!(
@@ -6630,17 +6735,13 @@ fn cmd_watch(args: WatchArgs) -> Result<ExitCode, String> {
                 eprintln!("  {}: {trouble}", short_name(&seen.path));
             }
 
-            let handled = watch::Handled {
-                at: onionskin::history::now(),
-                source: seen.path.to_string_lossy().into_owned(),
-                look: seen.look,
-                delta: if trouble.is_empty() {
-                    delta.to_string_lossy().into_owned()
-                } else {
-                    String::new()
-                },
+            let handled = watch::Handled::of(
+                &seen.path,
+                seen.look,
+                trouble.is_empty().then_some(delta.as_path()),
                 trouble,
-            };
+                onionskin::history::now(),
+            );
             // Written down before the next file, so stopping the program —
             // which is how it is always stopped — never loses more than the
             // one it was in the middle of.
@@ -6828,8 +6929,14 @@ fn which_of_these_were_printed(folder: &Path, as_json: bool) -> Result<ExitCode,
     let record = onionskin::history::read();
     let mut printed: Vec<(PathBuf, onionskin::history::Entry)> = Vec::new();
     let mut fresh: Vec<PathBuf> = Vec::new();
+    // A file that could not be read at all. Kept as its own list rather than
+    // dropped, because dropping it takes it out of both answers while the
+    // count at the top still includes it — so the lists do not add up, and a
+    // file nobody can say anything about looks like one that was checked.
+    let mut unreadable: Vec<PathBuf> = Vec::new();
     for path in &pdfs {
         let Some(fingerprint) = onionskin::history::fingerprint(path) else {
+            unreadable.push(path.clone());
             continue;
         };
         match record
@@ -6854,6 +6961,10 @@ fn which_of_these_were_printed(folder: &Path, as_json: bool) -> Result<ExitCode,
                 }))
                 .collect::<Vec<_>>(),
             "not_printed": fresh
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+            "unreadable": unreadable
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>(),
@@ -6888,6 +6999,13 @@ fn which_of_these_were_printed(folder: &Path, as_json: bool) -> Result<ExitCode,
         println!("Not in the record — never written by this machine, or written before the");
         println!("record was kept:\n");
         for path in &fresh {
+            println!("  {}", short_name(path));
+        }
+        println!();
+    }
+    if !unreadable.is_empty() {
+        println!("Could not be read at all, so nothing can be said about them:\n");
+        for path in &unreadable {
             println!("  {}", short_name(path));
         }
         println!();
@@ -7108,13 +7226,19 @@ fn draw_in_the_terminal(pdf: &Path, across: usize) -> Result<String, String> {
     let document = engine.open(pdf).map_err(|e| e.to_string())?;
     let pages = document.len();
 
+    // The frame costs a character each side, so the drawing inside it is two
+    // narrower than the width somebody asked for. Without taking that off, an
+    // --across matched to the terminal comes out two columns too wide and
+    // wraps, and a wrapped drawing is not a drawing.
+    let inside = across.saturating_sub(2).max(8);
+
     let mut out = String::new();
     for index in 0..pages {
         let drawn = document
             .render_gray(index, DPI)
             .map_err(|e| format!("page {}: {e}", index + 1))?;
         let picture =
-            onionskin::terminal::draw(&drawn.gray, drawn.width, drawn.height, drawn.size, across);
+            onionskin::terminal::draw(&drawn.gray, drawn.width, drawn.height, drawn.size, inside);
         out.push_str(&picture.framed(&format!(
             "page {} of {pages}  —  {:.0} × {:.0} mm",
             index + 1,
@@ -7122,8 +7246,15 @@ fn draw_in_the_terminal(pdf: &Path, across: usize) -> Result<String, String> {
             drawn.size.height_mm
         )));
         out.push('\n');
-        out.push_str(&onionskin::terminal::ruler(drawn.size, picture.across));
-        out.push_str("\n\n");
+        // Indented by the frame's own left edge, so a mark on the ruler sits
+        // under the character it labels. Unindented it is one column out, and
+        // every position read off it is one cell — two or three millimetres on
+        // A4 — further right than the ink really is. Being confidently wrong
+        // about where the words landed is the one thing this must not be.
+        for line in onionskin::terminal::ruler(drawn.size, picture.across).lines() {
+            out.push_str(&format!(" {line}\n"));
+        }
+        out.push('\n');
     }
     out.push_str(
         "Coarse on purpose. It answers whether the words are roughly where you meant and \

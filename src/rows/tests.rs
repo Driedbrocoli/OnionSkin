@@ -435,15 +435,61 @@ fn a_list_pasted_onto_itself_is_summarised_rather_than_recited() {
     );
 }
 
-/// The rows are named by the numbers they carry, so a run numbered from 201
-/// says "rows 201, 203" and not "rows 1, 3" — those are the sheets that will
-/// come out of the printer.
+/// "Rows" means rows of the person's list, which is the thing they can open
+/// and fix. It is asked before the numbering is moved, so a run numbered from
+/// 201 still says "rows 1, 3" — saying "rows 201, 203" about a spreadsheet
+/// with three lines in it sends somebody looking for row 201.
 #[test]
-fn the_repeats_are_named_by_the_numbers_on_the_sheets() {
-    let list = list_of("name\nAda\nGrace\nAda\n").starting_at(201);
-    assert_eq!(list.duplicates(), vec![vec![201, 203]]);
-    assert!(list
-        .describe_duplicates()
-        .unwrap()
-        .contains("rows 201, 203"));
+fn the_repeats_are_named_by_where_they_are_in_the_list() {
+    let list = list_of("name\nAda\nGrace\nAda\n");
+    assert_eq!(list.duplicates(), vec![vec![1, 3]]);
+    assert!(list.describe_duplicates().unwrap().contains("rows 1, 3"));
+}
+
+/// Several different rows each repeated is several groups, in the order the
+/// first of each appears — not one lump, and not in whatever order a map
+/// happened to hold them.
+#[test]
+fn several_different_repeats_are_several_groups_in_order() {
+    let list = list_of("name\nGrace\nAda\nAlan\nAda\nGrace\nAlan\nAda\n");
+    assert_eq!(
+        list.duplicates(),
+        vec![vec![1, 5], vec![2, 4, 7], vec![3, 6]],
+        "Grace first, then Ada, then Alan — the order they appear in"
+    );
+    let said = list.describe_duplicates().unwrap();
+    assert!(said.contains("3 rows appear"), "{said}");
+    // Four extra sheets: one Grace, two Ada, one Alan.
+    assert!(said.contains("4 sheets"), "{said}");
+}
+
+/// Two rows whose columns run together into the same text are still two rows.
+/// A key made by simply concatenating the values would make `{a: "xy", b: ""}`
+/// and `{a: "x", b: "y"}` the same row, and report a repeat that is not there.
+#[test]
+fn columns_that_run_together_are_not_taken_for_the_same_row() {
+    let list = list_of("first,second\nxy,\nx,y\n");
+    assert!(
+        list.duplicates().is_empty(),
+        "two different rows were called the same: {:?}",
+        list.duplicates()
+    );
+}
+
+/// `--start-at 18446744073709551615` is a thing a person can type, and a panic
+/// is not an answer to it. What comes out is absurd and visible; an arithmetic
+/// overflow is a crash in debug and a silent wrap to small duplicate numbers in
+/// release — which on a receipt book is the one outcome that must never happen
+/// quietly.
+#[test]
+fn a_number_too_big_to_count_from_does_not_wrap_round_to_small_ones() {
+    let list = List::counted(5).starting_at(usize::MAX);
+    assert!(
+        list.rows.iter().all(|row| row.number == usize::MAX),
+        "the numbering wrapped: {:?}",
+        list.rows.iter().map(|r| r.number).collect::<Vec<_>>()
+    );
+    assert_eq!(list.next_number(), usize::MAX);
+    // Nowhere near a small number, which is what a wrap would have produced.
+    assert!(list.rows.iter().all(|row| row.number > 1_000_000));
 }

@@ -47,6 +47,11 @@ pub struct State {
     /// What the list says about rows that appear more than once, worked out
     /// when it is read rather than every frame.
     repeats: Option<String>,
+    /// Where the named series stands, and which name that was read for. This
+    /// screen is drawn sixty times a second and the counter is a file on disk,
+    /// so it is read when the name changes and not again.
+    counter: Option<Result<usize, String>>,
+    counter_for: String,
     /// Why the list would not open, where it would not.
     trouble: Option<String>,
     /// Which list the columns above belong to, so a new one is re-read.
@@ -79,6 +84,8 @@ impl Default for State {
             columns: Vec::new(),
             rows: 0,
             repeats: None,
+            counter: None,
+            counter_for: String::new(),
             trouble: None,
             read_from: None,
         }
@@ -269,16 +276,19 @@ pub fn show(state: &mut State, room: &mut Room) {
          up at sheet 81 after a jam at 80: those sheets keep the numbers they \
          already had.",
     );
-    if !state.series.trim().is_empty() {
-        if let Err(why) = onionskin::series::check_name(state.series.trim()) {
-            widgets::caution(room.ui, &why.to_string());
-        } else {
-            let next = onionskin::series::next_for(state.series.trim());
-            widgets::hint(
-                room.ui,
-                &format!("'{}' next uses {next}.", state.series.trim()),
-            );
-        }
+    let named = state.series.trim().to_string();
+    if state.counter_for != named {
+        state.counter_for = named.clone();
+        state.counter = (!named.is_empty()).then(|| {
+            onionskin::series::check_name(&named)
+                .map_err(|why| why.to_string())
+                .and_then(|()| onionskin::series::next_for(&named).map_err(|why| why.to_string()))
+        });
+    }
+    match &state.counter {
+        Some(Ok(next)) => widgets::hint(room.ui, &format!("'{named}' next uses {next}.")),
+        Some(Err(why)) => widgets::caution(room.ui, why),
+        None => {}
     }
     // The same person on the list twice is nearly always a spreadsheet pasted
     // onto itself: obvious in the list and invisible in the stack of paper.
@@ -428,7 +438,10 @@ fn make(state: &mut State, room: &mut Room) {
                      command line, --start-at says which number the run began at."
                 ));
             }
-            onionskin::series::next_for(&series)
+            match onionskin::series::next_for(&series) {
+                Ok(next) => next,
+                Err(why) => return Outcome::refused(why.to_string()),
+            }
         };
         let whole_run = read.rows.len();
         if from_sheet > whole_run {
@@ -518,7 +531,7 @@ fn make(state: &mut State, room: &mut Room) {
                 // not burn the numbers.
                 let numbered = onionskin::series::numbers(numbering_from, wanted);
                 if !series.is_empty() {
-                    match onionskin::series::reached(&series, numbered.end) {
+                    match onionskin::series::reached_from(&series, numbering_from, numbered.end) {
                         Ok(()) => notes.push(onionskin::series::where_it_got_to(
                             &series,
                             numbered.clone(),

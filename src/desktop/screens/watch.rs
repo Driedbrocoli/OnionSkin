@@ -59,6 +59,14 @@ pub struct State {
     /// Whether the sweep that just finished has been read. It is read once,
     /// because its outcome sits on screen until dismissed.
     harvested: bool,
+    /// What this screen's own sweeps have written, newest last.
+    ///
+    /// Counted from here rather than from the worker's last outcome, which is
+    /// shared with every other screen: a sweep that finished while somebody was
+    /// looking at another screen, and a job started there afterwards, would
+    /// leave that job's output sitting in `jobs.last` for this screen to count
+    /// as deltas it had made.
+    wrote: Made,
 }
 
 impl Default for State {
@@ -75,6 +83,7 @@ impl Default for State {
             made: 0,
             lately: Vec::new(),
             harvested: true,
+            wrote: Made::default(),
         }
     }
 }
@@ -83,6 +92,9 @@ impl Default for State {
 type Looks = std::sync::Arc<
     std::sync::Mutex<std::collections::BTreeMap<std::path::PathBuf, onionskin::watch::Look>>,
 >;
+
+/// What this screen's sweeps have written, shared with the one worker.
+type Made = std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>;
 
 /// How many done files are listed. Beyond this the oldest scroll off, because
 /// the useful part of the list is what happened in the last few minutes.
@@ -250,25 +262,27 @@ pub fn show(state: &mut State, room: &mut Room) {
     // there until it is dismissed and counting it every frame would tell
     // somebody they had made four hundred deltas from one scan.
     if !state.harvested && !busy {
-        match &room.jobs.last {
-            Some(Outcome::Done { wrote, .. }) => {
-                state.made += wrote.len();
-                for path in wrote {
-                    let name = path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    state.lately.insert(0, name);
-                }
-                state.lately.truncate(LATELY);
+        // What was written comes from this screen's own list, filled in by the
+        // sweep itself. Never from `jobs.last`, which belongs to whichever job
+        // finished most recently anywhere in the window.
+        if let Ok(mut wrote) = state.wrote.lock() {
+            state.made += wrote.len();
+            for path in wrote.drain(..).rev() {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                state.lately.insert(0, name);
             }
-            // A refusal stops the watch. The folder has gone, or the job wants
-            // something it has not been given, and neither fixes itself: left
-            // running, the same refusal would be raised and then wiped by the
-            // next sweep every two seconds, so the one message that matters
-            // would be the one nobody could finish reading.
-            Some(Outcome::Refused { .. }) => state.keeping_watch = false,
-            None => {}
+            state.lately.truncate(LATELY);
+        }
+        // A refusal stops the watch. The folder has gone, or the job wants
+        // something it has not been given, and neither fixes itself: left
+        // running, the same refusal would be raised and then wiped by the next
+        // sweep every two seconds, so the one message that matters would be
+        // the one nobody could finish reading.
+        if matches!(room.jobs.last, Some(Outcome::Refused { .. })) {
+            state.keeping_watch = false;
         }
         state.harvested = true;
     }
@@ -318,9 +332,15 @@ pub fn show(state: &mut State, room: &mut Room) {
     if let Some(outcome) = &room.jobs.last {
         // A sweep that found nothing is the ordinary case and does not deserve
         // a panel of its own every two seconds. Only the ones that did
-        // something, or refused, are worth showing.
+        // something, or had something to say, are worth showing.
+        //
+        // The notes matter as much as the deltas. A sweep in which every file
+        // failed writes nothing at all, and testing only `wrote` would show
+        // nothing at all — while the record quietly remembers each failure so
+        // that it is never tried again. A folder of files that cannot be opened
+        // would sit there doing nothing and saying nothing, forever.
         let worth_showing = match outcome {
-            Outcome::Done { wrote, .. } => !wrote.is_empty(),
+            Outcome::Done { wrote, notes, .. } => !wrote.is_empty() || !notes.is_empty(),
             Outcome::Refused { .. } => true,
         };
         if worth_showing {
@@ -340,6 +360,7 @@ fn sweep(state: &mut State, job: &onionskin::jobs::Job, room: &mut Room) {
     let into = state.into.clone();
     let job = job.clone();
     let before = state.before.clone();
+    let made = state.wrote.clone();
     let given: std::collections::BTreeMap<String, String> = state
         .filled
         .iter()
@@ -348,6 +369,26 @@ fn sweep(state: &mut State, job: &onionskin::jobs::Job, room: &mut Room) {
         .collect();
 
     room.jobs.start("Looking at the folder", move |report| {
+        // A file is not opened until two looks agree about it, so a sweep with
+        // nothing to compare against — the first press of the button, or the
+        // first tick after the folder was changed — can never find any work.
+        // Pressing "Look now" on a folder full of scans and having nothing
+        // whatever happen is not a thing to make somebody sit through, so this
+        // one takes the first look itself.
+        //
+        // The wait is on the worker, never on the thread that draws.
+        if before.lock().map(|looks| looks.is_empty()).unwrap_or(true) {
+            report.saying("Looking at the folder…");
+            if let Ok(first) = onionskin::watch::listing(&folder) {
+                if let Ok(mut looks) = before.lock() {
+                    *looks = onionskin::watch::remember_looks(&first);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(
+                    onionskin::watch::BETWEEN_SWEEPS_SECONDS,
+                ));
+            }
+        }
+
         let now = match onionskin::watch::listing(&folder) {
             Ok(now) => now,
             Err(e) => return Outcome::refused(e.to_string()),
@@ -408,23 +449,22 @@ fn sweep(state: &mut State, job: &onionskin::jobs::Job, room: &mut Room) {
             let delta = onionskin::watch::where_the_delta_goes(&seen.path, into.as_deref());
             let trouble = run_one(&job, &given, &seen.path, &delta);
             if trouble.is_empty() {
+                if let Ok(mut made) = made.lock() {
+                    made.push(delta.clone());
+                }
                 wrote.push(delta.clone());
             } else {
                 notes.push(format!("{name}: {trouble}"));
             }
             let _ = onionskin::watch::write_down(
                 &folder,
-                &onionskin::watch::Handled {
-                    at: onionskin::history::now(),
-                    source: seen.path.to_string_lossy().into_owned(),
-                    look: seen.look,
-                    delta: if trouble.is_empty() {
-                        delta.to_string_lossy().into_owned()
-                    } else {
-                        String::new()
-                    },
+                &onionskin::watch::Handled::of(
+                    &seen.path,
+                    seen.look,
+                    trouble.is_empty().then_some(delta.as_path()),
                     trouble,
-                },
+                    onionskin::history::now(),
+                ),
             );
         }
 

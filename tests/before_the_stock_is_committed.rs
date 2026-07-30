@@ -82,7 +82,8 @@ impl Office {
 
 fn pages_in(pdf: &Path) -> usize {
     let engine = onionskin::render::engine().expect("a renderer");
-    engine.open(pdf).expect("it should open").len()
+    let pages = engine.open(pdf).expect("it should open").len();
+    pages
 }
 
 /// A spreadsheet pasted onto itself is obvious in the list and invisible in the
@@ -130,12 +131,25 @@ fn a_list_with_no_repeats_says_nothing_about_repeats() {
 #[test]
 fn a_run_of_numbers_is_not_two_hundred_duplicates() {
     let office = Office::new();
-    let (ok, said, _) = office.a_run(
-        "tickets.pdf",
-        &["--count", "20", "--at", "150,40:No. {number}"],
+    let tickets = office.dir.path().join("tickets.pdf");
+    // Not through `a_run`, which anchors to a {name} column a counted run has
+    // no business having.
+    let (ok, said) = run(
+        &office.home,
+        &[
+            "batch",
+            &at(&office.blank),
+            "--count",
+            "20",
+            "--at",
+            "150,40:No. {number}",
+            "-o",
+            &at(&tickets),
+        ],
     );
     assert!(ok, "{said}");
     assert!(!said.contains("more than once"), "{said}");
+    assert_eq!(pages_in(&tickets), 20, "{said}");
 }
 
 /// The first sheet on its own, so it can be printed and held against a real
@@ -146,10 +160,7 @@ fn the_first_sheet_comes_out_on_its_own_as_well() {
     let office = Office::new();
     let list = office.a_list("people.csv", "name\nAda\nGrace\nAlan\nBarbara\n");
 
-    let (ok, said, stack) = office.a_run(
-        "stack.pdf",
-        &["--from", &at(&list), "--proof-first"],
-    );
+    let (ok, said, stack) = office.a_run("stack.pdf", &["--from", &at(&list), "--proof-first"]);
     assert!(ok, "{said}");
 
     // Both files: the whole stack, and page one on its own.
@@ -172,10 +183,7 @@ fn the_first_sheet_comes_out_on_its_own_as_well() {
 fn the_single_sheet_is_the_same_as_page_one_of_the_stack() {
     let office = Office::new();
     let list = office.a_list("people.csv", "name\nAda\nGrace\nAlan\n");
-    let (ok, said, stack) = office.a_run(
-        "stack.pdf",
-        &["--from", &at(&list), "--proof-first"],
-    );
+    let (ok, said, stack) = office.a_run("stack.pdf", &["--from", &at(&list), "--proof-first"]);
     assert!(ok, "{said}");
     let one = office.dir.path().join("stack-first.pdf");
 
@@ -186,7 +194,10 @@ fn the_single_sheet_is_the_same_as_page_one_of_the_stack() {
     let page_one = whole.render_gray(0, DPI).expect("it should draw");
     let alone = single.render_gray(0, DPI).expect("it should draw");
 
-    assert_eq!((page_one.width, page_one.height), (alone.width, alone.height));
+    assert_eq!(
+        (page_one.width, page_one.height),
+        (alone.width, alone.height)
+    );
     let differing = page_one
         .gray
         .iter()
@@ -215,10 +226,7 @@ fn the_single_sheet_is_the_same_as_page_one_of_the_stack() {
 fn a_run_of_one_needs_no_proof_of_itself() {
     let office = Office::new();
     let list = office.a_list("people.csv", "name\nAda\n");
-    let (ok, said, _) = office.a_run(
-        "stack.pdf",
-        &["--from", &at(&list), "--proof-first"],
-    );
+    let (ok, said, _) = office.a_run("stack.pdf", &["--from", &at(&list), "--proof-first"]);
     assert!(ok, "{said}");
     assert!(
         !office.dir.path().join("stack-first.pdf").exists(),

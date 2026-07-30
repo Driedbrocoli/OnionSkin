@@ -324,7 +324,12 @@ impl List {
     pub fn starting_at(mut self, first: usize) -> List {
         let first = first.max(1);
         for (offset, row) in self.rows.iter_mut().enumerate() {
-            row.number = first + offset;
+            // Saturating, because `--start-at 18446744073709551615` is a thing
+            // a person can type and a panic is not an answer to it. What comes
+            // out is a run of sheets all carrying the same number, which is
+            // absurd and visible; an arithmetic overflow is a crash in debug
+            // and a silent wrap to small duplicate numbers in release.
+            row.number = first.saturating_add(offset);
         }
         self
     }
@@ -347,7 +352,10 @@ impl List {
     /// Where the next run starts, which is a different thing from how many
     /// rows there are as soon as the numbering began anywhere but one.
     pub fn next_number(&self) -> usize {
-        self.rows.last().map(|row| row.number + 1).unwrap_or(1)
+        self.rows
+            .last()
+            .map(|row| row.number.saturating_add(1))
+            .unwrap_or(1)
     }
 
     /// Rows that say exactly what another row says, grouped.
@@ -369,16 +377,37 @@ impl List {
         if self.columns.is_empty() {
             return Vec::new();
         }
-        let mut seen: Vec<(&BTreeMap<String, String>, Vec<usize>)> = Vec::new();
+        // Grouped through a map rather than by comparing every row against
+        // every other. The obvious nested loop is fine at five hundred rows
+        // and takes seconds at twenty thousand — and this runs on the window's
+        // drawing thread the moment somebody picks a list, so seconds there
+        // are a frozen window.
+        //
+        // The key is the row's values written out with separators that cannot
+        // appear in a CSV field, so two different rows cannot collide into one
+        // key by having their columns run together.
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for row in &self.rows {
-            match seen.iter_mut().find(|(values, _)| **values == row.values) {
-                Some((_, numbers)) => numbers.push(row.number),
-                None => seen.push((&row.values, vec![row.number])),
+            let mut key = String::new();
+            for (name, value) in &row.values {
+                key.push_str(name);
+                key.push('\u{1}');
+                key.push_str(value);
+                key.push('\u{2}');
             }
+            let numbers = groups.entry(key.clone()).or_insert_with(|| {
+                order.push(key);
+                Vec::new()
+            });
+            numbers.push(row.number);
         }
-        seen.into_iter()
-            .filter(|(_, numbers)| numbers.len() > 1)
-            .map(|(_, numbers)| numbers)
+        // In the order the first of each appeared, not the map's order, so the
+        // message reads down the list the way somebody's eye does.
+        order
+            .into_iter()
+            .filter_map(|key| groups.remove(&key))
+            .filter(|numbers| numbers.len() > 1)
             .collect()
     }
 

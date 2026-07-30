@@ -201,6 +201,26 @@ pub struct Handled {
 }
 
 impl Handled {
+    /// One dealt-with file, with its path put in the form the record is keyed
+    /// by — which is the only form it may ever be written down in.
+    pub fn of(
+        source: &Path,
+        look: Look,
+        delta: Option<&Path>,
+        trouble: String,
+        at: u64,
+    ) -> Handled {
+        Handled {
+            at,
+            source: settled_name(source),
+            look,
+            delta: delta
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            trouble,
+        }
+    }
+
     pub fn worked(&self) -> bool {
         self.trouble.is_empty()
     }
@@ -231,13 +251,13 @@ impl Ledger {
     /// new delta, which is what somebody rescanning a page wants.
     pub fn knows(&self, path: &Path, look: Look) -> Option<&Handled> {
         self.by_path
-            .get(&key_for(path))
+            .get(&settled_name(path))
             .filter(|had| had.look == look)
     }
 
     pub fn add(&mut self, handled: Handled) {
         self.by_path
-            .insert(key_for(Path::new(&handled.source)), handled);
+            .insert(settled_name(Path::new(&handled.source)), handled);
     }
 
     pub fn len(&self) -> usize {
@@ -266,7 +286,15 @@ impl Ledger {
 ///
 /// Absolute where the filesystem will say so, because `watch .` and
 /// `watch /home/j/Scans` are the same folder and must not each do the work.
-fn key_for(path: &Path) -> String {
+///
+/// It has to be applied when the record is *written* as well as when it is
+/// read. A relative path written down is resolved against whatever directory
+/// the program happens to be in the next time it reads it — so
+/// `./Scan_0007.pdf`, written by `watch .` from the scans folder, matches
+/// nothing at all when the same folder is watched by its full name from
+/// somewhere else, and the whole folder gets a second delta. Toner does not
+/// come off paper.
+pub fn settled_name(path: &Path) -> String {
     let absolute = path.canonicalize().unwrap_or_else(|_| {
         match (path.is_absolute(), std::env::current_dir()) {
             (false, Ok(here)) => here.join(path),
@@ -427,6 +455,31 @@ pub fn decide(
         .collect()
 }
 
+/// Files in the folder that would be given the same delta as another.
+///
+/// The delta is named from the source's stem, so `report.pdf` and
+/// `report.docx` both ask for `report-delta.pdf` — and whichever is done second
+/// silently replaces the first, leaving somebody with one delta where they
+/// expected two and nothing to say so. A folder holding a document and the Word
+/// file it came from is not exotic.
+///
+/// Reported rather than worked around. A name Onionskin invented to break the
+/// tie would be a file nobody was expecting, in a folder somebody is watching
+/// precisely so they know what is in it.
+pub fn sharing_a_delta(now: &[Seen], into: Option<&Path>) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut by_delta: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+    for seen in now.iter().filter(|seen| worth_opening(&seen.path).is_ok()) {
+        by_delta
+            .entry(where_the_delta_goes(&seen.path, into))
+            .or_default()
+            .push(seen.path.clone());
+    }
+    by_delta
+        .into_iter()
+        .filter(|(_, sources)| sources.len() > 1)
+        .collect()
+}
+
 /// What this sweep saw, to be handed to the next one.
 pub fn remember_looks(now: &[Seen]) -> BTreeMap<PathBuf, Look> {
     now.iter()
@@ -456,7 +509,7 @@ pub fn where_the_delta_goes(source: &Path, into: Option<&Path>) -> PathBuf {
 /// One file per folder, named after the folder, so watching two folders keeps
 /// two records and forgetting one is a matter of deleting one file.
 pub fn ledger_path(folder: &Path) -> PathBuf {
-    let key = key_for(folder);
+    let key = settled_name(folder);
     let named = crate::apt::sha256_hex(key.as_bytes());
     crate::calibrate::home_dir()
         .join("watched")
@@ -494,25 +547,44 @@ pub fn write_down(folder: &Path, handled: &Handled) -> std::io::Result<()> {
 
     // Trimmed only when it has grown past what is kept, which for a busy
     // scanner is once a year.
+    //
+    // What goes is decided by whether the file is still in the folder, and only
+    // then by age. Dropping the oldest outright is the obvious rule and it is
+    // wrong in the one way that matters: a folder holding more entries than are
+    // kept would lose the record of files that are *still there*, give them a
+    // second delta on the next sweep, push out the record of some others, and
+    // churn through the folder for the rest of the afternoon printing over
+    // sheets that had already been printed on. Nothing in the folder is ever
+    // forgotten; only the files that have gone.
     let lines = std::fs::read_to_string(&path)
         .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0);
     if lines >= KEEP {
         let kept = read_ledger(folder);
-        let mut text: String = kept
+        let (here, gone): (Vec<&Handled>, Vec<&Handled>) = kept
             .all()
             .into_iter()
-            .rev()
-            .take(KEEP / 2)
-            .collect::<Vec<_>>()
+            .partition(|had| Path::new(&had.source).is_file());
+        // Everything still in the folder, and then as many of the departed as
+        // there is room for, newest first.
+        let room = KEEP.saturating_sub(here.len().min(KEEP)) / 2;
+        let mut surviving: Vec<&Handled> = here;
+        surviving.extend(gone.into_iter().rev().take(room).collect::<Vec<_>>());
+        surviving.sort_by_key(|had| had.at);
+
+        let mut text: String = surviving
             .into_iter()
-            .rev()
             .filter_map(|had| serde_json::to_string(had).ok())
             .map(|line| format!("{line}\n"))
             .collect();
         text.push_str(&line);
         text.push('\n');
-        return std::fs::write(&path, text);
+        // Through a temporary and renamed. A truncate-and-write that is
+        // interrupted halfway leaves a record with the beginning of a line in
+        // it, and every file it can no longer name gets a second delta.
+        let temporary = path.with_extension("jsonl-tmp");
+        std::fs::write(&temporary, text)?;
+        return std::fs::rename(&temporary, &path);
     }
 
     use std::io::Write;
