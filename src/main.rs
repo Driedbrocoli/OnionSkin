@@ -189,6 +189,9 @@ struct SetupSaveArgs {
     /// Anything worth remembering about it — which printer, which forms.
     #[arg(long, default_value_t = String::new())]
     note: String,
+    /// Say what would go in it, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -1189,6 +1192,9 @@ struct TargetArgs {
     /// Open the target when it is written.
     #[arg(long)]
     open: bool,
+    /// Say what would be written, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 // Readings are routinely negative, and a leading minus would otherwise be
@@ -1212,6 +1218,9 @@ struct SolveArgs {
     /// Anything worth remembering about this printer.
     #[arg(long, default_value = "")]
     notes: String,
+    /// Work it out and say what it found, without saving the profile.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -6462,6 +6471,13 @@ fn cmd_setup(command: SetupCommand) -> Result<ExitCode, String> {
                 );
             }
             check_writable(&args.file, "setup")?;
+            if args.dry_run {
+                println!("What would go in {}:\n", args.file.display());
+                println!("{}", setup.describe());
+                println!("\n{}", onionskin::setup::WHAT_STAYS_BEHIND);
+                println!("\nNothing written — --dry-run.");
+                return Ok(ExitCode::SUCCESS);
+            }
             onionskin::setup::write(&args.file, &setup).map_err(|e| e.to_string())?;
 
             println!("{}: this machine's setup.\n", args.file.display());
@@ -8655,6 +8671,14 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
         CalibrateCommand::Target(args) => {
             let page = parse_page(&args.page).map_err(|e| e.to_string())?;
             check_writable(&args.output, "target")?;
+            if args.dry_run {
+                println!(
+                    "{} would be a {} target, two pages.\nNothing written — --dry-run.",
+                    args.output.display(),
+                    page.describe()
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
             calibrate::make_target(&args.output, page, args.inset).map_err(|e| e.to_string())?;
 
             println!(
@@ -8709,10 +8733,18 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
                 created: calibrate::now(),
                 notes: args.notes.clone(),
             };
-            let path = calibrate::save_profile(&profile).map_err(|e| e.to_string())?;
-
+            // The fit is worked out either way — it is the answer somebody
+            // asked for, and a rehearsal that would not say whether the
+            // readings fit would be no use at all. Only the saving is held
+            // back, so a fit that turns out to be nonsense can be looked at
+            // before it becomes the profile every delta is corrected by.
             println!("{}", profile.describe());
-            println!("\nsaved to {}", path.display());
+            if args.dry_run {
+                println!("\nNot saved — --dry-run.");
+            } else {
+                let path = calibrate::save_profile(&profile).map_err(|e| e.to_string())?;
+                println!("\nsaved to {}", path.display());
+            }
 
             // A fit that does not fit is worth saying out loud: it usually
             // means a reading was taken off the wrong crosshair.
@@ -8725,10 +8757,20 @@ fn cmd_calibrate(command: CalibrateCommand) -> Result<ExitCode, String> {
                     fit.max_residual_mm
                 );
             }
-            println!(
-                "\nUse it:\n  onionskin delta a.docx b.docx -o delta.pdf --profile {}",
-                args.name
-            );
+            // Only when there is something to use. After a rehearsal there is
+            // no profile of that name, and telling somebody to reach for one
+            // is telling them to run a command that will not work.
+            if args.dry_run {
+                println!(
+                    "\nRun it again without --dry-run to save it as '{}'.",
+                    args.name
+                );
+            } else {
+                println!(
+                    "\nUse it:\n  onionskin delta a.docx b.docx -o delta.pdf --profile {}",
+                    args.name
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
 
@@ -10537,19 +10579,60 @@ mod naming_tests {
             "package",
             "apt-repo",
         ];
+        // The same, for the leaves of a command that is only a group of
+        // others. `job`, `calibrate`, `config` and `setup` write nothing
+        // themselves, so the list above passes them over — and for a long
+        // while that meant nothing under them was checked at all. It hid two:
+        // `calibrate target`, which writes a PDF, and `calibrate solve`, which
+        // saves a profile while its own sibling `learn` could be rehearsed.
+        const LEAVES_THAT_WITHHOLD_NOTHING: &[&str] = &[
+            "job list",
+            "job show",
+            "job delete",
+            "calibrate list",
+            "calibrate show",
+            "calibrate delete",
+            "config show",
+            "config set",
+            "config unset",
+            "config reset",
+            "setup show",
+        ];
+
         let cli = <Cli as clap::CommandFactory>::command();
         let mut missing = Vec::new();
         let mut checked = 0;
+        let can_be_rehearsed = |command: &clap::Command| {
+            command
+                .get_arguments()
+                .filter_map(|a| a.get_long())
+                .any(|flag| flag == "dry-run")
+        };
+
         for command in cli.get_subcommands() {
             let name = command.get_name();
+            // A group of other commands: check each of them instead. It has no
+            // file of its own to withhold, but its leaves do.
+            let leaves: Vec<&clap::Command> = command.get_subcommands().collect();
+            if !leaves.is_empty() {
+                for leaf in leaves {
+                    let full = format!("{name} {}", leaf.get_name());
+                    if leaf.get_name() == "help"
+                        || LEAVES_THAT_WITHHOLD_NOTHING.contains(&full.as_str())
+                    {
+                        continue;
+                    }
+                    if !can_be_rehearsed(leaf) {
+                        missing.push(full);
+                    }
+                    checked += 1;
+                }
+                continue;
+            }
             if NOTHING_TO_WITHHOLD.contains(&name) {
                 continue;
             }
-            let flags: Vec<&str> = command
-                .get_arguments()
-                .filter_map(|a| a.get_long())
-                .collect();
-            if !flags.contains(&"dry-run") {
+            if !can_be_rehearsed(command) {
                 missing.push(name.to_string());
             }
             checked += 1;
@@ -10558,7 +10641,7 @@ mod naming_tests {
             missing.is_empty(),
             "these write a file and cannot be rehearsed: {missing:?}"
         );
-        assert!(checked >= 9, "only {checked} commands were checked");
+        assert!(checked >= 20, "only {checked} commands were checked");
     }
 
     /// Joining needs two files, and clap must say so before anything opens a
