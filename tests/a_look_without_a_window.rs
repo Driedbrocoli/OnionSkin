@@ -195,10 +195,44 @@ fn the_drawing_says_which_page_it_is_and_how_wide_the_paper_is() {
     // hundred off eighty characters of text.
     assert!(said.contains("Coarse on purpose"), "{said}");
 
-    // Nothing wider than was asked for, or it wraps and stops being a drawing.
-    for line in said.lines().filter(|line| line.starts_with('│')) {
-        assert_eq!(line.chars().count(), 62, "ragged: {line:?}");
+    // Nothing wider than was asked for. `--across 60` on a sixty-column
+    // terminal has to come out at sixty *including* the frame — the frame is
+    // two of those columns, and a drawing that overruns by two wraps onto a
+    // second line and stops being a drawing. The ruler under it too, which is
+    // the part a position is actually read off.
+    //
+    // The drawing itself, then: the ordinary lines of the command's output are
+    // prose and wrap wherever the terminal likes.
+    const ASKED_FOR: usize = 60;
+    let block: Vec<&str> = said
+        .lines()
+        .skip_while(|line| !line.starts_with('┌'))
+        .take_while(|line| !line.contains("Coarse on purpose"))
+        .collect();
+    assert!(block.len() > 6, "hardly anything was drawn:\n{said}");
+    for line in &block {
+        assert!(
+            line.chars().count() <= ASKED_FOR,
+            "{} characters where {ASKED_FOR} were asked for: {line:?}",
+            line.chars().count()
+        );
+        if line.starts_with('│') {
+            // And square, or the right-hand edge of the paper is ragged.
+            assert_eq!(line.chars().count(), ASKED_FOR, "ragged: {line:?}");
+        }
     }
+    // The ruler sits under the drawing, not under the terminal's left margin:
+    // unindented it is one column out, and every position read off it is a
+    // cell too far right.
+    let ruler = block
+        .iter()
+        .rev()
+        .find(|line| line.contains("0mm"))
+        .unwrap_or_else(|| panic!("no ruler in:\n{said}"));
+    assert!(
+        ruler.starts_with(' '),
+        "the ruler is not under the drawing it measures: {ruler:?}"
+    );
 
     // The proof PDF is still written — the drawing is as well as, not instead
     // of, since a machine with a window wants the real thing.

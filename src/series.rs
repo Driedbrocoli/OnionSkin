@@ -232,7 +232,13 @@ fn save(counters: &Counters) -> Result<(), SeriesError> {
 /// they are and does not want the program remembering anything.
 pub fn numbers(first: usize, how_many: usize) -> std::ops::Range<usize> {
     let first = first.max(1);
-    first..first + how_many
+    // Saturating, for the same reason [`crate::rows::List::starting_at`] is:
+    // `--start-at 18446744073709551615` is a thing a person can type, and a
+    // crash is not an answer to it. What comes out then is an empty range,
+    // which reads as "nothing was numbered" — absurd and visible, where an
+    // overflow is a panic in debug and in release a range that wraps to
+    // *small* numbers and quietly reprints a receipt book from the beginning.
+    first..first.saturating_add(how_many)
 }
 
 /// The line said after a run, so somebody can see what was used and what comes

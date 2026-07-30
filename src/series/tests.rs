@@ -244,3 +244,26 @@ fn the_counters_live_with_everything_else() {
     );
     assert!(!Path::new("series.json").is_absolute());
 }
+
+/// `--start-at 18446744073709551615` is a thing a person can type, and a crash
+/// is not an answer to it. Nor is a range that wraps round to small numbers and
+/// quietly reprints a receipt book from the beginning.
+#[test]
+fn a_number_too_big_to_count_from_does_not_wrap_or_panic() {
+    let run = numbers(usize::MAX, 200);
+    assert!(run.is_empty(), "{run:?} — it wrapped");
+    assert_eq!(
+        where_it_got_to("receipts", run),
+        "Series 'receipts' is unchanged — nothing was numbered."
+    );
+
+    // A number near the top still counts as far as it can and no further.
+    let near = numbers(usize::MAX - 2, 200);
+    assert_eq!(near.start, usize::MAX - 2);
+    assert_eq!(near.end, usize::MAX);
+    assert!(near.clone().all(|n| n > 1_000_000), "{near:?}");
+
+    // And the ordinary case is untouched.
+    assert_eq!(numbers(201, 200), 201..401);
+    assert_eq!(numbers(0, 3), 1..4);
+}
