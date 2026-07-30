@@ -276,6 +276,7 @@ Down the side, in the order somebody meets them:
 | **One each, from a list** | Two hundred certificates, two hundred names |
 | **Sheet of labels** | Addresses and files, one per label, from a list |
 | **Saved jobs** | The same stamp on today's document, in two clicks |
+| **Watch a folder** | Scan to a folder, and the delta is waiting for you |
 | **Check before printing** | Is this the sheet the delta was made for? |
 | **Sort a stack** | Which document is each sheet from the feeder? |
 | **Check a sheet or a run** | Did it come out right — one sheet, or all of them? |
@@ -601,6 +602,29 @@ onionskin batch certificate.pdf --from people.csv --after 'Awarded to:{name}' --
 
 `--first 2` makes two, so you can hold a real one against a real sheet.
 
+`--proof-first` does better: it writes the whole stack **and** the first sheet
+on its own, so after looking at the proof you print the rest — rather than
+working out what you typed twenty minutes ago and typing it again with
+different flags.
+
+```
+certificates.pdf: 200 sheets, 400 additions in all.
+certificates-first.pdf: the first sheet on its own.
+  Print that one, hold it against a real certificate.pdf, and then print the
+  other 199 from certificates.pdf — pages 2 to 200.
+```
+
+**The same person twice is pointed out**, because a spreadsheet pasted onto
+itself is obvious in the list and invisible in the stack of paper:
+
+```
+1 row appears more than once, which is 1 sheet you may not have meant to print:
+    rows 1, 3  — Ada
+```
+
+Said, not refused — two copies of a ticket is a real thing to want. The same
+name against a *different* course is two different sheets and is not reported.
+
 A column name that does not exist is caught **before anything is written**:
 
 ```
@@ -629,6 +653,74 @@ onionskin batch pass.pdf --from people.csv \
 
 A mistyped column in the file name is caught in the same breath as one in a
 line of text — before a single sheet is made, rather than at the two hundredth.
+
+### Numbering that carries on next time
+
+A receipt book is printed two hundred at a time. The second box has to be
+numbered 201 to 400, because two receipts with the same number on them is the
+one thing a receipt book must never contain — and it is found out months later,
+by an accountant.
+
+```bash
+onionskin batch receipt.pdf --count 200 --at '150,40:No. {number}' --series receipts
+onionskin batch receipt.pdf --count 200 --at '150,40:No. {number}' --series receipts
+```
+
+```
+Numbered 201 to 400. Carrying on the 'receipts' series.
+...
+Series 'receipts': used 201 to 400. The next run starts at 401.
+```
+
+**A name, not the file.** Two receipt books printed from the same blank are two
+series; one series reprinted from a document somebody edited is still one
+series. Only a person knows which is which, so a person says.
+
+**It moves afterwards, by what was really printed.** A run that failed wrote
+nothing and does not burn two hundred numbers — the next box would start at 401
+with nothing between 201 and 400 in existence, and a gap is as hard to explain
+as a repeat. `--dry-run` does not move it either. `--first 5` moves it by five,
+because those five sheets exist.
+
+`--start-at N` numbers from N with nothing remembered at all — for somebody who
+knows exactly where they are, and for joining a book that began life outside
+Onionskin. Given with `--series`, it puts the series back to that number, which
+is how a counter that has gone wrong is corrected.
+
+`onionskin doctor` lists every series and where it has got to.
+
+### After a jam, the rest of the run
+
+The printer eats sheet 80 of 200. The 79 that came out are good; what is wanted
+is the other 120, and not a second copy of the first 79.
+
+```bash
+onionskin batch certificate.pdf --from people.csv --after 'Awarded to:{name}' --from-sheet 80
+```
+
+```
+Picking up at sheet 80 of 200: 121 to make, and the 79 before it left alone.
+```
+
+The rows keep the numbers they already had, so sheet 80 still says 80 — a
+resumed run that renumbered itself from one would be worse than no resume at
+all.
+
+Resuming a run of a `--series` is the one case the counter cannot answer: it has
+already moved past this run's numbers, so reading it would put 201 on the sheet
+the first run numbered 1. Rather than guess, Onionskin asks — and works the
+answer out for you:
+
+```
+error: picking up a run of a series needs --start-at as well, because the
+'receipts' counter has already moved past this run's numbers — it is at 201 now,
+and numbering from there would put the wrong numbers on the paper.
+    If this is the run of 200 that used 1 to 200, that is:  --start-at 1
+```
+
+Given that, the counter does **not** move again: those numbers were claimed by
+the first run, and spending them twice would leave a gap the width of the whole
+run.
 
 ### Envelopes, cards and postcards
 
@@ -779,6 +871,34 @@ onionskin proof invoice.pdf --delta delta.pdf --colour blue  # or any colour
 `--tracing` fades the existing page almost away, which is the same thing as
 holding the delta against a window with the original behind it — the way this
 was checked before there was a program to do it.
+
+**On a machine with no window**, the proof can be drawn in the terminal:
+
+```bash
+onionskin proof invoice.pdf --delta delta.pdf --in-the-terminal
+```
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  ==========                                              │
+│  ===  ====                                    ####  ##   │
+│                                                          │
+│  --  ----  --                                            │
+└──────────────────────────────────────────────────────────┘
+page 1 of 1  —  210 × 297 mm
+|             |             |             |
+0mm           50            100           150
+```
+
+Coarse on purpose. Nobody should approve a run of two hundred off eighty
+characters of text — but it answers the question that actually gets asked from
+an SSH session, which is *is the stamp roughly where I meant, or has it fallen
+off the paper*. That question is answerable at this resolution and is otherwise
+not answerable at all, because there is nothing on a server to open a PDF with.
+
+`--across N` sets the width. It is drawn in plain ASCII with no colour, so it
+survives a log file, a screen reader and a terminal with somebody else's
+palette.
 
 ### How much room the words actually have
 
@@ -1880,6 +2000,59 @@ look finished.
 file. Running a job never re-saves it — otherwise "the job" quietly becomes
 whatever it was last used for, which is the one thing a saved job must not be.
 
+## Scan to a folder, and the delta is waiting for you
+
+The office multifunction has a button on the front that scans to a folder.
+Somebody presses it, walks back to their desk, opens the file, runs the job on
+it, prints the answer, and walks back to the machine. The middle three steps are
+the ones a computer should be doing.
+
+```bash
+onionskin watch ~/Scans --job paid
+```
+
+```
+Watching /home/j/Scans for PDFs, Word and OpenDocument files.
+  job      paid
+  deltas   beside each file, as NAME-delta.pdf
+
+Watching. Press Ctrl-C to stop.
+
+Scan_0007.pdf → /home/j/Scans/Scan_0007-delta.pdf
+/home/j/Scans/Scan_0007-delta.pdf: 1 addition.
+```
+
+Press the button on the scanner; the delta is waiting when you get back. In the
+window it is the **Watch a folder** screen: a folder, a job, and a "keep
+watching" switch.
+
+**It waits until the file has stopped changing.** A scanner writing a
+ten-megabyte PDF over the network does it over several seconds, and for most of
+them there is a file of that name holding half a document. Onionskin leaves a
+file alone until two looks running agree about its size and its modified time.
+
+**It never gives a delta a delta.** The delta is a PDF in the same folder, so
+this is the mistake that fills a disk, two seconds apart, until somebody
+notices. Anything Onionskin wrote is passed over by name.
+
+**It remembers what it has done**, per folder, so stopping and starting it does
+not put a second delta on every sheet in the building — which for overprinting
+cannot be undone. `--again` does the lot regardless, for the delta somebody
+deleted.
+
+| | |
+|---|---|
+| `--set NAME=VALUE` | fill in one of the job's blanks, the same for every file |
+| `--into FOLDER` | put the deltas somewhere else, so the scans folder stays a scans folder |
+| `--once` | look once and stop, for a scheduled task |
+| `--again` | do everything waiting, done before or not |
+| `--dry-run` | say what would happen, write nothing, remember nothing |
+| `--every SECONDS` | how long between looks. Two by default |
+
+Pictures are passed over with a note — a saved job writes on a *document*. For a
+scanned sheet you want [`onionskin read`](#turn-a-scan-into-something-you-can-edit)
+or [`onionskin add`](#fill-in-a-sheet-you-only-have-as-a-scan).
+
 ## What was added to which sheet, and when
 
 Overprinting is the one thing Onionskin does that cannot be undone. Toner does
@@ -1910,6 +2083,33 @@ onionskin history --limit 100
 onionskin history --json
 onionskin history --forget
 ```
+
+**"Which of these have I printed?"** is the question when somebody is holding a
+folder of deltas and a box of stock, and asking it one file at a time of two
+hundred is not asking it at all:
+
+```bash
+onionskin history --asking-about ~/to-print
+```
+
+```
+12 PDFs in /home/j/to-print:
+
+Written before — printing one of these onto the same sheet lays the ink down
+twice, and that cannot be undone:
+
+  invoice-4471-delta.pdf               2026-07-28 09:14 (2 days ago)
+  invoice-4472-delta.pdf               2026-07-28 09:15 (2 days ago)
+
+Not in the record — never written by this machine, or written before the
+record was kept:
+
+  invoice-4473-delta.pdf
+  …
+```
+
+By fingerprint, so a delta somebody renamed is still recognised. `--json` gives
+the same answer to a script.
 
 **The words themselves are never kept** — only which files were involved, how
 much went on, and the fingerprint. A log of everything anybody ever wrote onto

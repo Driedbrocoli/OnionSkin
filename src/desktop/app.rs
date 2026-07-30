@@ -41,6 +41,7 @@ pub struct Onionskin {
     batch: screens::batch::State,
     labels: screens::labels::State,
     jobs_screen: screens::jobs::State,
+    watch: screens::watch::State,
     history: screens::history::State,
     devices: screens::devices::State,
     calibrate: screens::calibrate::State,
@@ -85,6 +86,7 @@ impl Onionskin {
             merge: Default::default(),
             labels: Default::default(),
             jobs_screen: Default::default(),
+            watch: Default::default(),
             history: Default::default(),
             devices: Default::default(),
             calibrate: Default::default(),
@@ -146,6 +148,7 @@ impl eframe::App for Onionskin {
                         Screen::Batch => screens::batch::show(&mut self.batch, &mut room),
                         Screen::Labels => screens::labels::show(&mut self.labels, &mut room),
                         Screen::Jobs => screens::jobs::show(&mut self.jobs_screen, &mut room),
+                        Screen::Watch => screens::watch::show(&mut self.watch, &mut room),
                         Screen::History => screens::history::show(&mut self.history, &mut room),
                         Screen::Devices => screens::devices::show(&mut self.devices, &mut room),
                         Screen::Calibrate => {

@@ -109,6 +109,12 @@ pub struct List {
     pub rows: Vec<Row>,
 }
 
+/// How many groups of repeated rows are listed before the rest are counted.
+///
+/// A spreadsheet pasted onto itself has three hundred groups, and three hundred
+/// lines of them buries everything else the command had to say.
+pub const DUPLICATES_SHOWN: usize = 5;
+
 impl List {
     /// Read a list: a CSV file, or a spreadsheet.
     pub fn read(path: &Path) -> Result<List, RowsError> {
@@ -302,6 +308,116 @@ impl List {
                 })
                 .collect(),
         }
+    }
+
+    /// The same rows, numbered from somewhere other than one.
+    ///
+    /// The second box of a receipt book is numbered 201 to 400, because two
+    /// receipts with the same number on them is the one thing a receipt book
+    /// must never contain. `{number}` is what puts the number on the sheet, so
+    /// this is where "carry on from last time" has to happen: everything
+    /// downstream reads [`Row::number`] and would otherwise start at one every
+    /// time.
+    ///
+    /// Applies to a list off a spreadsheet as much as to a counted run — a
+    /// hundred invoices from a CSV are numbered 4471 onwards just as readily.
+    pub fn starting_at(mut self, first: usize) -> List {
+        let first = first.max(1);
+        for (offset, row) in self.rows.iter_mut().enumerate() {
+            row.number = first + offset;
+        }
+        self
+    }
+
+    /// The list from a given row onwards, counting the rows from 1.
+    ///
+    /// A run of two hundred jams at sheet eighty. The eighty that came out are
+    /// good; what is wanted is the other hundred and twenty, and not a second
+    /// copy of the first eighty. The rows keep the numbers they already had, so
+    /// sheet 81 still says 81 — a resumed run that renumbered itself from one
+    /// would be worse than no resume at all.
+    pub fn from_row(mut self, first: usize) -> List {
+        let skip = first.max(1) - 1;
+        self.rows = self.rows.into_iter().skip(skip).collect();
+        self
+    }
+
+    /// The number the row after the last one would have.
+    ///
+    /// Where the next run starts, which is a different thing from how many
+    /// rows there are as soon as the numbering began anywhere but one.
+    pub fn next_number(&self) -> usize {
+        self.rows.last().map(|row| row.number + 1).unwrap_or(1)
+    }
+
+    /// Rows that say exactly what another row says, grouped.
+    ///
+    /// A list with the same person on it twice is nearly always a mistake — a
+    /// spreadsheet pasted onto itself, a name added again because the first one
+    /// was not spotted — and it costs two certificates, two sheets of stock and
+    /// somebody's afternoon working out which of the two to hand over. It is
+    /// obvious in the list and invisible in the stack of paper.
+    ///
+    /// Not an error, because there are real reasons to want two: two copies of
+    /// a ticket, a form filed in two places. So it is said, and the run goes on.
+    ///
+    /// Each group is the row numbers that share a value, smallest first, and
+    /// the groups are in the order the first of each appears. A counted run has
+    /// no values at all — every row is `{number}` and nothing else — so it has
+    /// no duplicates by construction, which is why the empty case is checked.
+    pub fn duplicates(&self) -> Vec<Vec<usize>> {
+        if self.columns.is_empty() {
+            return Vec::new();
+        }
+        let mut seen: Vec<(&BTreeMap<String, String>, Vec<usize>)> = Vec::new();
+        for row in &self.rows {
+            match seen.iter_mut().find(|(values, _)| **values == row.values) {
+                Some((_, numbers)) => numbers.push(row.number),
+                None => seen.push((&row.values, vec![row.number])),
+            }
+        }
+        seen.into_iter()
+            .filter(|(_, numbers)| numbers.len() > 1)
+            .map(|(_, numbers)| numbers)
+            .collect()
+    }
+
+    /// One line about the repeats, or nothing when there are none.
+    ///
+    /// Written here rather than in the command so the window and the command
+    /// line say the same thing about the same list.
+    pub fn describe_duplicates(&self) -> Option<String> {
+        let groups = self.duplicates();
+        if groups.is_empty() {
+            return None;
+        }
+        let extra: usize = groups.iter().map(|group| group.len() - 1).sum();
+        let mut said = format!(
+            "{} row{} appear{} more than once, which is {extra} sheet{} you may not have meant \
+             to print:",
+            groups.len(),
+            if groups.len() == 1 { "" } else { "s" },
+            if groups.len() == 1 { "s" } else { "" },
+            if extra == 1 { "" } else { "s" }
+        );
+        // Only the first few. A list pasted onto itself has three hundred
+        // groups, and three hundred lines of them buries everything else.
+        for group in groups.iter().take(DUPLICATES_SHOWN) {
+            let numbered: Vec<String> = group.iter().map(|n| n.to_string()).collect();
+            said.push_str(&format!("\n    rows {}", numbered.join(", ")));
+            if let Some(row) = self.rows.iter().find(|row| row.number == group[0]) {
+                if let Some(first) = self.columns.first().and_then(|name| row.get(name)) {
+                    said.push_str(&format!("  — {first}"));
+                }
+            }
+        }
+        if groups.len() > DUPLICATES_SHOWN {
+            said.push_str(&format!(
+                "\n    …and {} more",
+                groups.len() - DUPLICATES_SHOWN
+            ));
+        }
+        Some(said)
     }
 
     /// The column names, for a message that has to say what is on offer.

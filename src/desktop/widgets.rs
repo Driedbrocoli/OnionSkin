@@ -213,6 +213,63 @@ pub fn save_row(
     ui.add_space(6.0);
 }
 
+/// A folder, rather than a file in one.
+///
+/// `watch` wants the folder the scanner writes into, and on the day somebody
+/// sets it up that folder is usually empty — so there is nothing in it to pick,
+/// and a file row would leave them clicking about in an empty listing looking
+/// for something to choose.
+///
+/// Files dropped on the window are taken by their folder, which is what
+/// dragging a scan onto this row means: watch where that came from.
+pub fn folder_row(
+    ui: &mut egui::Ui,
+    picker: &mut Picker,
+    label: &str,
+    slot: &mut Option<std::path::PathBuf>,
+    dropped: &mut Vec<std::path::PathBuf>,
+) -> bool {
+    let mut changed = false;
+    let who = ui.make_persistent_id(("folder-row", label));
+    if let Some(chosen) = picker.taken(who) {
+        onionskin::settings::remember_folder(&chosen);
+        *slot = Some(chosen);
+        changed = true;
+    }
+    if let Some(at) = dropped.first().cloned() {
+        let folder = if at.is_dir() {
+            Some(at.clone())
+        } else {
+            at.parent().map(|p| p.to_path_buf())
+        };
+        if let Some(folder) = folder {
+            dropped.remove(0);
+            *slot = Some(folder);
+            changed = true;
+        }
+    }
+
+    ui.label(egui::RichText::new(label).strong());
+    ui.horizontal(|ui| {
+        if ui.button("Choose…").clicked() {
+            let start = onionskin::settings::start_in(slot.as_deref());
+            picker.folder(who, label, Some(&start));
+        }
+        match slot {
+            Some(path) => {
+                ui.label(egui::RichText::new(path.display().to_string()).monospace());
+                if ui.small_button("×").clicked() {
+                    *slot = None;
+                    changed = true;
+                }
+            }
+            None => hint(ui, "nothing chosen"),
+        }
+    });
+    ui.add_space(6.0);
+    changed
+}
+
 /// Open the folder a file is in, using whatever the desktop provides.
 ///
 /// The work is in [`onionskin::install::open_with_desktop`], which the command

@@ -332,6 +332,79 @@ impl Step {
     }
 }
 
+/// How long a job has left to run, in seconds, or nothing if it is too early
+/// to say.
+///
+/// "Page 40 of 200" answers how far, and leaves the question somebody is
+/// actually asking — whether to wait or to go and do something else. Two
+/// hundred pages at four seconds each is eleven minutes, and eleven minutes is
+/// a cup of tea rather than a stare at the screen.
+///
+/// # Why it says nothing at the start
+///
+/// One page in, the estimate is one measurement times a hundred and ninety-nine,
+/// and the first page is the slowest one — the fonts are being loaded, the
+/// document is being opened, the renderer is warming up. A number arrived at
+/// that way is wrong by a factor of several and then visibly collapses, which
+/// is worse than no number: somebody who was told twenty minutes and got two
+/// stops believing the next one.
+///
+/// So it waits for [`ENOUGH_PAGES`] pages and [`ENOUGH_SECONDS`] of evidence,
+/// and until then the line simply says which page it is on.
+pub fn how_much_longer(done: usize, of: usize, elapsed_seconds: f64) -> Option<f64> {
+    if done < ENOUGH_PAGES || done >= of || elapsed_seconds < ENOUGH_SECONDS {
+        return None;
+    }
+    if !elapsed_seconds.is_finite() || elapsed_seconds <= 0.0 {
+        return None;
+    }
+    let each = elapsed_seconds / done as f64;
+    Some(each * (of - done) as f64)
+}
+
+/// How many pages must be done before a guess is worth making.
+pub const ENOUGH_PAGES: usize = 3;
+
+/// And how long they must have taken. A job that finishes in under a second
+/// does not need to be told it has half a second left.
+pub const ENOUGH_SECONDS: f64 = 2.0;
+
+/// How much longer, in words, rounded so the number does not jitter.
+///
+/// Rounded coarsely on purpose. An estimate that reads "4 minutes 37 seconds"
+/// and then "4 minutes 31 seconds" invites somebody to watch it tick, which is
+/// exactly what it exists to stop them doing. It is rounded to something the
+/// answer survives being wrong about: the difference between "about 5 minutes"
+/// and "about 4 minutes" changes nothing anybody does.
+pub fn how_long_in_words(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "a moment".to_string();
+    }
+    let seconds = seconds.round() as u64;
+    match seconds {
+        0..=10 => "a few seconds".to_string(),
+        11..=45 => format!(
+            "about {} seconds",
+            (seconds as f64 / 15.0).round() as u64 * 15
+        ),
+        46..=90 => "about a minute".to_string(),
+        // Up to three quarters of an hour in minutes. Past that, "about 60
+        // minutes" is a phrase nobody says, and the exact number has stopped
+        // being the useful part of the answer anyway.
+        91..=2700 => {
+            let minutes = ((seconds as f64) / 60.0).round().clamp(2.0, 45.0) as u64;
+            format!("about {minutes} minutes")
+        }
+        2701..=5400 => "about an hour".to_string(),
+        // Never "about 1 hours": an hour and a half rounds up to two, and
+        // everything under that was caught above.
+        _ => format!(
+            "about {} hours",
+            ((seconds as f64) / 3600.0).round().max(2.0) as u64
+        ),
+    }
+}
+
 /// Nothing is watching. The ordinary case for a library caller.
 fn unwatched(_: Step) {}
 

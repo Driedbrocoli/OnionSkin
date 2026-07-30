@@ -28,6 +28,7 @@ pub mod read;
 pub mod scan;
 pub mod stack;
 pub mod verify;
+pub mod watch;
 pub mod watermark;
 
 use eframe::egui;
@@ -131,6 +132,7 @@ pub enum Screen {
     Batch,
     Labels,
     Jobs,
+    Watch,
     Fits,
     Stack,
     Verify,
@@ -162,6 +164,7 @@ impl Screen {
         Screen::Batch,
         Screen::Labels,
         Screen::Jobs,
+        Screen::Watch,
         Screen::Fits,
         Screen::Stack,
         Screen::Verify,
@@ -187,6 +190,7 @@ impl Screen {
             Screen::Join => "join",
             Screen::Labels => "labels",
             Screen::Jobs => "jobs",
+            Screen::Watch => "watch",
             Screen::Batch => "batch",
             Screen::Correct => "correct",
             Screen::Cover => "cover",
@@ -225,6 +229,7 @@ impl Screen {
             Screen::Join => "Join files",
             Screen::Labels => "Sheet of labels",
             Screen::Jobs => "Saved jobs",
+            Screen::Watch => "Watch a folder",
             Screen::Batch => "One each, from a list",
             Screen::Correct => "Fix a mistake",
             Screen::Cover => "Cover something up",
@@ -257,6 +262,7 @@ impl Screen {
             Screen::Join => "Several one after another, into one document",
             Screen::Labels => "Addresses and files, one per label, from a list",
             Screen::Jobs => "The same stamp on today's document, in two clicks",
+            Screen::Watch => "Scan to a folder, and the delta is waiting for you",
             Screen::Batch => "Two hundred certificates, two hundred names",
             Screen::Correct => "Cover the wrong words and set the right ones",
             Screen::Cover => "Print solid over what must not be read",
@@ -480,6 +486,7 @@ mod drawing {
         batch: batch::State,
         labels: labels::State,
         jobs: jobs::State,
+        watch: watch::State,
         history: history::State,
         devices: devices::State,
         calibrate: calibrate::State,
@@ -510,6 +517,7 @@ mod drawing {
                 Screen::Batch => batch::show(&mut self.batch, room),
                 Screen::Labels => labels::show(&mut self.labels, room),
                 Screen::Jobs => jobs::show(&mut self.jobs, room),
+                Screen::Watch => watch::show(&mut self.watch, room),
                 Screen::History => history::show(&mut self.history, room),
                 Screen::Devices => devices::show(&mut self.devices, room),
                 Screen::Calibrate => calibrate::show(&mut self.calibrate, room),

@@ -298,3 +298,152 @@ fn a_run_of_numbers_needs_no_file_at_all() {
 fn counting_nothing_gives_nothing() {
     assert!(List::counted(0).rows.is_empty());
 }
+
+/// The second box of a receipt book is numbered 201 to 400, because two
+/// receipts with the same number on them is the one thing a receipt book must
+/// never contain.
+#[test]
+fn a_run_can_be_numbered_from_somewhere_other_than_one() {
+    let second_box = List::counted(200).starting_at(201);
+    assert_eq!(second_box.rows.len(), 200);
+    assert_eq!(second_box.rows[0].number, 201);
+    assert_eq!(second_box.rows[199].number, 400);
+    assert_eq!(second_box.next_number(), 401);
+
+    // Which is what goes on the paper, since {number} is what puts it there.
+    assert_eq!(fill("No. {number}", &second_box.rows[0]), "No. 201");
+
+    // Zero is not a receipt number: asked for it, the run starts at one rather
+    // than printing a sheet numbered 0.
+    assert_eq!(List::counted(3).starting_at(0).rows[0].number, 1);
+    // An empty list has no last row, so "where the next one starts" is one.
+    assert_eq!(List::counted(0).next_number(), 1);
+    assert_eq!(List::counted(0).starting_at(500).next_number(), 1);
+}
+
+/// A hundred invoices from a spreadsheet are numbered 4471 onwards just as
+/// readily as a counted run is — the numbering is not a property of where the
+/// list came from.
+#[test]
+fn a_list_off_a_spreadsheet_can_be_numbered_from_anywhere_too() {
+    let list = List::parse("name\nAda\nGrace\nAlan\n", Path::new("people.csv")).unwrap();
+    assert_eq!(list.rows[0].number, 1);
+
+    let numbered = list.starting_at(4_471);
+    assert_eq!(numbered.rows[0].number, 4_471);
+    assert_eq!(numbered.rows[2].number, 4_473);
+    // The columns are untouched: only the counter moved.
+    assert_eq!(numbered.rows[0].get("name"), Some("Ada"));
+    assert_eq!(
+        fill("Invoice {number} for {name}", &numbered.rows[2]),
+        "Invoice 4473 for Alan"
+    );
+}
+
+/// A run of two hundred jams at sheet eighty. The eighty that came out are
+/// good; what is wanted is the other hundred and twenty, still numbered 81
+/// onwards — a resumed run that renumbered itself from one would be worse than
+/// no resume at all.
+#[test]
+fn a_run_can_be_picked_up_after_a_jam() {
+    let rest = List::counted(200).from_row(81);
+    assert_eq!(rest.rows.len(), 120);
+    assert_eq!(rest.rows[0].number, 81);
+    assert_eq!(rest.rows[119].number, 200);
+    assert_eq!(fill("No. {number}", &rest.rows[0]), "No. 81");
+
+    // From the first sheet is the whole run, and is what happens when nobody
+    // asks for a resume at all.
+    assert_eq!(List::counted(200).from_row(1).rows.len(), 200);
+    assert_eq!(List::counted(200).from_row(0).rows.len(), 200);
+    // Past the end is nothing rather than a panic. The command refuses it
+    // before this is reached, but a list is not the place to find that out.
+    assert!(List::counted(5).from_row(99).rows.is_empty());
+
+    // Resuming a run that was itself numbered from 201: sheet 81 of that run
+    // is 281, which is the number on the paper that jammed.
+    let second_box = List::counted(200).starting_at(201).from_row(81);
+    assert_eq!(second_box.rows[0].number, 281);
+    assert_eq!(second_box.rows.len(), 120);
+}
+
+/// The same person on the list twice is nearly always a spreadsheet pasted
+/// onto itself, and it costs two sheets of stock and somebody working out
+/// which of the two to hand over. Obvious in the list, invisible in the stack.
+#[test]
+fn a_name_that_appears_twice_is_pointed_out() {
+    let list = list_of("name,course\nAda,Maths\nGrace,Physics\nAda,Maths\nAlan,Logic\n");
+    assert_eq!(list.duplicates(), vec![vec![1, 3]]);
+
+    let said = list.describe_duplicates().expect("it should say something");
+    assert!(said.contains("rows 1, 3"), "{said}");
+    assert!(said.contains("Ada"), "{said}");
+    // What it costs, in the unit that matters: sheets of paper.
+    assert!(said.contains("1 sheet"), "{said}");
+}
+
+/// The same name on two different courses is two different sheets, and saying
+/// otherwise would be a false alarm on a list that is perfectly correct.
+#[test]
+fn the_same_name_with_something_different_beside_it_is_not_a_repeat() {
+    let list = list_of("name,course\nAda,Maths\nAda,Physics\n");
+    assert!(list.duplicates().is_empty());
+    assert!(list.describe_duplicates().is_none());
+}
+
+/// Three of the same is one group of three, not three groups or two pairs.
+#[test]
+fn three_of_the_same_row_are_counted_once_as_three() {
+    let list = list_of("name\nAda\nAda\nAda\nGrace\n");
+    assert_eq!(list.duplicates(), vec![vec![1, 2, 3]]);
+    let said = list.describe_duplicates().unwrap();
+    assert!(said.contains("1 row"), "{said}");
+    assert!(said.contains("2 sheets"), "{said}");
+}
+
+/// A run of numbers has no values at all — every row is {number} and nothing
+/// else — so reporting two hundred duplicates would be nonsense about a list
+/// that is exactly what was asked for.
+#[test]
+fn a_counted_run_has_no_duplicates_to_report() {
+    assert!(List::counted(200).duplicates().is_empty());
+    assert!(List::counted(200).describe_duplicates().is_none());
+}
+
+/// A spreadsheet pasted onto itself has three hundred groups, and three
+/// hundred lines of them buries everything else the command had to say.
+#[test]
+fn a_list_pasted_onto_itself_is_summarised_rather_than_recited() {
+    let mut text = String::from("name\n");
+    for n in 0..40 {
+        text.push_str(&format!("person-{n}\n"));
+    }
+    for n in 0..40 {
+        text.push_str(&format!("person-{n}\n"));
+    }
+    let list = list_of(&text);
+    assert_eq!(list.duplicates().len(), 40);
+
+    let said = list.describe_duplicates().unwrap();
+    assert!(said.contains("40 rows appear"), "{said}");
+    assert!(said.contains("40 sheets"), "{said}");
+    // Five shown and the rest counted, rather than forty lines.
+    assert_eq!(said.lines().count(), 1 + DUPLICATES_SHOWN + 1, "{said}");
+    assert!(
+        said.contains(&format!("and {} more", 40 - DUPLICATES_SHOWN)),
+        "{said}"
+    );
+}
+
+/// The rows are named by the numbers they carry, so a run numbered from 201
+/// says "rows 201, 203" and not "rows 1, 3" — those are the sheets that will
+/// come out of the printer.
+#[test]
+fn the_repeats_are_named_by_the_numbers_on_the_sheets() {
+    let list = list_of("name\nAda\nGrace\nAda\n").starting_at(201);
+    assert_eq!(list.duplicates(), vec![vec![201, 203]]);
+    assert!(list
+        .describe_duplicates()
+        .unwrap()
+        .contains("rows 201, 203"));
+}

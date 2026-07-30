@@ -26,11 +26,15 @@ use eframe::egui;
 /// Which control asked for a file, so the answer goes back to the right one.
 pub type Asked = egui::Id;
 
-/// Opening a file, or choosing where to write one.
+/// Opening a file, choosing where to write one, or naming a whole folder.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Purpose {
     Open,
     Save,
+    /// The folder itself is the answer, not anything in it. What `watch` wants:
+    /// the folder the scanner writes into, which on the day it is chosen may
+    /// well be empty, so there is nothing in it to pick.
+    Folder,
 }
 
 #[derive(Default)]
@@ -145,6 +149,11 @@ impl Picker {
     /// Ask for a file to open.
     pub fn open(&mut self, who: Asked, title: &str, kinds: &[&str], start: Option<&Path>) {
         self.begin(who, Purpose::Open, title, kinds, start, "");
+    }
+
+    /// Ask for a folder, rather than for something in one.
+    pub fn folder(&mut self, who: Asked, title: &str, start: Option<&Path>) {
+        self.begin(who, Purpose::Folder, title, &[], start, "");
     }
 
     /// Ask where to write one.
@@ -560,6 +569,7 @@ impl Picker {
                 let verb = match browsing.purpose {
                     Purpose::Open => "Open",
                     Purpose::Save => "Save",
+                    Purpose::Folder => "Use this folder",
                 };
                 let ready = match browsing.purpose {
                     Purpose::Open => browsing
@@ -568,6 +578,9 @@ impl Picker {
                         .map(|r| !r.is_dir)
                         .unwrap_or(false),
                     Purpose::Save => !browsing.name.trim().is_empty(),
+                    // The folder being looked at is always an answer, which is
+                    // the point: it is the one somebody has walked into.
+                    Purpose::Folder => true,
                 };
                 if ui
                     .add_enabled(ready, egui::Button::new(egui::RichText::new(verb).strong()))
@@ -578,6 +591,20 @@ impl Picker {
                             if let Some(row) = browsing.chosen.and_then(|i| rows.get(i)) {
                                 answer = Some(row.path.clone());
                             }
+                        }
+                        // A folder selected in the list, or failing that the
+                        // one being looked at. Both are what somebody means by
+                        // pressing this: the first is the folder they clicked,
+                        // the second the one they walked into.
+                        Purpose::Folder => {
+                            answer = Some(
+                                browsing
+                                    .chosen
+                                    .and_then(|i| rows.get(i))
+                                    .filter(|row| row.is_dir)
+                                    .map(|row| row.path.clone())
+                                    .unwrap_or_else(|| browsing.at.clone()),
+                            );
                         }
                         Purpose::Save => {
                             let outcome = decide_save(

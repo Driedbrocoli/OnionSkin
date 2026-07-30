@@ -127,6 +127,8 @@ enum Command {
     /// Jobs you have saved, to run again on another document.
     #[command(subcommand)]
     Job(JobCommand),
+    /// Watch a folder, and run a saved job on whatever lands in it.
+    Watch(WatchArgs),
     /// A sheet of labels from a list: addresses, files, shelves.
     Labels(LabelsArgs),
     /// Measure a printer's second-pass registration, once per printer.
@@ -859,6 +861,13 @@ struct ProofArgs {
     /// How finely to draw it.
     #[arg(long, default_value_t = 150.0)]
     dpi: f64,
+    /// Draw the pages in the terminal too, for a machine with no window to
+    /// open the proof in.
+    #[arg(long)]
+    in_the_terminal: bool,
+    /// How many characters wide to draw them.
+    #[arg(long, value_name = "N", default_value_t = onionskin::terminal::ACROSS)]
+    across: usize,
     /// Open it when it is written.
     #[arg(long)]
     open: bool,
@@ -1032,6 +1041,41 @@ struct RunJobArgs {
     tuning: Tuning,
 }
 
+/// Sitting and watching the folder the scanner writes into.
+///
+/// The office multifunction has a button on the front that scans to a folder.
+/// Somebody presses it, walks back to their desk, opens the file, runs a
+/// command on it, prints the answer, and walks back to the machine. The middle
+/// three steps are the ones a computer should be doing.
+#[derive(clap::Args)]
+struct WatchArgs {
+    /// The folder to watch — the one the scanner writes into.
+    folder: PathBuf,
+    /// The saved job to run on whatever lands in it.
+    #[arg(long, value_name = "NAME")]
+    job: String,
+    /// Fill in one of the job's blanks: --set ref=4471.
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    set: Vec<String>,
+    /// Put the deltas in this folder instead of beside the scans.
+    #[arg(long, value_name = "FOLDER")]
+    into: Option<PathBuf>,
+    /// Look once and stop, rather than keeping watch. For a scheduled task.
+    #[arg(long)]
+    once: bool,
+    /// Do everything that is waiting, including what has been done before.
+    #[arg(long)]
+    again: bool,
+    /// Say what is in the folder and what would be done, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// How many seconds between looks.
+    #[arg(long, value_name = "SECONDS", default_value_t = onionskin::watch::BETWEEN_SWEEPS_SECONDS)]
+    every: u64,
+    #[command(flatten)]
+    tuning: Tuning,
+}
+
 /// The record of what has been added to sheets of paper.
 ///
 /// "What did we add to that invoice, and when" is a question somebody asks
@@ -1050,6 +1094,9 @@ struct HistoryArgs {
     /// Report it as JSON.
     #[arg(long)]
     json: bool,
+    /// Ask about every PDF in a folder at once: which of these have I printed?
+    #[arg(long, value_name = "FOLDER")]
+    asking_about: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -1290,6 +1337,21 @@ struct BatchArgs {
     /// Stop after this many, to try a few before committing the whole stack.
     #[arg(long, value_name = "N")]
     first: Option<usize>,
+    /// Start at this sheet rather than the first: after a jam at sheet 80,
+    /// --from-sheet 81 does the rest without redoing the eighty that printed.
+    #[arg(long, value_name = "N")]
+    from_sheet: Option<usize>,
+    /// Write the first sheet to a file of its own as well, to print and hold
+    /// against a real one before committing the rest of the stock.
+    #[arg(long)]
+    proof_first: bool,
+    /// Number the sheets from here rather than from 1.
+    #[arg(long, value_name = "N")]
+    start_at: Option<usize>,
+    /// Carry the numbering on from the last run of this named series: the
+    /// second box of receipts is 201 to 400, not 1 to 200 again.
+    #[arg(long, value_name = "NAME")]
+    series: Option<String>,
     /// Type size in points.
     #[arg(long, default_value_t = 11.0)]
     size: f64,
@@ -1831,10 +1893,25 @@ fn same_file_key(path: &Path) -> PathBuf {
     }
 }
 
-/// Make sure a file can actually be written before doing the work.
 /// Whether `--overwrite` was given. See [`Cli::overwrite`].
 static OVERWRITE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the lines about how to print a delta are still worth saying.
+///
+/// Every command that writes a delta ends with them, which is right when a
+/// command writes one delta. `watch` writes one per scan all afternoon, and
+/// repeating twelve lines of "put the sheet back in the tray" after each one
+/// buries the single line that differs — which file it just did. So it says
+/// them once, at the top, and turns this off.
+static SAY_HOW_TO_PRINT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn say_how_to_print() {
+    if SAY_HOW_TO_PRINT.load(std::sync::atomic::Ordering::Relaxed) {
+        println!("\n{PRINT_INSTRUCTIONS}");
+    }
+}
+
+/// Make sure a file can actually be written before doing the work.
 fn check_writable(path: &Path, label: &str) -> Result<(), String> {
     if path.is_dir() {
         return Err(format!(
@@ -2073,6 +2150,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Blanks(args) => cmd_blanks(args),
         Command::History(args) => cmd_history(args),
         Command::Job(command) => cmd_job(command),
+        Command::Watch(args) => cmd_watch(args),
         Command::Labels(args) => cmd_labels(args),
         Command::Calibrate(command) => cmd_calibrate(command),
         Command::Doctor => cmd_doctor(),
@@ -2568,6 +2646,59 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         (None, None) => return Err("give --from and a list, or --count and a number".into()),
     };
 
+    // Where the numbering starts. Given outright, or carried on from where a
+    // named series left off, or one.
+    if let Some(name) = &args.series {
+        onionskin::series::check_name(name).map_err(|e| e.to_string())?;
+    }
+    let resuming = args.from_sheet.is_some_and(|from| from > 1);
+    let first = match (args.start_at, &args.series) {
+        // A number given outright always wins, and is the only thing a resume
+        // can go on.
+        (Some(given), _) => given.max(1),
+        // Resuming a run whose numbers a series already claimed: the counter
+        // has moved past them, so reading it now would number the sheets
+        // wrongly and the wrongness is invisible until an accountant finds it.
+        // The number is worked out and handed over rather than guessed at.
+        (None, Some(name)) if resuming => {
+            let next = onionskin::series::next_for(name);
+            let likely = next.saturating_sub(list.rows.len()).max(1);
+            return Err(format!(
+                "picking up a run of a series needs --start-at as well, because the '{name}' \
+                 counter has already moved past this run's numbers — it is at {next} now, and \
+                 numbering from there would put the wrong numbers on the paper.\n    \
+                 If this is the run of {} that used {likely} to {}, that is:  --start-at {likely}",
+                list.rows.len(),
+                next.saturating_sub(1).max(1)
+            ));
+        }
+        (None, Some(name)) => onionskin::series::next_for(name),
+        (None, None) => 1,
+    };
+    let list = list.starting_at(first);
+
+    // Picking up after a jam. The rows keep the numbers they already had, so
+    // sheet 81 still says 81 — this is the same run continued, not a new one.
+    let how_many = list.rows.len();
+    let from_sheet = args.from_sheet.unwrap_or(1).max(1);
+    if from_sheet > how_many {
+        return Err(format!(
+            "--from-sheet {from_sheet}, but there {} only {how_many} sheet{} in all, so there \
+             is nothing left to make.\n    The last one is --from-sheet {how_many}.",
+            if how_many == 1 { "is" } else { "are" },
+            if how_many == 1 { "" } else { "s" }
+        ));
+    }
+    let list = list.from_row(from_sheet);
+    if from_sheet > 1 {
+        println!(
+            "Picking up at sheet {from_sheet} of {how_many}: {} to make, and the {} before it \
+             left alone.",
+            list.rows.len(),
+            from_sheet - 1
+        );
+    }
+
     // Every template checked against the columns before a single sheet is
     // made. Two hundred certificates reading "{nmae}" is a discovery to make
     // now, not at the printer.
@@ -2612,6 +2743,15 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         });
     }
 
+    // The same person on the list twice is nearly always a spreadsheet pasted
+    // onto itself, and it costs two sheets of stock and somebody working out
+    // which of the two to hand over. Obvious in the list and invisible in the
+    // stack of paper, so it is said here — and then the run goes on, because
+    // two copies of a ticket is a real thing to want.
+    if let Some(said) = list.describe_duplicates() {
+        println!("{said}\n");
+    }
+
     let output = args
         .output
         .clone()
@@ -2636,6 +2776,30 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
         println!(
             "Making the first {wanted} of {}, because --first says so.",
             list.rows.len()
+        );
+    }
+    // Which numbers these sheets will carry, said before they are made rather
+    // than after: a run numbered from the wrong place is a box of receipts to
+    // throw away, and it is obvious here and nowhere later.
+    let numbered = list
+        .rows
+        .first()
+        .map(|row| onionskin::series::numbers(row.number, wanted))
+        .unwrap_or(first..first);
+    if numbered.start != 1 && wanted > 0 {
+        println!(
+            "Numbered {} to {}.{}",
+            numbered.start,
+            numbered.end - 1,
+            match &args.series {
+                // A resume leaves the counter alone, so it neither carries on
+                // nor puts anything back — it repeats numbers already spent.
+                Some(_) if resuming => String::new(),
+                Some(name) if args.start_at.is_none() =>
+                    format!(" Carrying on the '{name}' series."),
+                Some(name) => format!(" Series '{name}' put back to {first}."),
+                None => String::new(),
+            }
         );
     }
 
@@ -2723,11 +2887,89 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
     for path in &outcome.previews {
         println!("proof: {}", path.display());
     }
+
+    // The first sheet on its own, to print and hold against a real one before
+    // committing the rest of the stock. A separate file rather than a
+    // stop-and-run-again, because after looking at the proof somebody wants to
+    // print the rest — not to work out what they typed twenty minutes ago and
+    // type it again with different flags.
+    if args.proof_first && wanted > 1 && !rehearsal.pretending() {
+        let one = beside(&output, "-first", "pdf");
+        check_writable(&one, "first sheet")?;
+        match pipeline::compose_sheets_with_pictures(
+            &args.document,
+            args.page,
+            &per_sheet[..1],
+            pictures_per_sheet.get(..1).unwrap_or(&[]),
+            &one,
+            None,
+            &options,
+        ) {
+            Ok(_) => {
+                println!("\n{}: the first sheet on its own.", one.display());
+                println!(
+                    "  Print that one, hold it against a real {}, and then print the other {} \
+                     from\n  {} — pages 2 to {}.",
+                    args.document
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "sheet".to_string()),
+                    wanted - 1,
+                    output.display(),
+                    wanted
+                );
+            }
+            // The stack is written and is the thing that matters. A proof that
+            // could not be made is a nuisance, not a failure of the run.
+            Err(e) => eprintln!(
+                "\nThe stack is written, but the single first sheet could not be ({e}).\n    \
+                 Print page 1 of {} on its own instead.",
+                output.display()
+            ),
+        }
+    }
+
     // Recorded like any other delta. A batch is the expensive one to print
     // twice — two hundred certificates is two hundred sheets of stock — so it
     // is the one where "you have printed this already" is worth most.
     if !rehearsal.pretending() {
         note_the_delta(&args.document, &output, outcome.total_regions(), wanted);
+    }
+    // The series is advanced here and nowhere earlier: by what was really made,
+    // after it was made. A run that failed wrote nothing and must not burn two
+    // hundred numbers, and a --dry-run that moved the counter on would not be a
+    // rehearsal.
+    if let Some(name) = &args.series {
+        if resuming {
+            // A resume reprints numbers the first run already claimed. Moving
+            // the counter on again would leave a gap the width of the whole
+            // run, and a receipt book with a hole in it is as hard to explain
+            // as one with a repeat.
+            println!(
+                "\nSeries '{name}' is unchanged — this is sheet {} onwards of a run whose \
+                 numbers were already used. It still goes on from {}.",
+                args.from_sheet.unwrap_or(1),
+                onionskin::series::next_for(name)
+            );
+        } else if rehearsal.pretending() {
+            println!(
+                "\nSeries '{name}' is unchanged — --dry-run. The next real run \
+                 still starts at {first}."
+            );
+        } else {
+            match onionskin::series::reached(name, numbered.end) {
+                Ok(()) => println!(
+                    "\n{}",
+                    onionskin::series::where_it_got_to(name, numbered.clone())
+                ),
+                Err(e) => eprintln!(
+                    "\nThe sheets are written, but where the '{name}' series got to could not \
+                     be saved ({e}).\n    The next run will start at {first} again — give \
+                     --start-at {} to put it right.",
+                    numbered.end
+                ),
+            }
+        }
     }
     println!(
         "\nPrinting a stack\n  \
@@ -4391,11 +4633,22 @@ fn progress_on_a_terminal() -> impl FnMut(pipeline::Step) {
     use std::io::{IsTerminal, Write};
     let live = std::io::stderr().is_terminal();
     let mut widest = 0usize;
+    // The clock is kept here rather than in the library, so that a test can
+    // reason about the arithmetic without waiting for real seconds to pass.
+    let started = std::time::Instant::now();
     move |step: pipeline::Step| {
         if !live {
             return;
         }
-        let line = step.describe();
+        let mut line = step.describe();
+        // How much longer, once there is enough evidence to say. "Page 40 of
+        // 200" answers how far and leaves the question somebody is actually
+        // asking, which is whether to wait or go and do something else.
+        if let Some(left) =
+            pipeline::how_much_longer(step.page, step.pages, started.elapsed().as_secs_f64())
+        {
+            line.push_str(&format!(", {} left", pipeline::how_long_in_words(left)));
+        }
         // Padded to the longest line so far, or the tail of a longer previous
         // line stays on screen after a shorter one is written over it.
         widest = widest.max(line.chars().count());
@@ -6111,12 +6364,10 @@ fn cmd_job(command: JobCommand) -> Result<ExitCode, String> {
     }
 }
 
-/// Run a saved job on a document.
-fn cmd_job_run(args: RunJobArgs) -> Result<ExitCode, String> {
-    let job = onionskin::jobs::load(&args.name).map_err(|e| e.to_string())?;
-
+/// What was said with `--set`, as names and values.
+fn set_pairs(set: &[String]) -> Result<std::collections::BTreeMap<String, String>, String> {
     let mut given = std::collections::BTreeMap::new();
-    for pair in &args.set {
+    for pair in set {
         let (name, value) = pair.split_once('=').ok_or_else(|| {
             format!("bad --set '{pair}'. Expected NAME=VALUE, as in --set ref=4471.")
         })?;
@@ -6127,40 +6378,61 @@ fn cmd_job_run(args: RunJobArgs) -> Result<ExitCode, String> {
         }
         given.insert(name.trim().to_string(), value.to_string());
     }
+    Ok(given)
+}
 
-    // Everything the job needs, checked before a single word is placed. "You
-    // did not say what {ref} is" belongs at the keyboard, not on a hundred
-    // sheets of paper reading {ref}.
-    let missing = job.missing(&given);
-    if !missing.is_empty() {
-        return Err(format!(
-            "job '{}' needs {} filled in.\n    {}\n    \
-             onionskin job show {}   says what it wants and why",
-            job.name,
-            missing
-                .iter()
-                .map(|name| format!("{{{name}}}"))
-                .collect::<Vec<_>>()
-                .join(" and "),
-            missing
-                .iter()
-                .map(|name| format!("--set {name}=…"))
-                .collect::<Vec<_>>()
-                .join(" "),
-            job.name
-        ));
+/// Everything the job needs that was not given.
+///
+/// "You did not say what {ref} is" belongs at the keyboard, not on a hundred
+/// sheets of paper reading {ref}.
+fn blanks_still_empty(
+    job: &onionskin::jobs::Job,
+    given: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let missing = job.missing(given);
+    if missing.is_empty() {
+        return Ok(());
     }
+    Err(format!(
+        "job '{}' needs {} filled in.\n    {}\n    \
+         onionskin job show {}   says what it wants and why",
+        job.name,
+        missing
+            .iter()
+            .map(|name| format!("{{{name}}}"))
+            .collect::<Vec<_>>()
+            .join(" and "),
+        missing
+            .iter()
+            .map(|name| format!("--set {name}=…"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        job.name
+    ))
+}
 
-    let row = onionskin::jobs::values(&given, onionskin::history::now());
+/// A saved job, filled in, as the write it stands for.
+///
+/// The values are worked out here rather than once by the caller, because a
+/// watch left running overnight has to stamp today's date on today's scan and
+/// yesterday's on yesterday's.
+fn job_as_a_write(
+    job: &onionskin::jobs::Job,
+    document: &Path,
+    output: Option<PathBuf>,
+    given: &std::collections::BTreeMap<String, String>,
+    open: bool,
+    tuning: Tuning,
+) -> WriteArgs {
+    let row = onionskin::jobs::values(given, onionskin::history::now());
     let fill = |templates: &[String]| -> Vec<String> {
         templates
             .iter()
             .map(|template| onionskin::rows::fill(template, &row))
             .collect()
     };
-
-    let written = WriteArgs {
-        document: args.document.clone(),
+    WriteArgs {
+        document: document.to_path_buf(),
         at: fill(&job.at),
         after: fill(&job.after),
         below: fill(&job.below),
@@ -6172,15 +6444,31 @@ fn cmd_job_run(args: RunJobArgs) -> Result<ExitCode, String> {
         rotation: job.rotation_deg,
         colour: job.colour.clone(),
         leading: job.leading,
-        output: args.output.clone(),
+        output,
         preview: None,
-        open: args.open,
+        open,
         // Running a saved job does not re-save it. Saving on every run would
         // make "the job" whatever it was last used for, which is the one thing
         // a saved job must not be.
         save_as: None,
-        tuning: args.tuning,
-    };
+        tuning,
+    }
+}
+
+/// Run a saved job on a document.
+fn cmd_job_run(args: RunJobArgs) -> Result<ExitCode, String> {
+    let job = onionskin::jobs::load(&args.name).map_err(|e| e.to_string())?;
+    let given = set_pairs(&args.set)?;
+    blanks_still_empty(&job, &given)?;
+
+    let written = job_as_a_write(
+        &job,
+        &args.document,
+        args.output.clone(),
+        &given,
+        args.open,
+        args.tuning,
+    );
 
     if args.dry_run {
         println!("job '{}' on {}:\n", job.name, args.document.display());
@@ -6202,6 +6490,205 @@ fn cmd_job_run(args: RunJobArgs) -> Result<ExitCode, String> {
 
     println!("Running job '{}' on {}.", job.name, args.document.display());
     write_on_document(&written)
+}
+
+/// Watch a folder, and run a saved job on whatever lands in it.
+fn cmd_watch(args: WatchArgs) -> Result<ExitCode, String> {
+    use onionskin::watch;
+
+    // Both checked before anything is watched. Sitting silently for an hour on
+    // a misspelled folder or a job that does not exist is the one failure
+    // nobody notices until they go looking for the deltas.
+    let job = onionskin::jobs::load(&args.job).map_err(|e| e.to_string())?;
+    let given = set_pairs(&args.set)?;
+    blanks_still_empty(&job, &given)?;
+    watch::listing(&args.folder).map_err(|e| e.to_string())?;
+    if let Some(into) = &args.into {
+        if !into.is_dir() {
+            return Err(format!(
+                "'{}' is not a folder, so the deltas cannot go there. Make it \
+                 first, or leave --into off and they will land beside the scans.",
+                into.display()
+            ));
+        }
+    }
+    // A sweep every no-seconds is a busy loop, and one an hour apart is as
+    // rare as this is worth being. Said out loud rather than quietly applied,
+    // because somebody who typed a number should be told it was not used.
+    let every = args.every.clamp(1, 3600);
+    if every != args.every {
+        println!("(--every {} is out of range; using {every}.)", args.every);
+    }
+
+    println!(
+        "Watching {} for PDFs, Word and OpenDocument files.",
+        args.folder.display()
+    );
+    println!("  job      {}", job.name);
+    match &args.into {
+        Some(into) => println!("  deltas   into {}", into.display()),
+        None => println!("  deltas   beside each file, as NAME-delta.pdf"),
+    }
+    if args.again {
+        println!("  --again  everything in the folder, done before or not");
+    }
+    if args.dry_run {
+        println!("  --dry-run, so nothing will be written");
+    }
+    if !args.dry_run {
+        // Said here rather than after each delta. They are the same twelve
+        // lines every time, and a folder's worth of them buries the one line
+        // that differs: which file was just done.
+        println!("\n{PRINT_INSTRUCTIONS}");
+        SAY_HOW_TO_PRINT.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let mut done = if args.again {
+        watch::Ledger::new()
+    } else {
+        watch::read_ledger(&args.folder)
+    };
+    let mut before: std::collections::BTreeMap<PathBuf, watch::Look> =
+        std::collections::BTreeMap::new();
+    // Reasons are said once each. A folder holding one file Onionskin cannot
+    // open should not say so every two seconds for the rest of the afternoon.
+    let mut said: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut worked = 0usize;
+    let mut failed = 0usize;
+
+    if args.once {
+        // A single sweep has nothing to compare a file against, so nothing
+        // would ever look settled and a scheduled task would quietly do
+        // nothing at all. The first look is taken here and the sweep below is
+        // the second one, which is the same rule as the running loop rather
+        // than an exception to it.
+        before = watch::remember_looks(&watch::listing(&args.folder).map_err(|e| e.to_string())?);
+        std::thread::sleep(std::time::Duration::from_secs(every));
+    } else {
+        println!("\n{}", watch::how_to_stop());
+    }
+
+    loop {
+        let now = watch::listing(&args.folder).map_err(|e| e.to_string())?;
+        let verdicts = watch::decide(&now, &before, &done);
+        before = watch::remember_looks(&now);
+
+        for (seen, verdict) in &verdicts {
+            match verdict {
+                watch::Verdict::Do => {}
+                watch::Verdict::FailedBefore(trouble) => {
+                    if said.insert(seen.path.clone()) {
+                        eprintln!("  {} — left alone: {trouble}", short_name(&seen.path));
+                    }
+                    continue;
+                }
+                watch::Verdict::Leave(why) => {
+                    // Only the ones somebody might have expected to work. A
+                    // folder full of .DS_Store does not need a running
+                    // commentary about .DS_Store.
+                    let worth_saying =
+                        matches!(why, watch::Leave::APicture | watch::Leave::NotADocument(_));
+                    if worth_saying && said.insert(seen.path.clone()) {
+                        println!("  {} — {}", short_name(&seen.path), why.why());
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
+
+            let delta = watch::where_the_delta_goes(&seen.path, args.into.as_deref());
+            if args.dry_run {
+                println!(
+                    "  {} → {}   (--dry-run, nothing written)",
+                    short_name(&seen.path),
+                    delta.display()
+                );
+                // Not written down, so taking --dry-run off does the work.
+                continue;
+            }
+
+            println!("\n{} → {}", short_name(&seen.path), delta.display());
+            let written = job_as_a_write(
+                &job,
+                &seen.path,
+                Some(delta.clone()),
+                &given,
+                false,
+                args.tuning.clone(),
+            );
+            let trouble = match write_on_document_saying(&written) {
+                Ok(true) => String::new(),
+                Ok(false) => {
+                    "the job did not produce anything worth printing — see above".to_string()
+                }
+                Err(why) => why,
+            };
+            if trouble.is_empty() {
+                worked += 1;
+            } else {
+                failed += 1;
+                eprintln!("  {}: {trouble}", short_name(&seen.path));
+            }
+
+            let handled = watch::Handled {
+                at: onionskin::history::now(),
+                source: seen.path.to_string_lossy().into_owned(),
+                look: seen.look,
+                delta: if trouble.is_empty() {
+                    delta.to_string_lossy().into_owned()
+                } else {
+                    String::new()
+                },
+                trouble,
+            };
+            // Written down before the next file, so stopping the program —
+            // which is how it is always stopped — never loses more than the
+            // one it was in the middle of.
+            if let Err(e) = watch::write_down(&args.folder, &handled) {
+                eprintln!(
+                    "  could not remember that one was done ({e}). It will be \
+                     done again next time this runs."
+                );
+            }
+            done.add(handled);
+        }
+
+        if args.once {
+            let tally = watch::Tally::of(&verdicts);
+            println!(
+                "\n{} in the folder: {} {} now, {} done before, {} still arriving, {} left alone.",
+                now.len(),
+                if args.dry_run { tally.done } else { worked },
+                if args.dry_run { "to do" } else { "done" },
+                tally.already,
+                tally.arriving,
+                tally.left
+            );
+            if tally.failed > 0 {
+                println!(
+                    "{} tried before and did not work, so {} not tried again. \
+                     --again does them all over.",
+                    tally.failed,
+                    if tally.failed == 1 { "was" } else { "were" }
+                );
+            }
+            if failed > 0 {
+                println!("{failed} did not work — see above.");
+                return Ok(ExitCode::from(1));
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(every));
+    }
+}
+
+/// A path short enough for a line of running commentary: the file's own name,
+/// which is what identifies it in a folder everything else in is the same.
+fn short_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Keep what was just written as a named job, if asked.
@@ -6256,6 +6743,10 @@ fn cmd_history(args: HistoryArgs) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if let Some(folder) = &args.asking_about {
+        return which_of_these_were_printed(folder, args.json);
+    }
+
     let entries = onionskin::history::recent(args.limit);
     if args.json {
         println!(
@@ -6284,6 +6775,128 @@ fn cmd_history(args: HistoryArgs) -> Result<ExitCode, String> {
         onionskin::history::path().display()
     );
     println!("Forget the lot with:  onionskin history --forget");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Which of the deltas in a folder have been written before, all at once.
+///
+/// The question `history` already answers is "what have I printed", which is
+/// the wrong shape for the moment somebody is actually holding a folder of
+/// deltas and a box of stock. Then it is "which of *these*" — and asking it one
+/// file at a time, of a list of two hundred, is not asking it at all.
+///
+/// The answer is by fingerprint, which is the same identity `onionskin write`
+/// records and the same one that catches the delta somebody renamed.
+fn which_of_these_were_printed(folder: &Path, as_json: bool) -> Result<ExitCode, String> {
+    if !folder.exists() {
+        return Err(format!(
+            "'{}' is not there. Give the folder holding the deltas.",
+            folder.display()
+        ));
+    }
+    if !folder.is_dir() {
+        return Err(format!(
+            "'{}' is a file, not a folder. To ask about one delta, print it and \
+             Onionskin says so at the time — or give the folder it is in.",
+            folder.display()
+        ));
+    }
+
+    let mut pdfs: Vec<PathBuf> = std::fs::read_dir(folder)
+        .map_err(|e| format!("could not read {}: {e}", folder.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            path.extension()
+                .map(|e| e.to_string_lossy().to_lowercase() == "pdf")
+                .unwrap_or(false)
+        })
+        .collect();
+    pdfs.sort();
+
+    if pdfs.is_empty() {
+        println!(
+            "No PDFs in {}, so there is nothing to ask about.",
+            folder.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Read once. The record is a file on disk, and asking it two hundred times
+    // would read that file two hundred times.
+    let record = onionskin::history::read();
+    let mut printed: Vec<(PathBuf, onionskin::history::Entry)> = Vec::new();
+    let mut fresh: Vec<PathBuf> = Vec::new();
+    for path in &pdfs {
+        let Some(fingerprint) = onionskin::history::fingerprint(path) else {
+            continue;
+        };
+        match record
+            .iter()
+            .rev()
+            .find(|entry| entry.fingerprint == fingerprint)
+        {
+            Some(entry) => printed.push((path.clone(), entry.clone())),
+            None => fresh.push(path.clone()),
+        }
+    }
+
+    if as_json {
+        let said = serde_json::json!({
+            "folder": folder.display().to_string(),
+            "printed": printed
+                .iter()
+                .map(|(path, entry)| serde_json::json!({
+                    "file": path.display().to_string(),
+                    "when": entry.when(),
+                    "onto": entry.source,
+                }))
+                .collect::<Vec<_>>(),
+            "not_printed": fresh
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&said).map_err(|e| e.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!(
+        "{} PDF{} in {}:\n",
+        pdfs.len(),
+        if pdfs.len() == 1 { "" } else { "s" },
+        folder.display()
+    );
+    if !printed.is_empty() {
+        println!("Written before — printing one of these onto the same sheet lays the ink down");
+        println!("twice, and that cannot be undone:\n");
+        for (path, entry) in &printed {
+            println!(
+                "  {:<36} {} ({})",
+                short_name(path),
+                entry.when(),
+                entry.how_long_ago()
+            );
+        }
+        println!();
+    }
+    if !fresh.is_empty() {
+        println!("Not in the record — never written by this machine, or written before the");
+        println!("record was kept:\n");
+        for path in &fresh {
+            println!("  {}", short_name(path));
+        }
+        println!();
+    }
+    println!(
+        "Onto a *fresh* sheet a delta that was written before is exactly right — a hundred\n\
+         certificates are one delta printed a hundred times. It is the same sheet twice\n\
+         that cannot be undone."
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -6461,6 +7074,18 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
         args.colour
     );
     println!("Look at it before you print the delta. Nothing here goes near the printer.");
+
+    // On a server over SSH there is nothing to open the proof with, and this
+    // is the only look at it anybody is going to get. Drawn off the proof
+    // itself rather than off the sheet and the delta separately, so what is on
+    // screen is the same page that is in the file.
+    if args.in_the_terminal && !rehearsal.pretending() {
+        match draw_in_the_terminal(&output, args.across) {
+            Ok(said) => print!("\n{said}"),
+            Err(e) => eprintln!("\nThe proof is written; it could not be drawn here ({e})."),
+        }
+    }
+
     rehearsal.say_nothing_was_written();
     if !rehearsal.pretending() {
         open_if_asked(args.open, &output);
@@ -6468,8 +7093,45 @@ fn cmd_proof(args: ProofArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Put several deltas onto one, so the sheet goes through the printer once.
-/// Put several PDFs into one, page after page.
+/// Every page of a PDF, drawn as characters.
+///
+/// Deliberately coarse, and it does not pretend otherwise: nobody should
+/// approve a run of two hundred off eighty characters of text. What it answers
+/// is the question that actually gets asked from an SSH session — is the stamp
+/// roughly where I meant, or is it off the paper — which is answerable at this
+/// resolution and otherwise not answerable at all.
+fn draw_in_the_terminal(pdf: &Path, across: usize) -> Result<String, String> {
+    // Coarse enough to be quick, fine enough that a line of type still lands
+    // in the right character cell. The drawing throws away far more than this.
+    const DPI: f64 = 72.0;
+    let engine = onionskin::render::engine().map_err(|e| e.to_string())?;
+    let document = engine.open(pdf).map_err(|e| e.to_string())?;
+    let pages = document.len();
+
+    let mut out = String::new();
+    for index in 0..pages {
+        let drawn = document
+            .render_gray(index, DPI)
+            .map_err(|e| format!("page {}: {e}", index + 1))?;
+        let picture =
+            onionskin::terminal::draw(&drawn.gray, drawn.width, drawn.height, drawn.size, across);
+        out.push_str(&picture.framed(&format!(
+            "page {} of {pages}  —  {:.0} × {:.0} mm",
+            index + 1,
+            drawn.size.width_mm,
+            drawn.size.height_mm
+        )));
+        out.push('\n');
+        out.push_str(&onionskin::terminal::ruler(drawn.size, picture.across));
+        out.push_str("\n\n");
+    }
+    out.push_str(
+        "Coarse on purpose. It answers whether the words are roughly where you meant and \
+         still\non the paper; for anything finer, open the proof itself.\n",
+    );
+    Ok(out)
+}
+
 /// Lay a word across a printed sheet.
 ///
 /// Written straight out rather than through the diffing pipeline, and that is
@@ -7209,6 +7871,7 @@ fn cmd_barcode(args: BarcodeArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Put several PDFs into one, page after page.
 fn cmd_join(args: JoinArgs) -> Result<ExitCode, String> {
     for file in &args.files {
         if !file.is_file() {
@@ -7276,6 +7939,7 @@ fn cmd_join(args: JoinArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Put several deltas onto one, so the sheet goes through the printer once.
 fn cmd_merge(args: MergeArgs) -> Result<ExitCode, String> {
     for delta in &args.deltas {
         if !delta.is_file() {
@@ -7526,6 +8190,18 @@ fn cmd_calibrate_measure(args: MeasureArgs) -> Result<ExitCode, String> {
 /// — the words on an otherwise blank page of the same size — ready to print
 /// onto the sheet that already carries the document.
 fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
+    Ok(match write_on_document_saying(args)? {
+        true => ExitCode::SUCCESS,
+        false => ExitCode::from(2),
+    })
+}
+
+/// The same, saying plainly whether anything worth printing came out.
+///
+/// `watch` runs this in a loop over a folder and has to write down, per file,
+/// whether it worked — and an [`ExitCode`] is a thing to return from `main`,
+/// not a thing to ask questions of.
+fn write_on_document_saying(args: &WriteArgs) -> Result<bool, String> {
     let output = args
         .output
         .clone()
@@ -7585,7 +8261,7 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
     report_checks(&outcome.checks);
     if outcome.blocked() {
         eprintln!("\nBlocked — see above. Nothing worth printing was produced.");
-        return Ok(ExitCode::from(2));
+        return Ok(false);
     }
     println!(
         "\n{}: {} addition{}.",
@@ -7609,9 +8285,9 @@ fn write_on_document(args: &WriteArgs) -> Result<ExitCode, String> {
         outcome.pages.len(),
     );
     save_the_job(args);
-    println!("\n{PRINT_INSTRUCTIONS}");
+    say_how_to_print();
     open_if_asked(args.open, &output);
-    Ok(ExitCode::SUCCESS)
+    Ok(true)
 }
 
 /// Draw on a document Onionskin did not make: a Word file, a PDF, a scan.
@@ -8435,6 +9111,56 @@ fn report_what_is_kept() {
         Err(_) => println!("  profiles   none yet"),
     }
 
+    let jobs = onionskin::jobs::list();
+    if jobs.is_empty() {
+        println!("  jobs       none saved — onionskin job list");
+    } else {
+        println!(
+            "  jobs       {} — {}",
+            jobs.len(),
+            jobs.iter()
+                .map(|job| job.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // Where the files were and how much went on them — never the words
+    // themselves, which is worth saying here of all places, since this is
+    // where somebody comes to find out what is being kept about them.
+    let remembered = onionskin::history::read().len();
+    if remembered == 0 {
+        println!("  history    nothing yet");
+    } else {
+        println!("  history    {remembered} deltas, by where they were and what they weigh —");
+        println!("             never the words. onionskin history, onionskin history --forget");
+    }
+
+    let series = onionskin::series::all();
+    if series.is_empty() {
+        println!("  series     none — numbering starts at 1 unless --series says otherwise");
+    } else {
+        println!(
+            "  series     {}",
+            series
+                .iter()
+                .map(|(name, next)| format!("{name} (next: {next})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // One file per folder being watched, so a folder nobody watches any more
+    // leaves a record nobody looks at.
+    let (watched, watched_bytes) = scratch_deltas(&home.join("watched"));
+    if watched > 0 {
+        println!(
+            "  watched    {watched} folder{} ({}), so a restart does not redo them",
+            if watched == 1 { "" } else { "s" },
+            describe_size(watched_bytes)
+        );
+    }
+
     let (count, bytes) = scratch_deltas(&home.join("deltas"));
     if count == 0 {
         println!("  deltas     none — they are deleted once printed");
@@ -9073,6 +9799,78 @@ mod naming_tests {
         assert!(split_anchor("no colon here").is_err());
         assert!(split_anchor(":only words").is_err());
         assert!(split_anchor("only anchor:").is_err());
+    }
+
+    /// `--set` is how every blank in a job gets filled, on the command line and
+    /// in a watched folder alike. A pair it cannot read has to be refused
+    /// rather than half-understood.
+    #[test]
+    fn a_set_pair_is_a_name_and_a_value() {
+        let given = set_pairs(&["ref=4471".into(), " amount = 92.00".into()]).unwrap();
+        assert_eq!(given.get("ref").map(String::as_str), Some("4471"));
+        // The name is trimmed, the value is not: trailing spaces in a stamp
+        // are invisible, but a leading space in " 92.00" was typed on purpose
+        // often enough that guessing is worse than obeying.
+        assert_eq!(given.get("amount").map(String::as_str), Some(" 92.00"));
+
+        // A value containing an '=' is one value, not a broken pair.
+        let given = set_pairs(&["note=a=b".into()]).unwrap();
+        assert_eq!(given.get("note").map(String::as_str), Some("a=b"));
+        // An empty value is a value: "--set ref=" means the stamp says nothing
+        // there, which is different from not saying what {ref} is.
+        assert_eq!(
+            set_pairs(&["ref=".into()])
+                .unwrap()
+                .get("ref")
+                .map(String::as_str),
+            Some("")
+        );
+
+        for bad in ["ref", "=4471", "  =x"] {
+            let said = set_pairs(&[bad.to_string()]).unwrap_err();
+            assert!(said.contains("--set"), "{bad}: {said}");
+        }
+    }
+
+    /// A job's blanks are checked before anything is written. On a watched
+    /// folder this is the difference between one error message and an
+    /// afternoon of sheets reading {ref}.
+    #[test]
+    fn a_job_says_what_it_still_needs_before_anything_is_written() {
+        let job = onionskin::jobs::Job {
+            name: "our-ref".to_string(),
+            at: vec!["20,30:Our ref {ref}, {amount}, {today}".to_string()],
+            ..Default::default()
+        };
+        let mut given = std::collections::BTreeMap::new();
+        let said = blanks_still_empty(&job, &given).unwrap_err();
+        assert!(said.contains("{ref}"), "{said}");
+        assert!(said.contains("{amount}"), "{said}");
+        // {today} is filled in by the program and is never asked for.
+        assert!(!said.contains("{today}"), "{said}");
+        // And it says how to find out more, since the job may have been saved
+        // months ago by somebody else.
+        assert!(said.contains("onionskin job show our-ref"), "{said}");
+
+        given.insert("ref".to_string(), "4471".to_string());
+        assert!(blanks_still_empty(&job, &given)
+            .unwrap_err()
+            .contains("{amount}"));
+        given.insert("amount".to_string(), "92.00".to_string());
+        assert!(blanks_still_empty(&job, &given).is_ok());
+    }
+
+    /// The one line of running commentary per file has to identify the file,
+    /// in a folder where the rest of the path is the same for every one.
+    #[test]
+    fn a_file_in_a_watched_folder_is_named_by_its_own_name() {
+        assert_eq!(
+            short_name(Path::new("/home/j/Scans/Scan_0007.pdf")),
+            "Scan_0007.pdf"
+        );
+        assert_eq!(short_name(Path::new("Scan_0007.pdf")), "Scan_0007.pdf");
+        // Something with no name at all still says something rather than "".
+        assert!(!short_name(Path::new("/")).is_empty());
     }
 
     #[test]

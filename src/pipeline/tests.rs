@@ -920,3 +920,97 @@ fn a_stack_with_no_pictures_at_all_is_perfectly_ordinary() {
         assert!(sheets[1].images.is_empty());
     }
 }
+
+/// "Page 40 of 200" answers how far, and leaves the question somebody is
+/// actually asking: whether to wait or go and do something else.
+#[test]
+fn a_long_run_says_how_much_longer() {
+    // Forty pages in eighty seconds is two seconds each; a hundred and sixty
+    // pages left is three hundred and twenty seconds.
+    let left = how_much_longer(40, 200, 80.0).expect("there is enough to go on");
+    assert!((left - 320.0).abs() < 0.001, "{left}");
+    assert_eq!(how_long_in_words(left), "about 5 minutes");
+
+    // Halfway through a two-minute job.
+    assert_eq!(
+        how_long_in_words(how_much_longer(50, 100, 60.0).unwrap()),
+        "about a minute"
+    );
+}
+
+/// One page in, the estimate is one measurement times a hundred and
+/// ninety-nine — and the first page is the slowest, because the fonts are
+/// loading and the renderer is warming up. A number arrived at that way is
+/// wrong by a factor of several and then visibly collapses, which is worse
+/// than no number at all.
+#[test]
+fn it_says_nothing_until_it_has_something_to_go_on() {
+    assert_eq!(
+        how_much_longer(1, 200, 8.0),
+        None,
+        "one page is not evidence"
+    );
+    assert_eq!(how_much_longer(2, 200, 8.0), None);
+    assert!(how_much_longer(ENOUGH_PAGES, 200, 8.0).is_some());
+
+    // Nor for a job that is over in a moment: being told half a second is left
+    // is worse than being told nothing.
+    assert_eq!(how_much_longer(10, 20, 0.4), None);
+    assert!(how_much_longer(10, 20, ENOUGH_SECONDS).is_some());
+
+    // And not at the end, where the honest answer is that it has finished.
+    assert_eq!(how_much_longer(200, 200, 400.0), None);
+    assert_eq!(how_much_longer(201, 200, 400.0), None);
+    // A page count nobody knows yet is not a division by zero.
+    assert_eq!(how_much_longer(0, 0, 10.0), None);
+    assert_eq!(how_much_longer(5, 0, 10.0), None);
+}
+
+/// Rounded coarsely on purpose: an estimate that reads "4 minutes 37 seconds"
+/// and then "4 minutes 31 seconds" invites somebody to watch it tick, which is
+/// what it exists to stop them doing.
+#[test]
+fn how_much_longer_is_said_coarsely_enough_not_to_be_watched() {
+    assert_eq!(how_long_in_words(0.0), "a few seconds");
+    assert_eq!(how_long_in_words(9.0), "a few seconds");
+    assert_eq!(how_long_in_words(31.0), "about 30 seconds");
+    assert_eq!(how_long_in_words(60.0), "about a minute");
+    assert_eq!(how_long_in_words(300.0), "about 5 minutes");
+    assert_eq!(how_long_in_words(3600.0), "about an hour");
+    assert_eq!(how_long_in_words(7200.0), "about 2 hours");
+
+    // Never "about 1 minutes", and never "about 0 minutes" — the two ways a
+    // rounded figure reads as a bug.
+    for seconds in 0..4000 {
+        let said = how_long_in_words(seconds as f64);
+        assert!(!said.contains("about 1 minutes"), "{seconds}: {said}");
+        assert!(!said.contains("about 0"), "{seconds}: {said}");
+        assert!(!said.contains("about 1 hours"), "{seconds}: {said}");
+    }
+
+    // Nonsense in gives words out rather than "NaN".
+    assert_eq!(how_long_in_words(f64::NAN), "a moment");
+    assert_eq!(how_long_in_words(-5.0), "a moment");
+    assert_eq!(how_much_longer(10, 20, f64::NAN), None);
+    assert_eq!(how_much_longer(10, 20, f64::INFINITY), None);
+}
+
+/// It only ever goes down, given a steady rate — a figure that went up as the
+/// job progressed would be read as the job getting further away.
+#[test]
+fn a_steady_run_counts_down_rather_than_wandering() {
+    let each = 2.5;
+    let mut last = f64::MAX;
+    for done in ENOUGH_PAGES..200 {
+        let left = how_much_longer(done, 200, done as f64 * each).expect("a steady run");
+        assert!(
+            left < last,
+            "at page {done} it went up: {left} after {last}"
+        );
+        last = left;
+    }
+    assert!(
+        last <= each * 1.001,
+        "the last page should be nearly done: {last}"
+    );
+}

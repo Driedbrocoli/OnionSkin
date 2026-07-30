@@ -34,10 +34,19 @@ pub struct State {
     placements: Vec<Placement>,
     /// Stop after this many, to try one before committing the stack.
     first: usize,
+    /// Which sheet to start at, after a jam. Zero means the first.
+    from_sheet: usize,
+    /// The name of a series whose numbering carries on between runs, or empty
+    /// for a run that starts at one every time — a hundred certificates are
+    /// not a series and must not quietly become one.
+    series: String,
     size_pt: f64,
     /// The list as last read, so the headings can be shown and checked.
     columns: Vec<String>,
     rows: usize,
+    /// What the list says about rows that appear more than once, worked out
+    /// when it is read rather than every frame.
+    repeats: Option<String>,
     /// Why the list would not open, where it would not.
     trouble: Option<String>,
     /// Which list the columns above belong to, so a new one is re-read.
@@ -64,9 +73,12 @@ impl Default for State {
                 text: "{name}".into(),
             }],
             first: 0,
+            from_sheet: 0,
+            series: String::new(),
             size_pt: 11.0,
             columns: Vec::new(),
             rows: 0,
+            repeats: None,
             trouble: None,
             read_from: None,
         }
@@ -112,12 +124,14 @@ pub fn show(state: &mut State, room: &mut Room) {
         state.read_from = state.list.clone();
         state.columns.clear();
         state.rows = 0;
+        state.repeats = None;
         state.trouble = None;
         if let Some(list) = &state.list {
             match onionskin::rows::List::read(list) {
                 Ok(read) => {
                     state.columns = read.columns.clone();
                     state.rows = read.rows.len();
+                    state.repeats = read.describe_duplicates();
                 }
                 Err(why) => state.trouble = Some(why.to_string()),
             }
@@ -230,6 +244,48 @@ pub fn show(state: &mut State, room: &mut Room) {
          against a real sheet.",
     );
 
+    room.ui.add_space(8.0);
+    room.ui.horizontal(|ui| {
+        ui.label("Carry the numbering on, as");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.series)
+                .desired_width(160.0)
+                .hint_text("nothing: start at 1"),
+        );
+        ui.label("Pick up at sheet");
+        ui.add(
+            egui::DragValue::new(&mut state.from_sheet)
+                .speed(1)
+                .range(0..=99_999),
+        );
+        if state.from_sheet == 0 {
+            ui.label("(the first)");
+        }
+    });
+    widgets::hint(
+        room.ui,
+        "A receipt book printed two hundred at a time needs the second box \
+         numbered 201 to 400, and a name here remembers where it got to. Pick \
+         up at sheet 81 after a jam at 80: those sheets keep the numbers they \
+         already had.",
+    );
+    if !state.series.trim().is_empty() {
+        if let Err(why) = onionskin::series::check_name(state.series.trim()) {
+            widgets::caution(room.ui, &why.to_string());
+        } else {
+            let next = onionskin::series::next_for(state.series.trim());
+            widgets::hint(
+                room.ui,
+                &format!("'{}' next uses {next}.", state.series.trim()),
+            );
+        }
+    }
+    // The same person on the list twice is nearly always a spreadsheet pasted
+    // onto itself: obvious in the list and invisible in the stack of paper.
+    if let Some(said) = &state.repeats {
+        widgets::caution(room.ui, said);
+    }
+
     // Named before the button, because a column that is not there is two
     // hundred wasted sheets and the check costs nothing.
     let missing = missing_columns(state);
@@ -334,6 +390,8 @@ fn make(state: &mut State, room: &mut Room) {
         .clone()
         .unwrap_or_else(|| beside(&document, "-batch"));
     let first = (state.first > 0).then_some(state.first);
+    let from_sheet = state.from_sheet.max(1);
+    let series = state.series.trim().to_string();
     let size_pt = state.size_pt;
 
     room.jobs.start("Making the sheets", move |report| {
@@ -349,6 +407,37 @@ fn make(state: &mut State, room: &mut Room) {
                     .to_string(),
             );
         }
+
+        // Where the numbering starts. Carried on from a named series, or one.
+        //
+        // Picking up after a jam is refused for a series here as it is on the
+        // command line: the counter has already moved past this run's numbers,
+        // so reading it would put the wrong ones on the paper, and the
+        // wrongness is invisible until an accountant finds it.
+        let numbering_from = if series.is_empty() {
+            1
+        } else {
+            if let Err(why) = onionskin::series::check_name(&series) {
+                return Outcome::refused(why.to_string());
+            }
+            if from_sheet > 1 {
+                return Outcome::refused(format!(
+                    "Picking up at sheet {from_sheet} of a series cannot be done from here: \
+                     the '{series}' counter has already moved past this run's numbers, and \
+                     numbering from it would put the wrong ones on the paper.\n\nOn the \
+                     command line, --start-at says which number the run began at."
+                ));
+            }
+            onionskin::series::next_for(&series)
+        };
+        let whole_run = read.rows.len();
+        if from_sheet > whole_run {
+            return Outcome::refused(format!(
+                "Picking up at sheet {from_sheet}, but there are only {whole_run} in all — \
+                 so there is nothing left to make."
+            ));
+        }
+        let read = read.starting_at(numbering_from).from_row(from_sheet);
         let wanted = first.unwrap_or(read.rows.len()).min(read.rows.len());
 
         // {today} and its relatives, beside the columns. A certificate saying
@@ -416,6 +505,30 @@ fn make(state: &mut State, room: &mut Room) {
                         "Only the first {wanted} of {} — the rest are waiting.",
                         read.rows.len()
                     ));
+                }
+                if from_sheet > 1 {
+                    notes.push(format!(
+                        "Picked up at sheet {from_sheet} of {whole_run}; the {} before it were \
+                         left alone, and these keep the numbers they already had.",
+                        from_sheet - 1
+                    ));
+                }
+                // Moved here and nowhere earlier: by what was really made,
+                // after it was made. A run that failed wrote nothing and must
+                // not burn the numbers.
+                let numbered = onionskin::series::numbers(numbering_from, wanted);
+                if !series.is_empty() {
+                    match onionskin::series::reached(&series, numbered.end) {
+                        Ok(()) => notes.push(onionskin::series::where_it_got_to(
+                            &series,
+                            numbered.clone(),
+                        )),
+                        Err(why) => notes.push(format!(
+                            "The sheets are written, but where the '{series}' series got to \
+                             could not be saved ({why}). The next run will start at \
+                             {numbering_from} again."
+                        )),
+                    }
                 }
                 Outcome::Done {
                     message: format!(
