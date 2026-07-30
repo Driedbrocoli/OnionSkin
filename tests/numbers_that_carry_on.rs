@@ -243,6 +243,32 @@ fn a_series_can_be_put_back_to_a_number() {
     expect_numbers(&shop, &after, &[12, 13]);
 }
 
+/// Putting a series back is the only way to correct a counter that has gone
+/// wrong, and it has to work when the counter is furthest from where it should
+/// be — which is exactly when somebody reaches for it. A guard against another
+/// run moving the counter must not fire here: this run is not racing anything,
+/// it is deliberately overwriting.
+#[test]
+fn putting_a_series_back_works_however_far_the_counter_has_gone() {
+    let shop = Printers::new();
+    shop.a_box("far", &["--count", "50", "--series", "receipts"]);
+
+    // The counter is at 51. Put it back to 10 and print two.
+    let (ok, said, back) = shop.a_box(
+        "back",
+        &["--count", "2", "--series", "receipts", "--start-at", "10"],
+    );
+    assert!(ok, "{said}");
+    expect_numbers(&shop, &back, &[10, 11]);
+    assert!(said.contains("put back to 10"), "{said}");
+    // It really moved, rather than reporting success and leaving it at 51.
+    assert!(said.contains("starts at 12"), "{said}");
+
+    let (ok, said, after) = shop.a_box("after", &["--count", "2", "--series", "receipts"]);
+    assert!(ok, "{said}");
+    expect_numbers(&shop, &after, &[12, 13]);
+}
+
 /// A rehearsal that moved the counter on would not be a rehearsal, and the
 /// next real run would start at 201 with nothing between 1 and 200 in
 /// existence.
@@ -312,10 +338,17 @@ fn picking_up_a_run_of_a_series_asks_which_numbers_it_had() {
     );
     assert!(!ok, "it should not guess: {said}");
     assert!(said.contains("--start-at"), "{said}");
-    // And it works the number out rather than leaving somebody to: the run of
-    // six used 1 to 6, so that is --start-at 1.
+    // It asks for the number printed on the sheet, which is the only thing
+    // that actually knows the answer.
+    assert!(said.contains("printed on the sheet"), "{said}");
+    // And it works one out rather than leaving somebody to — offered as a sum
+    // to check, because the counter moved by what the jammed run *printed*,
+    // and a run cut short by --first printed fewer than it was asked for.
     assert!(said.contains("--start-at 1"), "{said}");
-    assert!(said.contains("used 1 to 6"), "{said}");
+    assert!(
+        said.contains("made all 6"),
+        "the guess should say what it assumed: {said}"
+    );
 }
 
 /// Given the number, the resume prints exactly the sheets that jammed, and the

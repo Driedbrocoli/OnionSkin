@@ -3008,7 +3008,24 @@ fn cmd_batch(args: BatchArgs) -> Result<ExitCode, String> {
                  still starts at {first}."
             );
         } else {
-            match onionskin::series::reached_from(name, first, numbered.end) {
+            // Two ways of leaving the counter where this run finished, and the
+            // difference is whether this run took its start *from* the counter.
+            //
+            // It did: then the counter moving underneath it means another run
+            // has been numbering the same series, and writing over it would
+            // hide that two boxes of receipts may carry the same numbers.
+            //
+            // It did not, because --start-at said where to begin: then putting
+            // the counter where this run says is the whole point of the flag.
+            // It is how a counter that has gone wrong is corrected, and a
+            // guard that refused it would take away the only way to correct
+            // one — refusing hardest in exactly the case somebody reached for
+            // it.
+            let advanced = match args.start_at {
+                Some(_) => onionskin::series::reached(name, numbered.end),
+                None => onionskin::series::reached_from(name, first, numbered.end),
+            };
+            match advanced {
                 Ok(()) => println!(
                     "\n{}",
                     onionskin::series::where_it_got_to(name, numbered.clone())
