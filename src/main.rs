@@ -159,6 +159,55 @@ enum Command {
     Completions(CompletionsArgs),
     /// Choose your own defaults, so you stop typing the same flags.
     Config(ConfigArgs),
+    /// Carry this machine's setup — calibration, saved jobs, settings — to
+    /// another machine.
+    #[command(subcommand)]
+    Setup(SetupCommand),
+}
+
+/// Setting a second machine up the way the first one is.
+///
+/// Somebody measures their printer, works out where the stamp goes, and saves
+/// it as a job. That is an afternoon, and it is worth an afternoon because
+/// everything after it is two clicks. Then the next person installs Onionskin
+/// and none of it is there — so they do the afternoon again, slightly
+/// differently, and now the two machines put the stamp in two places.
+#[derive(Subcommand)]
+enum SetupCommand {
+    /// Write this machine's setup to a file.
+    Save(SetupSaveArgs),
+    /// Take a setup written on another machine.
+    Use(SetupUseArgs),
+    /// Say what is in a setup file, without taking any of it.
+    Show(SetupShowArgs),
+}
+
+#[derive(clap::Args)]
+struct SetupSaveArgs {
+    /// Where to write it.
+    file: PathBuf,
+    /// Anything worth remembering about it — which printer, which forms.
+    #[arg(long, default_value_t = String::new())]
+    note: String,
+}
+
+#[derive(clap::Args)]
+struct SetupUseArgs {
+    /// The setup file.
+    file: PathBuf,
+    /// Take the arriving one where a name is already in use here. Without it,
+    /// what this machine already has is kept.
+    #[arg(long)]
+    replace: bool,
+    /// Say what would be taken, and take nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(clap::Args)]
+struct SetupShowArgs {
+    /// The setup file.
+    file: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -2167,6 +2216,7 @@ fn run() -> Result<ExitCode, String> {
         Command::AptRepo(args) => cmd_apt_repo(args),
         Command::Completions(args) => cmd_completions(args),
         Command::Config(args) => cmd_config(args),
+        Command::Setup(command) => cmd_setup(command),
     }
 }
 
@@ -5229,7 +5279,10 @@ fn greet() {
     );
     println!(
         "{}",
-        pen.dim("  onionskin --help      all of it — there are twenty-five more commands")
+        pen.dim(&format!(
+            "  onionskin --help      all of it — there are {} more commands",
+            how_many_more_commands()
+        ))
     );
 }
 
@@ -6374,6 +6427,103 @@ fn parse_grid(spec: &str) -> Result<(usize, usize), String> {
         return Err("a sheet needs at least one column and one row of labels.".into());
     }
     Ok((columns, rows))
+}
+
+/// How many commands there are beyond the three named on the front page.
+///
+/// Counted from the command list rather than written out, because a number
+/// written out is a number that goes stale — this one said twenty-five for a
+/// long while after there were forty-nine, in the first sentence anybody reads.
+///
+/// `help` is not one of them: it is how you got here.
+fn how_many_more_commands() -> usize {
+    use clap::CommandFactory;
+    const NAMED_ON_THE_FRONT_PAGE: usize = 3;
+    Cli::command()
+        .get_subcommands()
+        .filter(|command| command.get_name() != "help")
+        .count()
+        .saturating_sub(NAMED_ON_THE_FRONT_PAGE)
+}
+
+/// Carrying a machine's setup to the next machine.
+fn cmd_setup(command: SetupCommand) -> Result<ExitCode, String> {
+    match command {
+        SetupCommand::Save(args) => {
+            let mut setup = onionskin::setup::gather();
+            setup.notes = args.note.clone();
+            if setup.is_empty() {
+                return Err(
+                    "there is nothing set up on this machine yet, so there is nothing to \
+                     carry.\n    Measure the printer with `onionskin calibrate target`, or \
+                     save a job with --save-as on a write, and then this will have something \
+                     to put in it."
+                        .into(),
+                );
+            }
+            check_writable(&args.file, "setup")?;
+            onionskin::setup::write(&args.file, &setup).map_err(|e| e.to_string())?;
+
+            println!("{}: this machine's setup.\n", args.file.display());
+            println!("{}", setup.describe());
+            println!("\n{}", onionskin::setup::WHAT_STAYS_BEHIND);
+            println!(
+                "\nOn the other machine:\n  onionskin setup use {}",
+                args.file.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+
+        SetupCommand::Show(args) => {
+            let setup = onionskin::setup::read(&args.file).map_err(|e| e.to_string())?;
+            println!("{}\n", args.file.display());
+            if !setup.notes.is_empty() {
+                println!("  note         {}", setup.notes);
+            }
+            println!("{}", setup.describe());
+            println!("\nTaking it would:");
+            let would =
+                onionskin::setup::what_it_would_do(&setup, onionskin::setup::Clashing::Keep);
+            println!("{}", would.describe());
+            println!("\n{}", onionskin::setup::WHAT_STAYS_BEHIND);
+            Ok(ExitCode::SUCCESS)
+        }
+
+        SetupCommand::Use(args) => {
+            let setup = onionskin::setup::read(&args.file).map_err(|e| e.to_string())?;
+            let clashing = if args.replace {
+                onionskin::setup::Clashing::Replace
+            } else {
+                onionskin::setup::Clashing::Keep
+            };
+
+            if args.dry_run {
+                let would = onionskin::setup::what_it_would_do(&setup, clashing);
+                println!("From {}:\n", args.file.display());
+                println!("{}", would.describe());
+                println!("\nNothing taken — --dry-run.");
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            let applied = onionskin::setup::apply(&setup, clashing);
+            println!("From {}:\n", args.file.display());
+            println!("{}", applied.describe());
+            if !applied.jobs_kept.is_empty() || !applied.profiles_kept.is_empty() {
+                println!(
+                    "\nWhat was already here was kept. --replace takes the arriving ones \
+                     instead."
+                );
+            }
+            if !applied.trouble.is_empty() {
+                eprintln!("\nSome of it did not land — see above.");
+                return Ok(ExitCode::from(1));
+            }
+            if applied.nothing_happened() {
+                println!("\nThis machine already had everything in it.");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 /// Jobs saved on this machine.
@@ -10019,6 +10169,35 @@ mod naming_tests {
         assert_eq!(short_name(Path::new("Scan_0007.pdf")), "Scan_0007.pdf");
         // Something with no name at all still says something rather than "".
         assert!(!short_name(Path::new("/")).is_empty());
+    }
+
+    /// The first sentence anybody reads claimed there were twenty-five other
+    /// commands, long after there were forty-nine. A number written out by hand
+    /// is a number that goes stale, so this one is counted — and the test is
+    /// that it tracks the real list rather than that it equals any figure,
+    /// because a figure here would go stale in exactly the same way.
+    #[test]
+    fn the_front_page_counts_the_commands_rather_than_remembering_them() {
+        use clap::CommandFactory;
+        let real = Cli::command()
+            .get_subcommands()
+            .filter(|c| c.get_name() != "help")
+            .count();
+        assert!(
+            real > 20,
+            "only {real} commands — this is reading the wrong thing"
+        );
+        assert_eq!(how_many_more_commands(), real - 3);
+
+        // And the sentence it goes into is built rather than written out.
+        // Built in two pieces so that this test's own source does not contain
+        // the phrase it is looking for.
+        let written_out = concat!("twenty-five", " more commands");
+        let source = include_str!("main.rs");
+        assert!(
+            !source.contains(written_out),
+            "the count has been written out by hand again"
+        );
     }
 
     #[test]

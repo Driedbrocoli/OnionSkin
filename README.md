@@ -2147,6 +2147,64 @@ accounts on a shared machine cannot read documents you have processed.
 Onionskin also refuses to write a delta over one of the documents it was made
 from, since that would destroy the sheet you were about to print onto.
 
+## Setting up the second machine like the first
+
+Somebody measures the printer against a target sheet, works out where the paid
+stamp goes on the invoice, and saves it as a job. That is an afternoon, and it
+is worth an afternoon, because everything after it is two clicks.
+
+Then the next person in the office installs Onionskin and none of it is there.
+So they do the afternoon again, slightly differently, and now the two machines
+put the stamp in two places. Then a third. Then the person who worked it out
+leaves, and what they knew leaves with them — it was never written down
+anywhere, because it was never in a form that could be handed over.
+
+```bash
+onionskin setup save our-office.json --note "the big Ricoh in the corner"
+```
+
+```
+our-office.json: this machine's setup.
+
+  calibration  1 — the-ricoh
+  jobs         2 — paid, received
+  settings     2 chosen: dpi=300, page=a4
+```
+
+Put that on a shared folder, a memory stick, or in an email. On every other
+machine:
+
+```bash
+onionskin setup show our-office.json   # what is in it, taking nothing
+onionskin setup use  our-office.json
+onionskin setup use  our-office.json --dry-run   # what it would take
+```
+
+**What travels is the three things that took work**: the calibration profiles,
+the saved jobs, and the settings. The calibration especially — it is a
+measurement somebody made with a scanner and a target sheet, and reproducing it
+means doing that again.
+
+**Three things deliberately stay behind**, and each is a way this could have
+done harm:
+
+| | |
+|---|---|
+| **numbered series** | A counter that reached 400 would make both machines print 401 next. Two receipts with the same number on them is the one thing a receipt book must never contain. |
+| **the history** | A record of what *that* machine printed, naming the files. It is nobody else's business. |
+| **remembered places** | Paths on somebody else's disk, which point nowhere on yours. |
+
+**A name already in use here is kept.** You may have your own job called `paid`,
+worked out for your own form; the office setup arriving and quietly replacing it
+is how somebody comes to print the wrong thing on a document they have printed
+correctly a hundred times. It says which ones it kept, and `--replace` is how
+you say you mean it.
+
+Taking the same file twice changes nothing the second time, so it is safe in a
+login script or handed round an office. And it is plain JSON — open it and read
+it, because a file that is about to change how your computer behaves is one you
+should be able to look inside.
+
 ## Your defaults, not Onionskin's
 
 Onionskin has to choose something when it is not told — four hundred dots an

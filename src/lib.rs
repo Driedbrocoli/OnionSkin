@@ -35,6 +35,7 @@ pub mod safety;
 pub mod scan;
 pub mod series;
 pub mod settings;
+pub mod setup;
 pub mod sheets;
 pub mod split;
 pub mod stock;
