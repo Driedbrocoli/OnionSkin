@@ -1078,6 +1078,32 @@ fn compare_documents(
     // delta that puts ink in the wrong place on paper that cannot be
     // reprinted, the raster delta does it, and the reason is said out loud
     // instead of the setting being quietly ignored.
+    //
+    // # Why this is a fallback and not a fix
+    //
+    // Because one transform cannot correct it, and it takes a while to see
+    // that. Writing `D` for the display-to-user matrix, the page's own content
+    // is authored in user coordinates `u` and the clip in display coordinates
+    // `p`. Whatever matrix `M` is prepended applies to both, and
+    // `conform_to_source` then applies `D` to what it produced. Landing the
+    // content where it belongs wants `D·M·u = u`, so `M = D⁻¹`; landing the
+    // clip where it belongs wants `D·M·p = D·p`, so `M = identity`. There is
+    // no `M` that does both.
+    //
+    // A real fix therefore has three parts, all in the same breath: emit the
+    // clip already mapped through `D` into user space, do not call
+    // `conform_to_source` on a vector delta at all — its pages are the
+    // source's pages and already carry the source's boxes — and conjugate the
+    // calibration by the same change of space, `D·C·D⁻¹`, because
+    // `apply_correction` turns about the centre of a page of the display size
+    // and these pages are not that.
+    //
+    // It was attempted with only the first two thirds of that. Three quarter
+    // turns came out right and the fourth was a hundred and ten millimetres
+    // out, which is exactly the shape of a partial fix in this area: mostly
+    // correct, and catastrophically wrong on paper that cannot be printed
+    // again. `a_delta_on_a_turned_or_cropped_page_lands_where_the_addition_is`
+    // measures all four turns and is what any attempt should be held to.
     let mut mode = options.mode;
     if output.is_some() && mode == Mode::Vector {
         let awkward = new_doc.frames.iter().any(|frame| !frame.is_simple());
