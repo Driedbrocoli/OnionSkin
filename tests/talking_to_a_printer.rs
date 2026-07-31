@@ -500,6 +500,18 @@ fn nothing_a_printer_can_answer_leaves_onionskin_waiting() {
             b"HTTP/1.1 799 Nonsense\r\nContent-Length: 0\r\n\r\n".to_vec(),
             false,
         ),
+        (
+            // This one used to be a panic rather than a message: the chunk
+            // walker stepped over a CRLF nobody had checked was there.
+            "a chunked reply cut off after a chunk's data",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nABCD".to_vec(),
+            false,
+        ),
+        (
+            "a chunked reply cut off inside a chunk",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n99\r\nAB".to_vec(),
+            false,
+        ),
     ];
 
     for (name, reply, then_hang) in replies {
@@ -525,4 +537,67 @@ fn nothing_a_printer_can_answer_leaves_onionskin_waiting() {
             "'{name}' came back with almost nothing to say: {said:?}"
         );
     }
+}
+
+/// The sentence that matters most in the whole program.
+///
+/// Onionskin exists to put a few words onto a sheet that has already been
+/// through the printer once. The document is written to the socket *before*
+/// the reply is read, so anything that goes wrong while reading the reply
+/// happens with the delta already in the printer's hands and, quite possibly,
+/// with the sheet moving. "It didn't work, try again" is then the most
+/// expensive advice there is: the sheet comes back with the addition on it
+/// twice, and toner does not lift.
+///
+/// So a failure on that side of the send says the job may already have been
+/// taken, and a failure on the other side — a printer that was never reached,
+/// or one that answered and refused — does not, because a warning everybody
+/// sees is a warning nobody reads.
+#[test]
+fn a_failure_after_the_delta_was_sent_says_the_sheet_may_be_printing() {
+    let dir = tempfile::tempdir().expect("a place to work");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("a home of its own");
+    let delta = a_delta(&home, dir.path());
+
+    let send_to = |address: String| -> String {
+        run_before(
+            &home,
+            &[
+                "send",
+                delta.to_str().unwrap(),
+                "--printer",
+                &format!("ipp://{address}/ipp/print"),
+            ],
+            90,
+        )
+        .expect("it should come back")
+    };
+
+    // The printer took the document and then stopped talking.
+    for reply in [
+        &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nABCD"[..],
+        &b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnope"[..],
+        &b"greetings\n"[..],
+    ] {
+        let said = send_to(a_printer_that_answers_badly(reply.to_vec(), false));
+        assert!(
+            said.contains("may be printing"),
+            "no warning about the sheet: {said}"
+        );
+        assert!(
+            said.contains("cannot be undone"),
+            "no warning about the sheet: {said}"
+        );
+    }
+
+    // The printer answered and refused. Nothing is printing, and saying it
+    // might be would train people to disregard the warning above.
+    let refused = ipp_http(200, &[(0x21, "status-code", &0x0400u32.to_be_bytes()[..])]);
+    let (address, _sent) = a_printer_that_answers(refused);
+    let said = send_to(address.trim_start_matches("ipp://").to_string());
+    assert!(
+        !said.contains("may be printing"),
+        "warned about a sheet that is not printing: {said}"
+    );
 }

@@ -50,6 +50,16 @@ pub enum PrinterError {
     },
     #[error("{0}")]
     Protocol(String),
+    /// Something went wrong *after* the request was on the wire.
+    ///
+    /// Held apart from [`PrinterError::Protocol`] because for a print job it
+    /// changes what somebody should do next. Before the body is sent, nothing
+    /// has happened and trying again is free. After it, the printer may
+    /// already have the delta and be putting toner on the sheet — and a delta
+    /// printed twice onto one sheet cannot be undone, so "try again" is
+    /// exactly the wrong advice. See [`print_bytes`], which says so.
+    #[error("{0}")]
+    Interrupted(String),
     #[error("the printer refused the job: {0}")]
     Refused(String),
     #[error("could not read {path}: {source}")]
@@ -259,15 +269,17 @@ fn http(
             source,
         })?;
 
+    // Everything from here on happens after the body has gone down the wire,
+    // so a failure no longer means "nothing happened". Reported as
+    // `Interrupted` rather than `Unreachable` or `Protocol` so that the
+    // printing path can say the one thing that matters: the job may have
+    // been taken, and sending it again may print the delta twice.
     let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .map_err(|source| PrinterError::Unreachable {
-            host: address.host.clone(),
-            source,
-        })?;
+    stream.read_to_end(&mut raw).map_err(|source| {
+        PrinterError::Interrupted(format!("could not read the reply: {source}"))
+    })?;
 
-    parse_response(&raw)
+    parse_response(&raw).map_err(|why| PrinterError::Interrupted(why.to_string()))
 }
 
 fn parse_response(raw: &[u8]) -> Result<Response, PrinterError> {
@@ -324,13 +336,19 @@ fn dechunk(body: &[u8]) -> Result<Vec<u8>, PrinterError> {
         if size == 0 {
             break;
         }
-        if at + size > body.len() {
+        // The data, and the CRLF that follows every chunk. Both, because the
+        // step below walks past both — and only the data used to be checked,
+        // so a reply cut off between the two left `at` a byte or two beyond
+        // the end of the buffer and the next turn of the loop sliced from
+        // there. That is a panic, and it is raised after the document has
+        // gone to the printer, which is the worst moment for one.
+        if at + size + 2 > body.len() {
             return Err(PrinterError::Protocol(
                 "the reply ended in the middle of a chunk".into(),
             ));
         }
         out.extend_from_slice(&body[at..at + size]);
-        at += size + 2; // the CRLF that follows every chunk
+        at += size + 2;
     }
     Ok(out)
 }
@@ -844,7 +862,8 @@ pub fn print_bytes(
         "application/ipp",
         &body,
         TIMEOUT,
-    )?;
+    )
+    .map_err(may_already_be_printing)?;
 
     if response.status == 426 || response.status == upgrade_required() {
         return Err(PrinterError::Refused(
@@ -861,7 +880,11 @@ pub fn print_bytes(
         )));
     }
 
-    let reply = parse_ipp(&response.body)?;
+    // HTTP 200 means the printer took the job. If its reply is then
+    // unreadable, the sheet is very likely already moving, so this is the
+    // same trouble as an interrupted reply and gets the same warning.
+    let reply = parse_ipp(&response.body)
+        .map_err(|why| may_already_be_printing(PrinterError::Interrupted(why.to_string())))?;
     if !reply.succeeded() {
         return Err(PrinterError::Refused(reply.complaint()));
     }
@@ -869,6 +892,27 @@ pub fn print_bytes(
         .get("job-id")
         .and_then(|v| v.as_integer())
         .unwrap_or(0))
+}
+
+/// Add the warning that belongs on a print failure and nowhere else.
+///
+/// Onionskin's whole purpose is putting a few words onto a sheet that has
+/// already been printed once. If the second pass half-happened, "it didn't
+/// work, try again" is the most expensive thing anybody could be told: the
+/// sheet comes out with the addition on it twice, and toner does not lift.
+/// So a failure that happened after the printer had the document says so, and
+/// says to go and look at the printer first.
+///
+/// Only [`PrinterError::Interrupted`] is touched. A printer that was never
+/// reached, or that answered and refused, is a different and much happier
+/// situation, and burdening it with this would teach people to ignore it.
+fn may_already_be_printing(why: PrinterError) -> PrinterError {
+    match why {
+        PrinterError::Interrupted(what) => PrinterError::Interrupted(format!(
+            "{what}\n    The printer already had the delta when this went wrong, so it may be printing now.\n    Look at the printer before sending it again — the same delta printed twice onto one sheet cannot be undone."
+        )),
+        other => other,
+    }
 }
 
 /// HTTP 426, spelled out so the comparison above reads as what it means.

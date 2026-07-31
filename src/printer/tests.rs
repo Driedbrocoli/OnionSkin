@@ -238,6 +238,38 @@ fn a_chunk_header_with_an_extension_on_it_is_still_read() {
     assert_eq!(parse_response(raw).unwrap().body, b"hello");
 }
 
+/// A printer that stops talking mid-sentence, which happens when it is
+/// switched off, unplugged, or simply out of its depth.
+///
+/// This used to panic. `at += size + 2` walked over the CRLF that follows a
+/// chunk without checking it was there, so a reply cut off after the data left
+/// `at` past the end of the buffer and the next turn of the loop sliced from
+/// beyond it. The moment it happened is what makes it matter: the document has
+/// already gone to the printer by the time the reply is read, so the sheet is
+/// moving — and from the window, a panic is reported as "Nothing was written",
+/// which is exactly the sentence that gets somebody to feed the sheet again.
+#[test]
+fn a_chunked_reply_that_stops_in_the_middle_is_reported_rather_than_crashing() {
+    for cut in [
+        // After the chunk's data, with neither byte of the CRLF.
+        &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nABCD"[..],
+        // With one byte of it.
+        &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nABCD\r"[..],
+        // In the middle of the data.
+        &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nABCD"[..],
+        // After a whole chunk, with the next one's header started.
+        &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nABCD\r\n5\r\nab"[..],
+    ] {
+        let why = parse_response(cut).expect_err("a truncated reply is not a reply");
+        let said = why.to_string();
+        assert!(said.contains("middle of a chunk"), "{said}");
+    }
+
+    // The well-formed one still works, so the bound did not eat the last chunk.
+    let whole = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nABCD\r\n0\r\n\r\n";
+    assert_eq!(parse_response(whole).unwrap().body, b"ABCD");
+}
+
 #[test]
 fn a_reply_that_is_not_http_is_reported() {
     assert!(parse_response(b"garbage with no headers").is_err());
