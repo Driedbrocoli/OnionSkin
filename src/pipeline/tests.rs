@@ -1026,3 +1026,198 @@ fn a_steady_run_counts_down_rather_than_wandering() {
         "the last page should be nearly done: {last}"
     );
 }
+
+/// Two pages a tenth of a millimetre apart, which is inside the tolerance and
+/// outside the raster.
+///
+/// A page is rasterised by rounding each axis on its own, so two sizes that
+/// `matches` calls the same — it allows half a millimetre, nearly eight pixels
+/// at 400 dpi — can still come back as buffers of different widths. The old
+/// page was then handed to the comparison at the *new* page's dimensions.
+///
+/// Narrower, and it indexed past the end: a panic on the worker thread, which
+/// closed the channel, which left the collecting loop spinning on a queue that
+/// could never empty. No message, no delta, one core at a hundred per cent
+/// until somebody noticed.
+///
+/// Wider, and every row was read a pixel further left than the one above, so
+/// within a few rows the old ink no longer sat under the new. Every glyph
+/// reported as both added and removed — a delta carrying the whole original
+/// document, printed back on top of itself.
+///
+/// Both directions are here, because they fail differently and only one of
+/// them is loud.
+#[test]
+fn two_pages_a_hair_apart_are_still_compared_rather_than_hanging() {
+    let Ok(_) = render::engine() else { return };
+    let dir = tempfile::tempdir().unwrap();
+
+    // 209.7 mm against 210.0 mm: three tenths of a millimetre, which `matches`
+    // accepts and the raster does not — 1238 pixels against 1240 at the 150
+    // dpi this test runs at. At the 400 dpi a real run uses, the tolerance is
+    // nearly eight pixels wide and pairs like this are commonplace.
+    let narrow = PageSize::new(209.7, 297.0);
+    let wide = PageSize::new(210.0, 297.0);
+    assert!(
+        narrow.matches(&wide, 0.5),
+        "the fixture is outside the tolerance"
+    );
+    assert_ne!(
+        narrow.px_size(150.0).0,
+        wide.px_size(150.0).0,
+        "the fixture does not actually produce different rasters"
+    );
+
+    let sized = |name: &str, size: PageSize, lines: &[(&str, f64)]| -> PathBuf {
+        let path = dir.path().join(name);
+        let placed: Vec<PlacedLine> = lines.iter().map(|(t, y)| line(t, *y)).collect();
+        write_delta(&path, &[size], &[placed], "test", None).unwrap();
+        path
+    };
+
+    for (what, before_size, after_size) in [
+        ("the old page narrower", narrow, wide),
+        ("the old page wider", wide, narrow),
+    ] {
+        let before = sized(
+            &format!("before-{what}.pdf"),
+            before_size,
+            &[("Report", 40.0)],
+        );
+        let after = sized(
+            &format!("after-{what}.pdf"),
+            after_size,
+            &[("Report", 40.0), ("APPROVED", 120.0)],
+        );
+        let out = dir.path().join(format!("delta-{what}.pdf"));
+
+        // It comes back at all, which is the assertion the hang would fail.
+        let outcome =
+            run(&before, &after, &out, &quick()).unwrap_or_else(|why| panic!("{what}: {why}"));
+
+        // And it carries the one addition rather than the whole page.
+        //
+        // Measured against the same pair at one size, because "how much ink"
+        // means nothing on its own — the sheet here is two words, so a delta
+        // holding one of them is already half of it. What tells the two apart
+        // is that a page read a pixel out of step reports *every* glyph as
+        // new, so its delta is markedly heavier than the control's.
+        let control_before = sized(&format!("cbefore-{what}.pdf"), wide, &[("Report", 40.0)]);
+        let control_after = sized(
+            &format!("cafter-{what}.pdf"),
+            wide,
+            &[("Report", 40.0), ("APPROVED", 120.0)],
+        );
+        let control_out = dir.path().join(format!("cdelta-{what}.pdf"));
+        run(&control_before, &control_after, &control_out, &quick())
+            .expect("the control is two pages of the same size");
+
+        // Counted off the delta itself rather than off the report, because the
+        // question is what will land on the paper.
+        let ink = |path: &Path| -> usize {
+            let engine = render::engine().expect("a renderer");
+            let page = engine.open(path).unwrap().render_gray(0, 150.0).unwrap();
+            page.gray.iter().filter(|value| **value < 128).count()
+        };
+        let (theirs, ours) = (ink(&control_out), ink(&out));
+        assert!(theirs > 0, "{what}: the control delta is blank");
+        assert!(ours > 0, "{what}: the delta is blank");
+        assert!(
+            ours < theirs * 2,
+            "{what}: the delta has {ours} dark pixels where the same edit on two \
+             pages of one size has {theirs} — so the old page was not lined up \
+             under the new one, and every glyph counted as added"
+        );
+        let _ = &outcome;
+    }
+}
+
+/// A cropped page cannot take a vector delta, and saying so beats printing one.
+///
+/// The vector delta keeps the edited document's own page objects, so its pages
+/// are in that document's user space — while the regions it clips to are
+/// measured in display space, the page cropped and turned. On an ordinary page
+/// those are the same thing. On a page whose CropBox does not start at the
+/// origin they are not, and the clip band lands somewhere else on the sheet:
+/// whatever text falls inside it is what gets printed, and the addition is
+/// clipped away. A phone scan has a crop box, and so does anything that has
+/// been through a PDF editor.
+///
+/// So the raster delta does it instead — it never re-prints existing ink — and
+/// the swap is reported rather than the setting quietly ignored.
+#[test]
+fn a_cropped_page_gets_the_raster_delta_and_is_told_so() {
+    let Ok(_) = render::engine() else { return };
+    let dir = tempfile::tempdir().unwrap();
+
+    let cropped = |name: &str, lines: &[(&str, f64)]| -> PathBuf {
+        let plain = a_pdf(dir.path(), &format!("plain-{name}"), lines);
+        let mut pdf = lopdf::Document::load(&plain).unwrap();
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        // A crop box a little in from every edge, which is what a scanner or a
+        // PDF editor leaves behind.
+        pdf.get_dictionary_mut(page_id).unwrap().set(
+            "CropBox",
+            lopdf::Object::Array(vec![
+                36.0f32.into(),
+                36.0f32.into(),
+                559.0f32.into(),
+                806.0f32.into(),
+            ]),
+        );
+        let path = dir.path().join(name);
+        pdf.save(&path).unwrap();
+        path
+    };
+
+    let before = cropped("before.pdf", &[("Report", 40.0)]);
+    let after = cropped("after.pdf", &[("Report", 40.0), ("Approved", 150.0)]);
+    let output = dir.path().join("delta.pdf");
+
+    let outcome = run(
+        &before,
+        &after,
+        &output,
+        &Options {
+            mode: Mode::Vector,
+            ..quick()
+        },
+    )
+    .unwrap();
+
+    // What was actually used, not what was asked for — a report that says
+    // "vector" about a raster delta is a lie somebody would act on.
+    assert_eq!(outcome.mode, Mode::Raster);
+    let said: String = outcome
+        .checks
+        .iter()
+        .map(|check| check.format())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(said.contains("raster delta was used"), "{said}");
+    assert!(said.contains("cropped or turned"), "{said}");
+
+    // An ordinary page still gets what it asked for.
+    let plain_before = a_pdf(dir.path(), "pb.pdf", &[("Report", 40.0)]);
+    let plain_after = a_pdf(
+        dir.path(),
+        "pa.pdf",
+        &[("Report", 40.0), ("Approved", 150.0)],
+    );
+    let plain_out = dir.path().join("plain-delta.pdf");
+    let plain = run(
+        &plain_before,
+        &plain_after,
+        &plain_out,
+        &Options {
+            mode: Mode::Vector,
+            ..quick()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        plain.mode,
+        Mode::Vector,
+        "an ordinary page lost its vector delta"
+    );
+}

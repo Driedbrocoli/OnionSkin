@@ -732,3 +732,64 @@ fn the_delta_gains_ink_when_the_changes_are_outlined() {
         "outlined delta is not bigger: {marked_size} vs {plain_size}"
     );
 }
+
+/// An annotation on a page the edit changed must not travel with the delta.
+///
+/// An annotation is drawn from its own appearance stream, beside the page's
+/// content, so the `W n` clip that holds the page's own ink to the changed
+/// regions has no hold on it at all. `blank_page` strips them for exactly this
+/// reason — and the pages that *did* gain something kept theirs.
+///
+/// A filled form field, a highlight, a signature, an approval stamp: all
+/// routine on the kind of document somebody overprints. Every one of them was
+/// laid down again at full size on a sheet that already had it, offset by the
+/// printer's registration error. Toner does not come off paper.
+#[test]
+fn an_annotation_does_not_travel_with_a_vector_delta() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_pdf(dir.path(), "edited.pdf", &[("Approved", 100.0)]);
+
+    // A stamp of the kind that is already on the sheet.
+    let mut doc = lopdf::Document::load(&source).unwrap();
+    let page_id = doc.get_pages().into_values().next().unwrap();
+    let stamp = doc.add_object(lopdf::dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Stamp",
+        "Rect" => vec![20.into(), 20.into(), 200.into(), 80.into()],
+        "P" => page_id,
+    });
+    doc.get_dictionary_mut(page_id)
+        .unwrap()
+        .set("Annots", vec![Object::Reference(stamp)]);
+    let stamped = dir.path().join("stamped.pdf");
+    doc.save(&stamped).unwrap();
+    // The fixture really does carry one, or this test proves nothing.
+    let before = lopdf::Document::load(&stamped).unwrap();
+    let first = before.get_pages().into_values().next().unwrap();
+    assert!(before.get_dictionary(first).unwrap().get(b"Annots").is_ok());
+
+    let mut diff = a_diff(&[], 40, 56);
+    diff.added_regions = vec![Region {
+        x0_mm: 25.0,
+        y0_mm: 95.0,
+        x1_mm: 60.0,
+        y1_mm: 101.0,
+        ink_mm2: 20.0,
+        px_bbox: (0, 0, 1, 1),
+    }];
+
+    let out = dir.path().join("vector.pdf");
+    build_vector_delta(&[diff], &stamped, &out, 0.3, "test", None).unwrap();
+
+    let pdf = lopdf::Document::load(&out).unwrap();
+    let page_id = *pdf.get_pages().values().next().unwrap();
+    assert!(
+        pdf.get_dictionary(page_id).unwrap().get(b"Annots").is_err(),
+        "the stamp came with the delta, and no clip can hold it back"
+    );
+    // The page's own clipped content is still there — this removes an
+    // annotation, not the addition.
+    let content = pdf.get_page_content(page_id).unwrap();
+    let text = String::from_utf8_lossy(&content);
+    assert!(text.contains("W n"), "the clip went too: {text}");
+}

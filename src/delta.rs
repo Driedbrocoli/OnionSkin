@@ -523,6 +523,27 @@ pub fn build_vector_delta(
             after.push_str(&outline.ops(&diff.added_regions, diff.size));
         }
         wrap_content(&mut source, page_id, &clip, &after)?;
+        // An annotation is drawn from its own appearance stream, beside the
+        // page's content and after it — so the `W n` above has no hold on it
+        // whatsoever. `blank_page` removes them for exactly this reason, and
+        // the pages that *did* gain something kept theirs.
+        //
+        // What that costs: a document with a filled form field, a highlight, a
+        // signature or an approval stamp on it — all routine on the kind of
+        // document people overprint — had that whole annotation laid down
+        // again, at full size, on a sheet that already had it, offset by
+        // whatever the printer's registration error is. Toner does not come
+        // off paper.
+        //
+        // Removing them can lose an annotation the edit genuinely added, and
+        // that is the better way to be wrong: a missing addition is visible
+        // the moment somebody looks at the sheet, and ink printed over ink is
+        // not undoable. Anybody who needs a new annotation carried across has
+        // the raster delta, which draws the page as it renders and so includes
+        // them.
+        if let Ok(page) = source.get_dictionary_mut(page_id) {
+            page.remove(b"Annots");
+        }
         keep.push(page_id);
     }
 

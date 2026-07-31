@@ -188,14 +188,35 @@ pub fn home_dir() -> PathBuf {
 /// that redirects the home directory takes this first.
 #[cfg(test)]
 pub(crate) fn borrow_home(path: &Path) -> std::sync::MutexGuard<'static, ()> {
-    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A test that panicked while holding it left it poisoned; the next test
-    // sets the variable itself anyway, so there is nothing to recover.
-    let held = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let held = borrow_the_environment();
     std::env::set_var("ONIONSKIN_HOME", path);
     held
+}
+
+/// Hold every other test off while this one changes the environment.
+///
+/// The environment is one table for the whole process, and tests run beside
+/// one another — so a test that writes one variable can be read half-written
+/// by a test that never touches it, and a test that restores a variable can
+/// undo a change another test is still relying on.
+///
+/// One lock for the whole crate, not one per subject. There used to be two —
+/// this one for the home directory and another in `install`'s tests for the
+/// shell and the profile — and a third place that changed `PATH` with no lock
+/// at all. Two locks are no lock: `install` held its own while reading `HOME`
+/// and `SHELL`, and anything holding the other could still move the ground
+/// under it. What that looked like was `the_path_line_is_added_once_and_taken_
+/// out_cleanly` failing about once in a few hundred runs and passing every
+/// time it was looked at on its own.
+#[cfg(test)]
+pub(crate) fn borrow_the_environment() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that panicked while holding it left it poisoned; every test that
+    // takes it sets what it needs on the way in, so there is nothing to
+    // recover.
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The user's home directory, without a crate to ask.

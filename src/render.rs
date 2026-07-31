@@ -654,7 +654,7 @@ pub struct RenderedPage {
 }
 
 /// Crop or pad an image to exactly `width` × `height`, paper-side out.
-fn fit(
+pub(crate) fn fit(
     source: &[u8],
     from: (usize, usize),
     to: (usize, usize),

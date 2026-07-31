@@ -49,6 +49,9 @@ fn the_binary_is_named_for_the_platform() {
 
 #[test]
 fn a_directory_already_on_the_path_is_recognised() {
+    // This one changes `PATH`, which `install` reads — so it takes the lock
+    // too, rather than being the one place that quietly does not.
+    let _orderly = one_at_a_time();
     let dir = tempfile::tempdir().unwrap();
     assert!(!on_path(dir.path()), "a fresh directory is not on the path");
 
@@ -231,12 +234,11 @@ fn every_line_written_is_marked_so_it_can_be_found_again() {
 /// — not every time, which is worse than never: a suite that fails one run in
 /// twenty teaches people to run it again rather than to read it.
 fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-    static ORDERLY: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A test that panicked while holding it left it poisoned. Every test here
-    // sets what it needs on the way in, so there is nothing to recover.
-    ORDERLY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    // The crate's one environment lock, not a second one of this module's own.
+    // Two locks are no lock: this module held its own while reading `HOME` and
+    // `SHELL`, and anything holding the other could still change them
+    // underneath it. See `calibrate::borrow_the_environment`.
+    crate::calibrate::borrow_the_environment()
 }
 
 #[test]

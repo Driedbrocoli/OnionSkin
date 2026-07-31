@@ -1063,11 +1063,42 @@ fn compare_documents(
     // it had to say applies to both and is worth saying once.
     checks.extend(opening_notes(&original_notes, &edited_notes));
 
+    // The vector delta keeps the edited document's own page objects, so its
+    // pages are already in that document's user space — while the regions it
+    // clips to are measured in display space, which is the page cropped and
+    // turned. On an ordinary page those are the same thing. On a page with a
+    // CropBox that does not start at the origin, or a /Rotate, they are not,
+    // and the clip band lands somewhere else entirely: whatever existing text
+    // falls inside it is what gets printed, and the actual addition is clipped
+    // away. `conform_to_source` then makes it worse, by transforming pages
+    // that were never in display space a second time.
+    //
+    // A cropped page is not exotic — a phone scan has one, and so does
+    // anything that has been through a PDF editor. So rather than write a
+    // delta that puts ink in the wrong place on paper that cannot be
+    // reprinted, the raster delta does it, and the reason is said out loud
+    // instead of the setting being quietly ignored.
+    let mut mode = options.mode;
+    if output.is_some() && mode == Mode::Vector {
+        let awkward = new_doc.frames.iter().any(|frame| !frame.is_simple());
+        if awkward {
+            mode = Mode::Raster;
+            checks.push(safety::Check::note(
+                "vector-needs-a-plain-page",
+                "The raster delta was used rather than the vector one.".to_string(),
+                "This document's pages are cropped or turned, and the vector delta \
+                 cannot place ink on those correctly. The raster delta can, and \
+                 never re-prints existing ink."
+                    .to_string(),
+            ));
+        }
+    }
+
     let staged = work.join("delta-raw.pdf");
     // No delta wanted, no delta built. Cropping every changed region out of
     // the page, giving it a soft mask and compressing it is most of the work
     // on a long document, and `examine` throws the result away unread.
-    let mut raster = match (output, options.mode) {
+    let mut raster = match (output, mode) {
         (Some(_), Mode::Raster) => {
             Some(RasterDeltaWriter::new(&staged, "Onionskin delta")?.marking(options.outline))
         }
@@ -1125,8 +1156,15 @@ fn compare_documents(
                    raster: &mut Option<RasterDeltaWriter>,
                    waiting: &mut std::collections::VecDeque<(Vec<u8>, Vec<u8>, usize)>|
      -> Result<(), PipelineError> {
+        // The worker is gone and no comparison is coming. Returning quietly
+        // here left `waiting` un-popped, and the loop below is
+        // `while !waiting.is_empty()` — so the program spun on a queue that
+        // could never empty, at a hundred per cent of a core, saying nothing.
+        // A thread that died is a fault to report, not a page to wait for.
         let Ok(mut diff) = done.recv() else {
-            return Ok(());
+            return Err(PipelineError::Invalid(
+                "the page comparison stopped before it finished. Nothing was written.".into(),
+            ));
         };
         let (rgb, old_gray, width) = waiting.pop_front().expect("a page was compared unasked");
         if let Some(writer) = raster.as_mut() {
@@ -1159,7 +1197,41 @@ fn compare_documents(
         let old_gray: Vec<u8> = if index < old_doc.len() {
             let old_page = old_doc.render_gray(index, options.dpi)?;
             if old_page.size.matches(&new_page.size, 0.5) {
-                old_page.gray
+                // Onto the new page's raster exactly, cropping or padding at
+                // the far edges. Everything downstream — the comparison, the
+                // proof image — reads this buffer as if it were the new page's
+                // size, and it was simply handed over at its own.
+                //
+                // The two sizes only have to agree to half a millimetre, which
+                // at 400 dpi is nearly eight pixels of slack, and each axis is
+                // rounded on its own. So a page 209.90 mm wide against one
+                // 210.0 mm wide — a tenth of a millimetre apart, and well
+                // inside the tolerance a scanned or re-saved document lands
+                // in — gives buffers of different widths.
+                //
+                // Narrower, and the comparison indexed past the end of it: a
+                // panic on the worker thread, which killed the channel, which
+                // made the collecting loop spin on an empty queue for ever. No
+                // message, no delta, one core at a hundred per cent.
+                //
+                // Wider, and every row was read a pixel further left than the
+                // one above, so within three or four rows the old ink no
+                // longer sat under the new. Every glyph on the page reported
+                // as both added and removed — either a delta carrying the
+                // whole original document, printed back on top of itself, or
+                // two hundred sheets condemned as unprintable.
+                //
+                // Cropping is the same answer `raster` already gives to the
+                // same problem: the difference is never more than a pixel or
+                // two, and resampling a thirteen-megapixel page to move it one
+                // pixel costs a fifth of the run and blurs every glyph edge.
+                crate::render::fit(
+                    &old_page.gray,
+                    (old_page.width, old_page.height),
+                    (new_page.width, new_page.height),
+                    1,
+                    255,
+                )
             } else {
                 // The size change is already a blocker; diffing two different
                 // geometries would only add noise on top of it.
@@ -1170,6 +1242,11 @@ fn compare_documents(
             // everything on it is new.
             blank_gray(new_page.size, options.dpi)
         };
+        debug_assert_eq!(
+            old_gray.len(),
+            new_page.width * new_page.height,
+            "the old page was handed on at a size nothing downstream expects"
+        );
 
         // The proof image draws the sheet as it was under the new ink, so it
         // needs a copy — the worker is about to be given the original. Only
@@ -1275,7 +1352,7 @@ fn compare_documents(
             pages: diffs,
             checks,
             previews,
-            mode: options.mode,
+            mode,
             dpi: options.dpi,
             profile,
             whole_page_ink_mm2: None,
@@ -1348,7 +1425,7 @@ fn compare_documents(
         pages: diffs,
         checks,
         previews,
-        mode: options.mode,
+        mode,
         dpi: options.dpi,
         profile,
         whole_page_ink_mm2: None,
