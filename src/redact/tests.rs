@@ -378,10 +378,222 @@ fn a_document_that_never_had_text_is_reported_as_such() {
     .unwrap();
     assert!(!done.had_text);
     let said = done.describe().join("\n");
-    assert!(said.contains("no text left"), "{said}");
+    // The claim that makes this feature worth anything is "there is no text
+    // left in the file, and that was checked". On a scan the check passes
+    // without having tested anything, because there was nothing to find — so
+    // making the claim here would be citing a test that never ran.
+    assert!(
+        !said.contains("no text left"),
+        "it claimed a check that proved nothing on a document with no text in it: {said}"
+    );
+    assert!(
+        said.contains("already a picture"),
+        "it did not say which case this was: {said}"
+    );
     assert!(
         !said.contains("no longer be searched"),
         "it warned about losing something that was never there: {said}"
+    );
+}
+
+/// A rectangle that lands nowhere near the page takes nothing out, and the
+/// file that would come of it is the document unchanged with a sentence
+/// attached saying the words are gone.
+///
+/// This is the shape of every serious failure in this module: not a crash, not
+/// a wrong picture, but a true-looking report over an untouched secret.
+#[test]
+fn a_rectangle_that_covers_nothing_is_refused_rather_than_reported_as_done() {
+    let Ok(_) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_document(dir.path(), "offer.pdf", &[&[("Salary: 84000", 60.0)]]);
+    let out = dir.path().join("out.pdf");
+
+    // Nine hundred millimetres across an A4 page: a slipped decimal point, or
+    // inches typed where millimetres were asked for.
+    let off = redact(
+        &source,
+        &out,
+        &[Area {
+            page: 1,
+            x_mm: 900.0,
+            y_mm: 900.0,
+            width_mm: 20.0,
+            height_mm: 10.0,
+        }],
+        QUICK,
+    );
+    assert!(
+        matches!(off, Err(RedactError::PaintedNothing { .. })),
+        "an area entirely off the page was accepted: {off:?}"
+    );
+    assert!(
+        !out.exists(),
+        "a file was written for a redaction that did nothing"
+    );
+
+    // A rectangle with no size in it does the same nothing, by a different
+    // route — `--over '40,100:0x8'`, or a drag that never moved.
+    let flat = redact(
+        &source,
+        &out,
+        &[Area {
+            page: 1,
+            x_mm: 40.0,
+            y_mm: 100.0,
+            width_mm: 0.0,
+            height_mm: 8.0,
+        }],
+        QUICK,
+    );
+    assert!(
+        matches!(flat, Err(RedactError::PaintedNothing { .. })),
+        "a rectangle with no width was accepted: {flat:?}"
+    );
+
+    // One good rectangle does not excuse a bad one. Somebody who gave three
+    // and had two land has a document with a secret still in it, and a count
+    // of three to reassure them.
+    let mixed = redact(
+        &source,
+        &out,
+        &[
+            Area {
+                page: 1,
+                x_mm: 20.0,
+                y_mm: 52.0,
+                width_mm: 120.0,
+                height_mm: 12.0,
+            },
+            Area {
+                page: 1,
+                x_mm: 900.0,
+                y_mm: 900.0,
+                width_mm: 20.0,
+                height_mm: 10.0,
+            },
+        ],
+        QUICK,
+    );
+    assert!(
+        matches!(mixed, Err(RedactError::PaintedNothing { .. })),
+        "one rectangle landing excused another that did not: {mixed:?}"
+    );
+    assert!(!out.exists());
+}
+
+/// `--dpi 0` used to draw every page as a single pixel, stretched across the
+/// sheet, and then report a successful redaction — truthfully, in that no text
+/// was left in the file, because nothing was left in the file. The document was
+/// destroyed and the program said the words were gone.
+#[test]
+fn a_resolution_no_page_can_be_drawn_at_is_refused() {
+    let Ok(_) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_document(dir.path(), "offer.pdf", &[&[("Salary: 84000", 60.0)]]);
+    let out = dir.path().join("out.pdf");
+    let area = [Area {
+        page: 1,
+        x_mm: 20.0,
+        y_mm: 52.0,
+        width_mm: 120.0,
+        height_mm: 12.0,
+    }];
+
+    for dpi in [0.0, -300.0, 1e-9, f64::NAN, f64::INFINITY, 100_000.0] {
+        let refused = redact(&source, &out, &area, dpi);
+        assert!(
+            matches!(refused, Err(RedactError::BadResolution { .. })),
+            "{dpi} was accepted as a resolution: {refused:?}"
+        );
+        assert!(!out.exists(), "{dpi} wrote a file");
+    }
+
+    // And the ordinary ones still work, or the guard has simply broken the
+    // feature instead of fixing it.
+    for dpi in [MIN_DPI, 150.0, DEFAULT_DPI] {
+        let done = redact(&source, &out, &area, dpi);
+        assert!(done.is_ok(), "{dpi} was refused: {done:?}");
+        std::fs::remove_file(&out).unwrap();
+    }
+}
+
+/// The half-finished copy goes to a name that can be worked out from the name
+/// somebody typed, so on a shared directory it is a place another person can
+/// get to first. Writing through whatever is sitting there is how a program
+/// with no privileges of its own does somebody else's overwriting for them.
+#[test]
+fn something_already_at_the_working_name_is_refused_rather_than_written_through() {
+    let Ok(_) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_document(dir.path(), "offer.pdf", &[&[("Salary: 84000", 60.0)]]);
+    let out = dir.path().join("out.pdf");
+    let working = out.with_extension("onionskin-redacting");
+    let precious = dir.path().join("somebody-elses-notes.txt");
+    std::fs::write(&precious, b"do not lose this").unwrap();
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&precious, &working).unwrap();
+    #[cfg(not(unix))]
+    std::fs::write(&working, b"in the way").unwrap();
+
+    let refused = redact(
+        &source,
+        &out,
+        &[Area {
+            page: 1,
+            x_mm: 20.0,
+            y_mm: 52.0,
+            width_mm: 120.0,
+            height_mm: 12.0,
+        }],
+        QUICK,
+    );
+    assert!(
+        matches!(refused, Err(RedactError::WorkingFileInTheWay { .. })),
+        "it wrote to a path something was already at: {refused:?}"
+    );
+    assert_eq!(
+        std::fs::read(&precious).unwrap(),
+        b"do not lose this",
+        "the file the working name pointed at was written over"
+    );
+}
+
+/// A hundred-page report at 300 dpi is two and a half gigabytes of raw pixels
+/// held at once. Being killed part way through is not a failure anybody can act
+/// on; a sentence naming a resolution that would work is.
+#[test]
+fn a_document_too_big_to_draw_all_at_once_says_so_before_trying() {
+    let a4 = vec![A4; 200];
+    assert!(weigh(&a4, 100.0).is_ok(), "200 pages at 100 dpi should fit");
+
+    let Err(RedactError::TooMuchAtOnce {
+        gigabytes,
+        suggestion,
+        then,
+        ..
+    }) = weigh(&a4, DEFAULT_DPI)
+    else {
+        panic!("200 A4 pages at 300 dpi was not noticed as too much")
+    };
+    assert!(
+        gigabytes > 4.0,
+        "it thinks 200 pages at 300 dpi is {gigabytes} GB"
+    );
+    // The advice has to be advice: a resolution that is lower, still legible,
+    // and actually fits.
+    assert!((MIN_DPI..DEFAULT_DPI).contains(&suggestion), "{suggestion}");
+    assert!(then < 1.6, "the resolution it suggested needs {then} GB");
+    assert!(
+        weigh(&a4, suggestion).is_ok(),
+        "it suggested {suggestion} dpi, which it would itself refuse"
     );
 }
 

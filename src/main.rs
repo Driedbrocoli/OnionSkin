@@ -1364,7 +1364,8 @@ struct RedactArgs {
     /// How much beyond the words to take out, in millimetres.
     #[arg(long, default_value_t = 1.0)]
     pad: f64,
-    /// Which page, counted from 1.
+    /// Which page the --over rectangles are on, counted from 1. --word looks
+    /// at every page and does not use this.
     #[arg(long, default_value_t = 1)]
     page: usize,
     /// Where to write the redacted copy.

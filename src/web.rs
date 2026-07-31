@@ -104,6 +104,10 @@ fn handle(mut stream: TcpStream) {
                 "text/plain; charset=utf-8",
                 message.as_bytes(),
             );
+            // And then, having given up on reading, hang up properly — or the
+            // explanation just written is thrown away before anybody sees it.
+            // See `hang_up`.
+            hang_up(&stream);
             return;
         }
     };
@@ -240,6 +244,54 @@ const MOST_HEADER: u64 = 16 * 1024;
 
 /// How many headers are read before the request is treated as nonsense.
 const MOST_HEADERS: usize = 100;
+
+/// Close a connection whose request was cut short, without losing the reply.
+///
+/// The limits above exist so that a client sending a request line with no end
+/// to it is stopped rather than swallowed. That works — and then the reply
+/// explaining it vanished about one time in five.
+///
+/// The reason is not in this program. Closing a socket that still has unread
+/// bytes waiting on it is, to the operating system, an abort rather than a
+/// goodbye: it sends a reset instead of a normal end-of-stream, and a reset
+/// tells the other end to throw away everything it has not yet handed to the
+/// application — including the `400` written a moment earlier. The client is
+/// left with a connection that died mid-sentence and no idea why, which is the
+/// exact position the limit was added to get somebody out of.
+///
+/// So: say the reply is finished, then read off what is still arriving until it
+/// stops. Both halves are bounded, because "read whatever they send" is the
+/// thing being defended against, not a way to defend against it. What has been
+/// read is discarded — this is only about letting the connection end tidily.
+fn hang_up(stream: &TcpStream) {
+    use std::net::Shutdown;
+
+    // The reply is complete. A client waiting to read now sees the end of it
+    // and closes, which is what makes the draining below finish at once in the
+    // ordinary case.
+    let _ = stream.shutdown(Shutdown::Write);
+
+    let _ = stream.set_read_timeout(Some(GOODBYE));
+    let mut left = MOST_LEFTOVER;
+    let mut bin = [0u8; 8 * 1024];
+    let mut reader = stream;
+    while left > 0 {
+        match Read::read(&mut reader, &mut bin) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => left = left.saturating_sub(read),
+        }
+    }
+}
+
+/// How long to wait for the other end to stop talking, once the reply is sent.
+///
+/// Long enough for bytes already on their way to arrive, short enough that a
+/// client which says nothing and never closes is not holding a thread. The
+/// connection is finished either way; this only decides how tidily.
+const GOODBYE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How much of a refused request to read off before hanging up regardless.
+const MOST_LEFTOVER: usize = 256 * 1024;
 
 /// How long a connection may take to say anything.
 ///

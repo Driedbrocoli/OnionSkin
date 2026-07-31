@@ -88,7 +88,81 @@ pub enum RedactError {
          in Onionskin — please report it. Nothing has been redacted."
     )]
     TextSurvived { page: usize },
+    #[error(
+        "the file just written could not be read back to check it, so it has been \
+         deleted rather than handed over: {why}\n    Nothing has been redacted. A \
+         redaction nobody can check is not a redaction."
+    )]
+    Unchecked { why: String },
+    #[error(
+        "{dpi} is not a resolution a page can be drawn at. Give a number between \
+         {MIN_DPI:.0} and {MAX_DPI:.0} — {DEFAULT_DPI:.0} is what a printer is asked for."
+    )]
+    BadResolution { dpi: f64 },
+    #[error(
+        "the rectangle {width_mm}x{height_mm} mm at {x_mm},{y_mm} covers nothing on \
+         page {page}, which is {page_width_mm:.0}x{page_height_mm:.0} mm — so nothing \
+         would have been taken out of it.\n    Nothing has been written. A document \
+         that has had nothing taken out of it must not be handed over as though it \
+         had."
+    )]
+    PaintedNothing {
+        page: usize,
+        x_mm: f64,
+        y_mm: f64,
+        width_mm: f64,
+        height_mm: f64,
+        page_width_mm: f64,
+        page_height_mm: f64,
+    },
+    #[error(
+        "drawing {pages} page(s) at {dpi:.0} dpi needs about {gigabytes:.1} GB of \
+         memory at once, which is more than this is willing to ask for.\n    Try a \
+         lower resolution: --dpi {suggestion:.0} would need about {then:.1} GB and is \
+         still readable."
+    )]
+    TooMuchAtOnce {
+        pages: usize,
+        dpi: f64,
+        gigabytes: f64,
+        suggestion: f64,
+        then: f64,
+    },
+    #[error(
+        "there is already something at {path}, which is where the half-finished copy \
+         has to go.\n    Move it out of the way, or choose another name for the \
+         redacted copy."
+    )]
+    WorkingFileInTheWay { path: PathBuf },
 }
+
+/// The coarsest and finest a page may be drawn.
+///
+/// Not taste, and not a guess. Below about fifty dots to the inch ordinary type
+/// stops being letters and becomes grey texture, and a redacted copy nobody can
+/// read is not a copy of the document. Above about twelve hundred the file grows
+/// without anything appearing on paper that was not there at eight hundred.
+///
+/// The reason there is a *floor* at all, rather than a shrug, is that
+/// [`PageSize::px_size`] clamps to one pixel: `--dpi 0` used to draw every page
+/// of the document as a single pixel stretched across the sheet, write it, check
+/// it, find no text in it — because there was nothing in it at all — and report
+/// a successful redaction. The document was destroyed and the program said the
+/// words were gone. They were. So was everything else.
+pub const MIN_DPI: f64 = 50.0;
+pub const MAX_DPI: f64 = 1200.0;
+
+/// How much memory the drawn pages may take between them, in bytes.
+///
+/// Every page is held as raw colour samples until the whole document is written,
+/// and an A4 page at 300 dpi is 2480 x 3508 x 3 bytes — twenty-six megabytes.
+/// A hundred-page report is two and a half gigabytes, which on an ordinary
+/// machine is not a slow redaction, it is the program being killed part way
+/// through with no explanation anybody could act on.
+///
+/// So the arithmetic is done first and the answer is a sentence naming a
+/// resolution that would work, rather than a process that disappears.
+const MOST_MEMORY: f64 = 1.5 * 1024.0 * 1024.0 * 1024.0;
 
 /// What a redaction did.
 #[derive(Debug, Clone, PartialEq)]
@@ -117,17 +191,38 @@ impl Redacted {
             if self.pages == 1 { "" } else { "s" },
             self.dpi
         )];
-        said.push(
-            "The words are gone from the file, not covered over: there is no text left \
-             anywhere in it, which was checked page by page before this was written."
-                .to_string(),
-        );
         if self.had_text {
+            said.push(
+                "The words are gone from the file, not covered over: there is no text \
+                 left anywhere in it, which was checked page by page before this was \
+                 written."
+                    .to_string(),
+            );
             said.push(
                 "Which also means the document can no longer be searched, and text \
                  cannot be copied out of it. Keep the original somewhere safe — this \
                  is the copy to hand over, not the copy to work from."
                     .to_string(),
+            );
+        } else {
+            // The check that makes this feature worth anything is "there is no
+            // text left in the file". On a scan there was none to begin with,
+            // so the check passes without having proved a thing, and saying
+            // "the words are gone from the file" would be leaning on a test
+            // that never ran. What is actually true is narrower and worth
+            // saying plainly: the ink under those rectangles is not in the
+            // copy, and there was never any hidden text to find.
+            said.push(
+                "This document was already a picture of a page — there was no text in \
+                 it to take out, so what has gone is the ink under the rectangles you \
+                 gave. Nothing was hidden underneath them to begin with."
+                    .to_string(),
+            );
+            said.push(
+                "Which also means nothing here was found for you: a rectangle covers \
+                 what you measured and nothing else. Look at the copy before you send \
+                 it."
+                .to_string(),
             );
         }
         said
@@ -249,6 +344,9 @@ pub fn redact(
     if areas.is_empty() {
         return Err(RedactError::NothingAsked);
     }
+    if !dpi.is_finite() || !(MIN_DPI..=MAX_DPI).contains(&dpi) {
+        return Err(RedactError::BadResolution { dpi });
+    }
     let engine = crate::render::engine()?;
     let opened = engine.open(document)?;
     let pages = opened.len();
@@ -261,7 +359,19 @@ pub fn redact(
             asked: beyond.page,
         });
     }
+    weigh(&opened.page_sizes, dpi)?;
 
+    // A rectangle with no size in it, asked before anything is drawn. Rounding
+    // outwards to whole pixels means a rectangle 0 mm wide still blackens a
+    // single column, so the pixel count after the loop would call that painted
+    // — one dot of toner where somebody expected a bar.
+    if let Some(empty) = areas.iter().find(|area| !has_size(area)) {
+        return Err(nothing_covered(empty, &opened.page_sizes));
+    }
+
+    // How much of each rectangle actually landed on paper. Counted rather than
+    // assumed, because the answer can be none — see the check after the loop.
+    let mut painted = vec![0usize; areas.len()];
     let mut had_text = false;
     let mut sizes: Vec<PageSize> = Vec::with_capacity(pages);
     let mut images: Vec<Vec<PlacedImage>> = Vec::with_capacity(pages);
@@ -270,8 +380,11 @@ pub fn redact(
             had_text = true;
         }
         let mut drawn = opened.render(index, dpi)?;
-        for area in areas.iter().filter(|area| area.page == index + 1) {
-            paint_out(&mut drawn.rgb, drawn.width, drawn.height, drawn.size, area);
+        for (at, area) in areas.iter().enumerate() {
+            if area.page != index + 1 {
+                continue;
+            }
+            painted[at] += paint_out(&mut drawn.rgb, drawn.width, drawn.height, drawn.size, area);
         }
         sizes.push(drawn.size);
         images.push(vec![PlacedImage {
@@ -289,9 +402,27 @@ pub fn redact(
         }]);
     }
 
+    // A rectangle that covered nothing. The person asked for something to be
+    // taken out, nothing was, and the file about to be written would be the
+    // document unchanged with a sentence attached saying the words were gone.
+    // Refusing here is the whole difference between this feature working and
+    // this feature being the thing that leaks the document.
+    if let Some(at) = painted.iter().position(|&pixels| pixels == 0) {
+        return Err(nothing_covered(&areas[at], &opened.page_sizes));
+    }
+
     // Written to a name of its own first, so that a document which fails the
     // check below is never at the path somebody is about to send.
+    //
+    // Refused rather than overwritten if something is already there. The name
+    // is predictable — it is `out` with the extension changed — so on a shared
+    // directory somebody else can put a symlink at it and have this program
+    // write their file for them. Nothing here needs that path badly enough to
+    // take it by force.
     let nearly = out.with_extension("onionskin-redacting");
+    if std::fs::symlink_metadata(&nearly).is_ok() {
+        return Err(RedactError::WorkingFileInTheWay { path: nearly });
+    }
     let nothing: Vec<Vec<PlacedLine>> = vec![Vec::new(); pages];
     let no_shapes: Vec<Vec<PlacedShape>> = vec![Vec::new(); pages];
     crate::pdf::write_page_content_with_pictures(
@@ -306,17 +437,24 @@ pub fn redact(
 
     // The check. Everything above is an argument that the file has no text in
     // it; this is the file being asked.
+    //
+    // Unreadable counts as failed, and says so in its own words. The point of
+    // this step is that nothing is handed over unless it has been *shown* to be
+    // clean, and a page that could not be read has not been shown to be
+    // anything — but telling somebody "text survived" when the truth is "the
+    // check would not run" sends them looking for a leak that is not there.
     let check = engine.open(&nearly);
     let verdict = match check {
-        Ok(written) => (0..written.len()).try_for_each(|index| {
-            match written.text_on(index) {
-                Ok(text) if text.trim().is_empty() => Ok(()),
-                // Unreadable counts as failed. The point of this step is that
-                // nothing is handed over unless it has been shown to be clean.
-                _ => Err(RedactError::TextSurvived { page: index + 1 }),
-            }
+        Ok(written) => (0..written.len()).try_for_each(|index| match written.text_on(index) {
+            Ok(text) if text.trim().is_empty() => Ok(()),
+            Ok(_) => Err(RedactError::TextSurvived { page: index + 1 }),
+            Err(why) => Err(RedactError::Unchecked {
+                why: format!("page {}: {why}", index + 1),
+            }),
         }),
-        Err(why) => Err(RedactError::Render(why)),
+        Err(why) => Err(RedactError::Unchecked {
+            why: why.to_string(),
+        }),
     };
     if let Err(why) = verdict {
         let _ = std::fs::remove_file(&nearly);
@@ -336,20 +474,38 @@ pub fn redact(
     })
 }
 
-/// Paint one rectangle solid black on a rendered page.
+/// Paint one rectangle solid black on a rendered page, and say how much of it
+/// landed on the page.
 ///
-/// Clamped to the page rather than refused: an area that hangs over the edge
-/// is somebody measuring generously round the thing they want gone, and
-/// refusing it would be refusing the safe mistake.
-fn paint_out(rgb: &mut [u8], width: usize, height: usize, page: PageSize, area: &Area) {
+/// Clamped rather than refused where it hangs over the edge: an area that runs
+/// off the paper is somebody measuring generously round the thing they want
+/// gone, and refusing that would be refusing the safe mistake.
+///
+/// Landing *entirely* off the paper is the other mistake, and the count is
+/// here so the caller can tell the two apart. Nothing is painted, everything
+/// looks fine, and the file that comes out is the document with the secret
+/// still in it — over a sentence saying it has been taken out.
+fn paint_out(rgb: &mut [u8], width: usize, height: usize, page: PageSize, area: &Area) -> usize {
     let px_per_pt = width as f64 / page.width_pt();
     let to_px = |mm: f64| mm_to_pt(mm) * px_per_pt;
+
+    // Anything that is not a number cannot be clamped into one: `NaN as usize`
+    // is zero, which would put the rectangle at the top-left corner of the page
+    // rather than nowhere, and painting the wrong part of somebody's document
+    // black is worse than telling them the measurement was not a measurement.
+    if [area.x_mm, area.y_mm, area.width_mm, area.height_mm]
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return 0;
+    }
 
     let x0 = to_px(area.x_mm).floor().max(0.0) as usize;
     let y0 = to_px(area.y_mm).floor().max(0.0) as usize;
     let x1 = (to_px(area.x_mm + area.width_mm).ceil().max(0.0) as usize).min(width);
     let y1 = (to_px(area.y_mm + area.height_mm).ceil().max(0.0) as usize).min(height);
 
+    let mut painted = 0;
     for y in y0..y1 {
         for x in x0..x1 {
             let at = (y * width + x) * 3;
@@ -357,9 +513,73 @@ fn paint_out(rgb: &mut [u8], width: usize, height: usize, page: PageSize, area: 
                 rgb[at] = 0;
                 rgb[at + 1] = 0;
                 rgb[at + 2] = 0;
+                painted += 1;
             }
         }
     }
+    painted
+}
+
+/// Whether a rectangle has any area at all.
+///
+/// Written the positive way round on purpose: a measurement that came out as
+/// `NaN` fails every one of these comparisons, which is the answer wanted.
+fn has_size(area: &Area) -> bool {
+    area.width_mm.is_finite()
+        && area.height_mm.is_finite()
+        && area.width_mm > 0.0
+        && area.height_mm > 0.0
+}
+
+/// The refusal for a rectangle that would take nothing out, told in terms of
+/// the page it missed so somebody can see how they missed it.
+fn nothing_covered(area: &Area, pages: &[PageSize]) -> RedactError {
+    let page = pages
+        .get(area.page.saturating_sub(1))
+        .copied()
+        .unwrap_or(PageSize {
+            width_mm: 0.0,
+            height_mm: 0.0,
+        });
+    RedactError::PaintedNothing {
+        page: area.page,
+        x_mm: area.x_mm,
+        y_mm: area.y_mm,
+        width_mm: area.width_mm,
+        height_mm: area.height_mm,
+        page_width_mm: page.width_mm,
+        page_height_mm: page.height_mm,
+    }
+}
+
+/// Whether the drawn pages would fit in memory all at once, and what to do if
+/// they would not.
+///
+/// See [`MOST_MEMORY`] for why this is asked before anything is drawn rather
+/// than discovered half way through a hundred-page report.
+fn weigh(pages: &[PageSize], dpi: f64) -> Result<(), RedactError> {
+    let bytes: f64 = pages
+        .iter()
+        .map(|size| {
+            let (width, height) = size.px_size(dpi);
+            width as f64 * height as f64 * 3.0
+        })
+        .sum();
+    if bytes <= MOST_MEMORY {
+        return Ok(());
+    }
+    // Memory goes as the square of the resolution, so the resolution that fits
+    // is the current one scaled by the square root of how far over it is.
+    // Rounded down to a round number, because "--dpi 137" reads as a machine
+    // talking to itself and "--dpi 130" reads as advice.
+    let suggestion = ((dpi * (MOST_MEMORY / bytes).sqrt() / 10.0).floor() * 10.0).max(MIN_DPI);
+    Err(RedactError::TooMuchAtOnce {
+        pages: pages.len(),
+        dpi,
+        gigabytes: bytes / 1024.0 / 1024.0 / 1024.0,
+        suggestion,
+        then: bytes * (suggestion / dpi).powi(2) / 1024.0 / 1024.0 / 1024.0,
+    })
 }
 
 #[cfg(test)]

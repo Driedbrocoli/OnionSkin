@@ -67,17 +67,27 @@ pub fn show(state: &mut State, room: &mut Room) {
     widgets::hint(
         room.ui,
         "For the copy you email or hand over. Name the words and Onionskin \
-         finds them — no measuring — or give a rectangle for anything that is \
-         not words.",
+         finds them on every page — no measuring — or give a rectangle for \
+         anything that is not words. A Word file has to be saved as a PDF \
+         first: what you redact should be the file you would have sent.",
     );
     room.ui.add_space(10.0);
 
+    // PDFs and nothing else, which is narrower than every other screen here
+    // and is meant to be.
+    //
+    // Onionskin can read a Word file, and what it produces is its own rendering
+    // of one: close, not identical, and honest about that everywhere else
+    // because everywhere else the output is ink on a sheet somebody looks at.
+    // Here the output is the copy that gets sent, and redacting an approximate
+    // re-typesetting of somebody's document is not the job they asked for. The
+    // file they redact should be the file they would otherwise have sent.
     widgets::file_row(
         room.ui,
         room.picker,
         "The document",
         &mut state.document,
-        &["pdf", "docx", "doc", "odt", "rtf"],
+        &["pdf"],
         room.dropped,
     );
     widgets::save_row(
@@ -93,6 +103,12 @@ pub fn show(state: &mut State, room: &mut Room) {
     room.ui.add_space(8.0);
     room.ui
         .label(egui::RichText::new("Words to take out").strong());
+    widgets::hint(
+        room.ui,
+        "The whole line each one sits on goes, on every page it appears — \
+         because somebody who says 'take out the salary' means the figure, not \
+         the label beside it.",
+    );
     let mut remove = None;
     for (index, words) in state.words.iter_mut().enumerate() {
         room.ui.horizontal(|ui| {
@@ -280,57 +296,77 @@ fn take_them_out(state: &mut State, room: &mut Room) {
             })
             .collect();
 
+        // The words are found in the document's OWN TEXT, on every page.
+        //
+        // Not by reading a picture of one page, which is what this did at
+        // first: it drew the chosen page, ran the letter reader over it, and
+        // marked the box round the matched token. Three things were wrong with
+        // that and each of them ends the same way. It looked at one page, so
+        // the named word stayed in the clear on all the others. It covered the
+        // token, so `Salary` blacked out the label and left `84000 per annum`
+        // beside it. And it went through an OCR pass that can misread, on a
+        // file that knows perfectly well where its own characters are.
+        //
+        // `cover` next door has no choice — it marks up a sheet that may only
+        // exist as a scan. A redaction is of a file, and "the reader did not
+        // spot that one" is not a way to leave a salary in a document somebody
+        // is about to send.
+        let mut covered = Vec::new();
         if !words.is_empty() {
-            report.saying("Reading the page…");
-            let (gray, registration) = match onionskin::recipe::draw_page(&document, page) {
-                Ok(both) => both,
-                Err(why) => return Outcome::refused(why),
+            report.saying("Looking through the document…");
+            let found = match onionskin::redact::lines_carrying(&document, &words, pad_mm) {
+                Ok(found) => found,
+                Err(why) => return Outcome::refused(why.to_string()),
             };
-            let Some((text, _)) = onionskin::typeface::read_and_match_in(&gray, &registration)
-            else {
+            if found.from_a_scan {
                 return Outcome::refused(
-                    "There is no font on this machine to read the page against, so \
-                     Onionskin cannot find the words. Install a common face — DejaVu, \
-                     Liberation — or give a rectangle instead."
+                    "This document carries no text — it is a picture of a page, so \
+                     there are no words in it to search for.\n\nGive a rectangle \
+                     instead, under 'Or a rectangle, measured'."
                         .to_string(),
                 );
-            };
-            for wanted in &words {
-                let found = onionskin::anchor::boxes_for(&text, wanted);
-                if found.is_empty() {
-                    return Outcome::refused(format!(
-                        "Nothing on the page reads as '{wanted}', so nothing would be \
-                         taken out — and a document that has had nothing taken out of \
-                         it must not be handed over as though it had.\n\nRead the page \
-                         to see what is actually there."
-                    ));
-                }
-                // Every one of them. Taking out two of something is at worst
-                // too careful; leaving one in is the failure this screen
-                // exists to prevent.
-                for rect in found {
-                    areas.push(onionskin::redact::Area {
-                        page,
-                        x_mm: rect.x_mm - pad_mm,
-                        y_mm: rect.y_mm - pad_mm,
-                        width_mm: rect.width_mm + pad_mm * 2.0,
-                        height_mm: rect.height_mm + pad_mm * 2.0,
-                    });
-                }
             }
+            if !found.missing.is_empty() {
+                return Outcome::refused(format!(
+                    "Nothing in this document reads as {}, so nothing would be taken \
+                     out — and a file that has had nothing taken out of it must not be \
+                     handed over as though it had.\n\nCheck the spelling, or give a \
+                     rectangle instead.",
+                    found
+                        .missing
+                        .iter()
+                        .map(|word| format!("'{word}'"))
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                ));
+            }
+            areas.extend(found.areas.iter().copied());
+            covered = found.covered;
         }
 
         report.saying("Drawing the pages and checking nothing is left…");
         match onionskin::redact::redact(&document, &output, &areas, dpi) {
-            Ok(done) => Outcome::Done {
-                message: format!(
-                    "{} area{} taken out. Nothing readable is left in the file.",
-                    done.areas,
-                    if done.areas == 1 { "" } else { "s" }
-                ),
-                wrote: vec![output],
-                notes: done.describe(),
-            },
+            Ok(done) => {
+                // What actually went, in the words that were on the page. The
+                // person handing this over is the only one who can tell whether
+                // it was enough, and they cannot tell that from a count.
+                let mut notes: Vec<String> = covered
+                    .iter()
+                    .map(|gone: &onionskin::redact::Covered| {
+                        format!("Page {}: {}", gone.page, gone.line)
+                    })
+                    .collect();
+                notes.extend(done.describe());
+                Outcome::Done {
+                    message: format!(
+                        "{} area{} taken out. Read the copy before you send it.",
+                        done.areas,
+                        if done.areas == 1 { "" } else { "s" }
+                    ),
+                    wrote: vec![output],
+                    notes,
+                }
+            }
             Err(why) => Outcome::refused(why.to_string()),
         }
     });

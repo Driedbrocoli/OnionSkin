@@ -1767,16 +1767,30 @@ fn a_request_with_no_end_to_it_is_refused_rather_than_swallowed() {
     // server that swallowed the lot would refuse at the end too.
     let mut endless = Vec::from(&b"GET /"[..]);
     endless.extend(std::iter::repeat(b'a').take(8 * 1024 * 1024));
-    let (response, taken) = refused(&endless);
-    assert!(
-        response.starts_with("HTTP/1.1 400"),
-        "an endless request line was not refused: {response:.120}"
-    );
-    assert!(
-        taken < endless.len(),
-        "the server read all {} bytes of a request line with no end to it",
-        endless.len()
-    );
+
+    // Several times over, and every one of them has to arrive intact.
+    //
+    // Once was not enough, and finding that out is the reason this loop is
+    // here. Giving up on a connection that still has megabytes arriving on it
+    // makes the operating system abort the connection rather than end it, and
+    // an aborted connection throws away whatever the other end has not yet
+    // read — so the `400` just written was lost about one time in five. A
+    // single pass called that a pass four times out of five, which is a test
+    // that reports the fault as intermittent instead of as a fault.
+    for attempt in 1..=6 {
+        let (response, taken) = refused(&endless);
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "attempt {attempt}: an endless request line was not refused, or the \
+             refusal was lost when the connection was dropped: {response:.120}"
+        );
+        assert!(
+            taken < endless.len(),
+            "attempt {attempt}: the server read all {} bytes of a request line with \
+             no end to it",
+            endless.len()
+        );
+    }
 
     // And a request with an absurd number of headers.
     let mut many = Vec::from(&b"GET / HTTP/1.1\r\nHost: localhost\r\n"[..]);
