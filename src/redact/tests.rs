@@ -38,6 +38,73 @@ fn a_document(dir: &Path, name: &str, per_page: &[&[(&str, f64)]]) -> PathBuf {
 /// Fast enough for a test, fine enough that the words would still be legible.
 const QUICK: f64 = 100.0;
 
+/// Fine enough that the letter reader has a chance of reading the page back.
+/// Below about 150 it starts failing on the original too, which would make a
+/// "nothing can be read" result mean nothing at all.
+const READ_BACK: f64 = 150.0;
+
+/// A rectangle of a drawn page, in pixels.
+struct Patch {
+    left: usize,
+    right: usize,
+    top: usize,
+    bottom: usize,
+}
+
+impl Patch {
+    fn pixels(&self) -> usize {
+        (self.right + 1 - self.left) * (self.bottom + 1 - self.top)
+    }
+
+    /// How many pixels of this rectangle are dark on some other drawing of the
+    /// same page at the same size.
+    fn dark_in(&self, drawn: &crate::render::GrayPage) -> usize {
+        (self.top..=self.bottom.min(drawn.height.saturating_sub(1)))
+            .flat_map(|y| {
+                (self.left..=self.right.min(drawn.width.saturating_sub(1))).map(move |x| (x, y))
+            })
+            .filter(|(x, y)| drawn.gray[y * drawn.width + x] < 128)
+            .count()
+    }
+}
+
+/// The rectangle actually covered by ink, within a band of the page.
+///
+/// Measured off the drawing rather than read out of the file, so that a test
+/// which asks "is this covered" is not asking the same code that decided where
+/// to cover. Returns nothing if the band is blank.
+fn ink_between(
+    drawn: &crate::render::GrayPage,
+    top_mm: f64,
+    bottom_mm: f64,
+    dpi: f64,
+) -> Option<Patch> {
+    let px_per_mm = dpi / 25.4;
+    let from = ((top_mm * px_per_mm) as usize).min(drawn.height);
+    let to = ((bottom_mm * px_per_mm) as usize).min(drawn.height);
+    let (mut left, mut right) = (usize::MAX, 0usize);
+    let (mut top, mut bottom) = (usize::MAX, 0usize);
+    for y in from..to {
+        for x in 0..drawn.width {
+            if drawn.gray[y * drawn.width + x] < 128 {
+                left = left.min(x);
+                right = right.max(x);
+                top = top.min(y);
+                bottom = bottom.max(y);
+            }
+        }
+    }
+    if left == usize::MAX {
+        return None;
+    }
+    Some(Patch {
+        left,
+        right,
+        top,
+        bottom,
+    })
+}
+
 /// The whole point, stated as the question somebody would ask.
 ///
 /// A black rectangle drawn over a salary in a PDF hides nothing: the number is
@@ -436,4 +503,184 @@ fn is_a_font(object: &lopdf::Object) -> bool {
         .and_then(|kind| kind.as_name().ok())
         .map(|name| name == b"Font")
         .unwrap_or(false)
+}
+
+/// The test that should have been written first.
+///
+/// Everything else here asks whether the file has a *text object* in it. That
+/// is necessary and it is nowhere near sufficient, and believing otherwise is
+/// how the first version of this shipped: it flattened the document perfectly,
+/// proved there was no extractable text three different ways, and left the
+/// salary sitting on the page in plain sight because the black bar had been
+/// put over the word "Salary" and not over the figure. Every test passed.
+///
+/// So this one asks the only question that matters — can the secret still be
+/// read off the page? — and asks it with the letter reader this program
+/// already carries, which is the same thing anybody else's OCR would do.
+#[test]
+fn the_secret_cannot_be_read_off_the_redacted_page() {
+    let Ok(_) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_document(
+        dir.path(),
+        "offer.pdf",
+        &[
+            &[("Dear Ms Okonkwo", 40.0), ("Salary: 84000 per annum", 60.0)],
+            &[("Salary: 84000 again on page two", 60.0)],
+        ],
+    );
+
+    let found = lines_carrying(&source, &["Salary".to_string()], 1.0).expect("it should search");
+    assert!(
+        found.missing.is_empty(),
+        "the phrase was not found at all: {found:?}"
+    );
+    // Every page, which is the first thing the old version got wrong.
+    assert_eq!(
+        found.areas.len(),
+        2,
+        "only {} of 2 pages were marked: {:?}",
+        found.areas.len(),
+        found.covered
+    );
+    // And the whole line, which is the second — the figure is what a person
+    // means by "the salary", not the label.
+    for gone in &found.covered {
+        assert!(
+            gone.line.contains("84000"),
+            "the line covered is {:?}, which does not include the figure",
+            gone.line
+        );
+    }
+
+    // Where that line's ink actually sits on each original page, measured off
+    // the drawn page. Deliberately not taken from the text layer: the search
+    // above reads the text layer too, and a test whose oracle is the thing
+    // under test agrees with it whether it is right or wrong. Ink on paper is
+    // the one measurement here that cannot collude.
+    let engine = crate::render::engine().unwrap();
+    let opened = engine.open(&source).unwrap();
+    let before: Vec<Patch> = (0..2)
+        .map(|index| {
+            let drawn = opened.render_gray(index, READ_BACK).unwrap();
+            let patch = ink_between(&drawn, 50.0, 70.0, READ_BACK)
+                .expect("the fixture should have a salary line on every page");
+            // A safeguard on the safeguard: this must be a line of type, not a
+            // speck. Six letters of `Salary` at 14 pt is about 20 mm, and the
+            // whole line is nearer 60 — so anything under 40 mm means the ink
+            // measurement itself has gone wrong, and every assertion below it
+            // would be measuring the wrong thing quietly.
+            let width_mm = (patch.right + 1 - patch.left) as f64 * 25.4 / READ_BACK;
+            assert!(
+                width_mm > 40.0,
+                "page {}: the salary line measures {width_mm:.1} mm of ink, which is \
+                 not a line of type — the fixture or the reader has changed",
+                index + 1
+            );
+            patch
+        })
+        .collect();
+
+    let out = dir.path().join("to-send.pdf");
+    redact(&source, &out, &found.areas, READ_BACK).expect("it should redact");
+
+    // The bar covers all of that ink, not the six letters of the label. This is
+    // the check the reported line text cannot make: `covered.line` says what
+    // was *matched*, and the version of this that shipped matched the whole
+    // line and then painted a rectangle the width of the word.
+    let after = engine.open(&out).unwrap();
+    for (index, patch) in before.iter().enumerate() {
+        let drawn = after.render_gray(index, READ_BACK).unwrap();
+        let dark = patch.dark_in(&drawn);
+        let whole = patch.pixels() as f64;
+        assert!(
+            dark as f64 > whole * 0.95,
+            "page {}: the line's ink covers pixels {}..{} across and {}..{} down, and \
+             only {dark} of {whole:.0} of them came back black — the rest of the line \
+             is still on the page",
+            index + 1,
+            patch.left,
+            patch.right,
+            patch.top,
+            patch.bottom
+        );
+    }
+
+    // Now read the result back the way anybody would.
+    for page in 1..=2 {
+        let Ok((gray, registration)) = crate::recipe::draw_page(&out, page) else {
+            panic!("page {page} of the redacted file would not draw")
+        };
+        let Some((text, _)) = crate::typeface::read_and_match_in(&gray, &registration) else {
+            // No font on this machine to read against; the check cannot be
+            // made, and passing silently would be the same mistake again.
+            return;
+        };
+        let readable: String = text
+            .lines
+            .iter()
+            .flat_map(|line| line.words.iter().map(|word| word.text_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !readable.contains("84000"),
+            "page {page} of the redacted document still reads: {readable:?}"
+        );
+        assert!(
+            !readable.to_lowercase().contains("salary"),
+            "page {page} of the redacted document still reads: {readable:?}"
+        );
+    }
+}
+
+/// A document with no text layer cannot be searched, and saying "nothing
+/// matched" would be a lie that ends in a document handed over unredacted.
+#[test]
+fn a_scan_says_it_has_no_words_to_search_rather_than_finding_none() {
+    let Ok(_) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_document(dir.path(), "words.pdf", &[&[("Salary: 84000", 60.0)]]);
+    // Flattening it is exactly what makes a scan: a picture of a page.
+    let scanned = dir.path().join("scanned.pdf");
+    redact(
+        &source,
+        &scanned,
+        &[Area {
+            page: 1,
+            x_mm: 0.0,
+            y_mm: 0.0,
+            width_mm: 1.0,
+            height_mm: 1.0,
+        }],
+        100.0,
+    )
+    .unwrap();
+
+    let found = lines_carrying(&scanned, &["Salary".to_string()], 1.0).unwrap();
+    assert!(
+        found.from_a_scan,
+        "a picture of a page was searched as text"
+    );
+    assert!(found.areas.is_empty());
+}
+
+/// A phrase that is nowhere is not "nothing to do" — it is a document about to
+/// be handed over with the thing still in it.
+#[test]
+fn a_phrase_that_appears_nowhere_is_reported_rather_than_ignored() {
+    let Ok(_) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = a_document(dir.path(), "one.pdf", &[&[("Salary: 84000", 60.0)]]);
+    let found =
+        lines_carrying(&source, &["Salary".to_string(), "Pension".to_string()], 1.0).unwrap();
+    assert_eq!(found.missing, vec!["Pension".to_string()]);
+    // The one that was found is still found — a missing phrase does not
+    // silently discard the rest of the search.
+    assert_eq!(found.areas.len(), 1);
 }

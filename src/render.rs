@@ -640,6 +640,25 @@ pub struct GrayPage {
     pub gray: Vec<u8>,
 }
 
+/// A line of the document's own text, and where it sits on the paper.
+///
+/// From the document's text layer rather than from a picture of it. That is the
+/// difference between knowing where a word is and guessing: reading a rendered
+/// page back is template matching, it mistakes an O for a 0, and a word it
+/// misses is a word nobody hears about. A PDF that carries text knows exactly
+/// where every character is, to a fraction of a point.
+///
+/// Millimetres from the top-left of the paper, which is how the rest of
+/// Onionskin measures a page — PDF itself counts from the bottom-left.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextLine {
+    pub text: String,
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub width_mm: f64,
+    pub height_mm: f64,
+}
+
 /// One page turned into pixels.
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
@@ -988,6 +1007,86 @@ impl Document<'_> {
             .get(index as u16)
             .map_err(|e| RenderError::Pdfium(format!("page {} : {e}", index + 1)))?;
         Ok(page.text().map(|text| text.all()).unwrap_or_default())
+    }
+
+    /// The lines of text on a page, with where each one sits.
+    ///
+    /// Characters are grouped into lines by the row they sit on, because that
+    /// is the unit a person means. Somebody who says "take out the salary" is
+    /// pointing at `Salary: 84000 per annum`, not at the six letters of the
+    /// label — and a redaction that removes the label and leaves the figure is
+    /// worse than none, because it looks like it worked.
+    ///
+    /// Empty when the document carries no text layer at all, which is what a
+    /// scan is. The caller has to decide what to do about that rather than
+    /// being handed an empty list that looks like "nothing matched".
+    pub fn lines_on(&self, index: usize) -> Result<Vec<TextLine>, RenderError> {
+        let page = self
+            .pdf
+            .pages()
+            .get(index as u16)
+            .map_err(|e| RenderError::Pdfium(format!("page {} : {e}", index + 1)))?;
+        let paper = self
+            .page_sizes
+            .get(index)
+            .copied()
+            .unwrap_or(PageSize::new(210.0, 297.0));
+        let Ok(text) = page.text() else {
+            return Ok(Vec::new());
+        };
+
+        // (top, bottom, left, right, characters) — kept in points until the
+        // end, because that is what pdfium answers in and converting once is
+        // one place to be wrong rather than four.
+        let mut lines: Vec<(f64, f64, f64, f64, String)> = Vec::new();
+        for character in text.chars().iter() {
+            let Some(letter) = character.unicode_char() else {
+                continue;
+            };
+            let Ok(box_of) = character.loose_bounds() else {
+                continue;
+            };
+            let (top, bottom) = (box_of.top().value as f64, box_of.bottom().value as f64);
+            let (left, right) = (box_of.left().value as f64, box_of.right().value as f64);
+            if letter == '\r' || letter == '\n' {
+                continue;
+            }
+
+            // The same line if the two overlap vertically by more than half of
+            // the shorter one. Comparing baselines exactly would split a line
+            // wherever a capital or a subscript sits, and comparing them
+            // loosely would join a heading to the paragraph under it.
+            let height = (top - bottom).abs();
+            let joined = lines.iter_mut().find(|(t, b, _, _, _)| {
+                let overlap = t.min(top) - b.max(bottom);
+                let shorter = height.min((*t - *b).abs());
+                shorter > 0.0 && overlap > shorter * 0.5
+            });
+            match joined {
+                Some((t, b, l, r, said)) => {
+                    *t = t.max(top);
+                    *b = b.min(bottom);
+                    *l = l.min(left);
+                    *r = r.max(right);
+                    said.push(letter);
+                }
+                None => lines.push((top, bottom, left, right, letter.to_string())),
+            }
+        }
+
+        let height_pt = paper.height_pt();
+        Ok(lines
+            .into_iter()
+            .map(|(top, bottom, left, right, said)| TextLine {
+                text: said,
+                x_mm: crate::geometry::pt_to_mm(left),
+                // PDF counts up from the bottom of the paper and Onionskin
+                // counts down from the top.
+                y_mm: crate::geometry::pt_to_mm(height_pt - top),
+                width_mm: crate::geometry::pt_to_mm(right - left),
+                height_mm: crate::geometry::pt_to_mm(top - bottom),
+            })
+            .collect())
     }
 
     /// The same page, in grey only.

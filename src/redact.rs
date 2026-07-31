@@ -134,6 +134,107 @@ impl Redacted {
     }
 }
 
+/// Every line of the document that carries one of these phrases, and where.
+///
+/// The heart of `--word`, and the place the first version of this got wrong in
+/// two ways at once. It read *one* page and marked up that page's coordinates,
+/// so on anything longer than a sheet the named words survived in the clear on
+/// every other page — while the program said they were gone. And it covered
+/// the matched token rather than the line, so `--word Salary` blacked out the
+/// label and left `84000 per annum` perfectly legible. Its own worked example
+/// in the README leaked the number it was demonstrating the removal of.
+///
+/// So: every page, and the whole line. Covering the line is deliberate rather
+/// than convenient. Somebody who says "take out the salary" is pointing at
+/// `Salary: 84000 per annum`, not at six letters of label, and in a redaction
+/// the two mistakes are not equal — covering more than was needed is a
+/// document with a longer black bar on it, and covering less is the disclosure
+/// this whole feature exists to prevent.
+///
+/// The lines come from the document's own text layer, so this is not a guess:
+/// a PDF that carries text knows where every character is. A scan carries
+/// none, which is why [`Found::from_a_scan`] exists and says so.
+pub fn lines_carrying(
+    document: &Path,
+    wanted: &[String],
+    pad_mm: f64,
+) -> Result<Found, RedactError> {
+    let engine = crate::render::engine()?;
+    let opened = engine.open(document)?;
+    let mut found = Found::default();
+    let mut any_text = false;
+
+    for index in 0..opened.len() {
+        let lines = opened.lines_on(index)?;
+        if !lines.is_empty() {
+            any_text = true;
+        }
+        for line in &lines {
+            let haystack = squash(&line.text);
+            for phrase in wanted {
+                let needle = squash(phrase);
+                if needle.is_empty() || !haystack.contains(&needle) {
+                    continue;
+                }
+                found.areas.push(Area {
+                    page: index + 1,
+                    x_mm: line.x_mm - pad_mm,
+                    y_mm: line.y_mm - pad_mm,
+                    width_mm: line.width_mm + pad_mm * 2.0,
+                    height_mm: line.height_mm + pad_mm * 2.0,
+                });
+                found.covered.push(Covered {
+                    page: index + 1,
+                    phrase: phrase.clone(),
+                    line: line.text.trim().to_string(),
+                });
+            }
+        }
+    }
+
+    found.missing = wanted
+        .iter()
+        .filter(|phrase| !found.covered.iter().any(|c| &&c.phrase == phrase))
+        .cloned()
+        .collect();
+    found.from_a_scan = !any_text;
+    Ok(found)
+}
+
+/// Compared with the spaces and the case taken out, so `Salary :` on the page
+/// still answers to `salary`. Nothing cleverer: a redaction that matches
+/// approximately is a redaction that covers the wrong line.
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// What a search for phrases turned up.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Found {
+    pub areas: Vec<Area>,
+    /// One per line covered, so the person can be shown what went.
+    pub covered: Vec<Covered>,
+    /// Phrases that appear nowhere. Handing back a document that has had
+    /// nothing taken out of it, as though it had, is the worst outcome here —
+    /// so this is reported and the caller refuses.
+    pub missing: Vec<String>,
+    /// The document carries no text at all, so nothing could be searched.
+    /// A scan is a picture of words, and `--over` is the only honest way to
+    /// redact one.
+    pub from_a_scan: bool,
+}
+
+/// One line that will be taken out, in the words that are on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Covered {
+    pub page: usize,
+    pub phrase: String,
+    pub line: String,
+}
+
 /// Take the areas out of the document, and write what is left.
 ///
 /// The file is written only if it comes back clean. See the module comment for

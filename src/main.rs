@@ -1420,30 +1420,45 @@ fn cmd_redact(args: RedactArgs) -> Result<ExitCode, String> {
             height_mm,
         });
     }
-    // Named words are found by reading the page, the same way `cover` and the
-    // anchors do.
+    // Named words are found in the document's OWN TEXT, on every page — not
+    // by reading a picture of one page, which is what this did at first and
+    // which left the named words in the clear on every page but the first.
+    //
+    // Deliberately not the same machinery as `cover`. `cover` marks up a
+    // *sheet*, which may only exist as a scan, so it has no choice but to read
+    // the page back letter by letter and live with what that misses. A
+    // redaction is of a file, the file knows where its own characters are, and
+    // "the reader did not spot that one" is not an acceptable way to leave a
+    // salary in a document somebody is about to send.
+    let mut covered: Vec<onionskin::redact::Covered> = Vec::new();
     if !args.word.is_empty() {
-        let page_text = read_a_document(&args.document)?;
-        for wanted in &args.word {
-            let found = onionskin::anchor::boxes_for(&page_text, wanted);
-            if found.is_empty() {
-                return Err(format!(
-                    "nothing on the page reads as '{wanted}', so there is nothing to \
-                     take out — and a file that has had nothing taken out of it must \
-                     not be handed over as though it had.\n    Run `onionskin read` to \
-                     see what is on it, or give millimetres with --over."
-                ));
-            }
-            for rect in found {
-                areas.push(onionskin::redact::Area {
-                    page: args.page,
-                    x_mm: rect.x_mm - args.pad,
-                    y_mm: rect.y_mm - args.pad,
-                    width_mm: rect.width_mm + args.pad * 2.0,
-                    height_mm: rect.height_mm + args.pad * 2.0,
-                });
-            }
+        let found = onionskin::redact::lines_carrying(&args.document, &args.word, args.pad)
+            .map_err(|e| e.to_string())?;
+        if found.from_a_scan {
+            return Err(format!(
+                "'{}' carries no text — it is a picture of a page, so there are no \
+                 words in it to search for.\n    Give millimetres instead: --over \
+                 '40,100:70x8'\n    (`onionskin read` will show you what is on it and \
+                 where.)",
+                args.document.display()
+            ));
         }
+        if !found.missing.is_empty() {
+            return Err(format!(
+                "nothing in this document reads as {} — so nothing would be taken \
+                 out, and a file that has had nothing taken out of it must not be \
+                 handed over as though it had.\n    Check the spelling, or give \
+                 millimetres with --over.",
+                found
+                    .missing
+                    .iter()
+                    .map(|w| format!("'{w}'"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ));
+        }
+        areas.extend(found.areas.iter().copied());
+        covered = found.covered;
     }
 
     let destination = rehearsal.instead_of(&output);
@@ -1451,6 +1466,16 @@ fn cmd_redact(args: RedactArgs) -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?;
 
     println!("{}: redacted.", output.display());
+    // What actually went, in the words that were on the page. Somebody handing
+    // this document over is the only one who can tell whether it is enough,
+    // and they cannot tell from a count.
+    if !covered.is_empty() {
+        println!("\n  Taken out:");
+        for gone in &covered {
+            println!("    page {}: {}", gone.page, one_line(&gone.line, 60));
+        }
+    }
+    println!();
     for said in done.describe() {
         for line in wrapped(&said, 74) {
             println!("  {line}");
@@ -1461,6 +1486,20 @@ fn cmd_redact(args: RedactArgs) -> Result<ExitCode, String> {
         open_if_asked(args.open, &output);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A line of somebody's document, cut short enough to list.
+///
+/// From the end rather than the front, unlike the history's shortening of a
+/// path: what matters in a path is the filename and what matters in a line of
+/// prose is how it begins.
+fn one_line(text: &str, most: usize) -> String {
+    let plain: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if plain.chars().count() <= most {
+        return plain;
+    }
+    let kept: String = plain.chars().take(most.saturating_sub(1)).collect();
+    format!("{kept}…")
 }
 
 /// One sheet each, from a spreadsheet.
