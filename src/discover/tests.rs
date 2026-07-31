@@ -907,31 +907,3 @@ fn looking_where_there_is_nothing_to_find_gives_an_empty_list_and_not_a_complain
         assert!(!one.host.is_empty(), "{one:#?}");
     }
 }
-
-// ---- scratch fuzz (temporary) ----
-fn frnd(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-    *state = x;
-    x
-}
-
-#[test]
-fn fuzz_discover_parse() {
-    let mut seed = 0xdeadbeefu64;
-    for round in 0..300000u32 {
-        let len = (frnd(&mut seed) % 200) as usize;
-        let mut bytes: Vec<u8> = (0..len).map(|_| frnd(&mut seed) as u8).collect();
-        if bytes.len() >= 12 && round % 2 == 0 {
-            bytes[4] = 0; bytes[5] = (frnd(&mut seed) % 3) as u8;
-            bytes[6] = 0; bytes[7] = (frnd(&mut seed) % 4) as u8;
-            bytes[8] = 0; bytes[9] = 0; bytes[10] = 0; bytes[11] = 0;
-        }
-        let records = parse(&bytes);
-        let _ = merge(assemble(&records, None));
-        for at in 0..bytes.len().min(40) {
-            let _ = read_name(&bytes, at);
-        }
-        let _ = text_pairs(&bytes);
-    }
-}
