@@ -158,9 +158,11 @@ fn the_results_page_fetches_nothing_from_anywhere_either() {
     // The same promise, and the same way of breaking it. This page is built
     // rather than written out whole, so it needs its own check.
     let page = result_page(
+        "The delta is ready",
         &["note: something worth knowing".into()],
         "abc123",
-        std::time::Duration::from_secs(3),
+        "delta.pdf",
+        Some(std::time::Duration::from_secs(3)),
     );
     let lower = page.to_lowercase();
     for forbidden in [
@@ -176,6 +178,7 @@ fn the_results_page_fetches_nothing_from_anywhere_either() {
 #[test]
 fn the_results_page_says_what_happened_and_offers_the_delta() {
     let page = result_page(
+        "The delta is ready",
         &[
             "note: Onionskin read the document itself, without a word processor.\n    \
              The lines may not break where Word breaks them."
@@ -183,7 +186,8 @@ fn the_results_page_says_what_happened_and_offers_the_delta() {
             "WARNING [page 1]: ink lands within 3 mm of the edge".into(),
         ],
         "tok123",
-        std::time::Duration::from_secs(90),
+        "delta.pdf",
+        Some(std::time::Duration::from_secs(90)),
     );
     assert!(page.contains("read the document itself"), "{page}");
     assert!(page.contains("may not break where Word"), "{page}");
@@ -191,7 +195,7 @@ fn the_results_page_says_what_happened_and_offers_the_delta() {
     // The warning is set apart from the note, or the two read alike.
     assert!(page.contains("class=\"warn\""), "{page}");
     assert!(page.contains("class=\"note\""), "{page}");
-    assert!(page.contains("href=\"/delta/tok123\""), "{page}");
+    assert!(page.contains("href=\"/get/tok123\""), "{page}");
     assert!(page.contains("Fit to page"), "{page}");
 }
 
@@ -199,31 +203,56 @@ fn the_results_page_says_what_happened_and_offers_the_delta() {
 fn a_run_worth_waiting_for_says_how_long_it_took() {
     // A browser shows nothing at all while it waits, so afterwards is the only
     // chance to say that the waiting was the work rather than a fault.
-    let quick = result_page(&["note: x".into()], "t", std::time::Duration::from_secs(8));
+    let quick = result_page(
+        "Ready",
+        &["note: x".into()],
+        "t",
+        "delta.pdf",
+        Some(std::time::Duration::from_secs(8)),
+    );
     assert!(quick.contains("Took 8 seconds"), "{quick}");
 
     let slow = result_page(
+        "Ready",
         &["note: x".into()],
         "t",
-        std::time::Duration::from_secs(180),
+        "delta.pdf",
+        Some(std::time::Duration::from_secs(180)),
     );
     assert!(slow.contains("Took 3 minutes"), "{slow}");
 
     // And says nothing at all when there was nothing to wait for.
     let instant = result_page(
+        "Ready",
         &["note: x".into()],
         "t",
-        std::time::Duration::from_millis(80),
+        "delta.pdf",
+        Some(std::time::Duration::from_millis(80)),
     );
     assert!(!instant.contains("Took"), "{instant}");
+
+    // And a page for something that was not a run at all — the backs of a
+    // sheet are placed, not rendered, so there is no time worth reporting.
+    let placed = result_page(
+        "The backs are ready",
+        &["note: x".into()],
+        "t",
+        "back.pdf",
+        None,
+    );
+    assert!(!placed.contains("Took"), "{placed}");
+    assert!(placed.contains("The backs are ready"), "{placed}");
+    assert!(placed.contains("back.pdf"), "{placed}");
 }
 
 #[test]
 fn a_document_named_with_a_bracket_cannot_close_a_tag() {
     let page = result_page(
+        "The delta is ready",
         &["note: <b>Smith & Sons</b> was opened".into()],
         "t",
-        std::time::Duration::from_millis(200),
+        "delta.pdf",
+        Some(std::time::Duration::from_millis(200)),
     );
     assert!(page.contains("&lt;b&gt;Smith &amp; Sons"), "{page}");
     assert!(!page.contains("<b>Smith"), "{page}");
@@ -231,21 +260,34 @@ fn a_document_named_with_a_bracket_cannot_close_a_tag() {
 
 #[test]
 fn a_delta_set_aside_is_collected_once_and_then_gone() {
-    let token = set_aside(b"%PDF-1.4 pretend".to_vec());
-    assert_eq!(collect(&token).as_deref(), Some(&b"%PDF-1.4 pretend"[..]));
+    let token = set_aside("delta.pdf", b"%PDF-1.4 pretend".to_vec());
+    let got = collect(&token).expect("it was just put aside");
+    assert_eq!(
+        got.0, "delta.pdf",
+        "the name to save it under came back wrong"
+    );
+    assert_eq!(got.1, b"%PDF-1.4 pretend");
     assert!(
         collect(&token).is_none(),
         "collecting twice should not hand out the same delta again"
     );
+
+    // Two files waiting at once keep their own names, which is the whole
+    // reason the name travels with the bytes: a `back.pdf` handed out as
+    // `delta.pdf` is a file somebody cannot find again.
+    let delta = set_aside("delta.pdf", b"one".to_vec());
+    let backs = set_aside("back.pdf", b"two".to_vec());
+    assert_eq!(collect(&backs).unwrap().0, "back.pdf");
+    assert_eq!(collect(&delta).unwrap().0, "delta.pdf");
 }
 
 #[test]
 fn only_the_last_few_deltas_are_kept() {
     // A person who makes deltas and never collects them should not fill the
     // machine's memory with documents.
-    let first = set_aside(vec![1u8; 16]);
+    let first = set_aside("delta.pdf", vec![1u8; 16]);
     for _ in 0..MOST_WAITING {
-        set_aside(vec![2u8; 16]);
+        set_aside("delta.pdf", vec![2u8; 16]);
     }
     assert!(
         collect(&first).is_none(),
@@ -430,18 +472,18 @@ fn two_documents_come_back_as_a_delta() {
     assert!(response.contains("The delta is ready"), "{response:.400}");
 
     let link = response
-        .split("href=\"/delta/")
+        .split("href=\"/get/")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
         .expect("the page should offer the delta");
 
-    let collected = get(&address, &format!("/delta/{link}"));
+    let collected = get(&address, &format!("/get/{link}"));
     assert!(collected.contains("application/pdf"), "{collected:.300}");
     assert!(collected.contains("filename=\"delta.pdf\""));
     assert!(collected.contains("%PDF"), "the body is not a PDF");
 
     // And only once: the file is handed over, not stored.
-    let again = get(&address, &format!("/delta/{link}"));
+    let again = get(&address, &format!("/get/{link}"));
     assert!(again.starts_with("HTTP/1.1 404"), "{again:.200}");
 }
 
@@ -1179,7 +1221,7 @@ fn the_browser_writes_on_the_back_either_way_the_paper_comes_back() {
             ("x", None, b"20"),
             ("y", None, b"40"),
         ]);
-        let (bytes, name) = the_back_of_the_sheet(&request).expect("it should write a back");
+        let (bytes, name, _said) = the_back_of_the_sheet(&request).expect("it should write a back");
         assert_eq!(name, "back.pdf");
 
         let dir = tempfile::tempdir().unwrap();
@@ -1224,7 +1266,7 @@ fn the_browser_offers_the_sheet_that_answers_which_way_up() {
         ("sheet", Some("invoice.pdf"), &a_page("Invoice")),
         ("check", None, b"yes"),
     ]);
-    let (bytes, name) = the_back_of_the_sheet(&request).expect("it should write the sheet");
+    let (bytes, name, _said) = the_back_of_the_sheet(&request).expect("it should write the sheet");
     assert_eq!(name, "which-way-up.pdf");
 
     let dir = tempfile::tempdir().unwrap();
@@ -1414,7 +1456,7 @@ fn the_feed_the_form_asks_for_is_the_one_that_is_used() {
         if !feed.is_empty() {
             parts.push(("feed", None, feed));
         }
-        let (bytes, _) = the_back_of_the_sheet(&posted(&parts)).expect("it should write");
+        let (bytes, _, _) = the_back_of_the_sheet(&posted(&parts)).expect("it should write");
         let dir = tempfile::tempdir().unwrap();
         let pdf = dir.path().join("back.pdf");
         std::fs::write(&pdf, &bytes).unwrap();
@@ -1532,4 +1574,129 @@ fn nothing_sent_down_the_socket_can_break_the_multipart_parser() {
             let _ = parse_multipart(&content_type, body);
         }
     }
+}
+
+/// A calibration profile set once has to reach the browser too.
+///
+/// The delta form's boxes used to be filled in from numbers written into the
+/// HTML, and a browser sends every box whether or not anybody touched one — so
+/// the form *was* the setting, and it overwrote this person's on every run.
+/// Somebody who set a profile so their printer's mechanical offset is
+/// corrected got an uncorrected delta whenever they used the browser instead
+/// of the terminal, and the sheet came out a couple of millimetres off, onto
+/// paper that was already printed. There is no second attempt at that.
+#[test]
+fn the_browser_uses_this_machines_saved_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = crate::calibrate::borrow_home(dir.path());
+
+    // Nothing saved: Onionskin's own answers, and a word about where the
+    // profile would come from.
+    let bare = page();
+    assert!(bare.contains("name=\"dpi\" value=\"400\""), "{bare:.0}");
+    assert!(bare.contains("name=\"profile\" value=\"\""));
+    assert!(bare.contains("config set profile"));
+
+    crate::settings::save(&crate::settings::Settings {
+        defaults: crate::settings::Defaults {
+            dpi: Some(600.0),
+            margin_mm: Some(8.0),
+            mode: Some("vector".into()),
+            profile: Some("the-big-ricoh".into()),
+            outline: Some(true),
+            ..Default::default()
+        },
+        ..crate::settings::load()
+    });
+
+    let mine = page();
+    assert!(
+        mine.contains("name=\"dpi\" value=\"600\""),
+        "dpi: {mine:.0}"
+    );
+    assert!(mine.contains("name=\"margin\" value=\"8\""), "margin");
+    assert!(
+        mine.contains("name=\"profile\" value=\"the-big-ricoh\""),
+        "profile"
+    );
+    assert!(mine.contains("value=\"vector\" selected"), "mode");
+    assert!(
+        mine.contains("name=\"outline\" value=\"yes\" checked"),
+        "outline"
+    );
+    // And it says these are theirs, so a profile being used is visible.
+    assert!(mine.contains("this machine's settings"), "{mine:.0}");
+
+    // A number written into the HTML would read as an answer. Nothing in the
+    // settings block may carry one any more.
+    let block = mine
+        .split("<legend>Settings</legend>")
+        .nth(1)
+        .and_then(|rest| rest.split("</fieldset>").next())
+        .expect("the settings block");
+    assert!(
+        !block.contains("value=\"400\"") || mine.contains("value=\"600\""),
+        "a default is written into the form: {block}"
+    );
+}
+
+/// Two files with one name are the ordinary way people keep a before and an
+/// after, and they used to destroy each other.
+///
+/// Both uploads were written into one folder under the name the browser gave,
+/// so `invoice.pdf` from Documents and `invoice.pdf` from Desktop landed on
+/// the same path. Onionskin then compared the edited document with itself and
+/// said "the two documents render identically — check you passed the edited
+/// file second, and that the edit was saved". Every clause of that was untrue,
+/// and swapping the two gave the same message, so there was no way out of it.
+#[test]
+fn two_uploads_with_the_same_name_are_still_two_documents() {
+    let before = a_page("Invoice 4471");
+    let after = a_page("Invoice 4471 PAID");
+    let request = posted(&[
+        ("original", Some("invoice.pdf"), &before),
+        ("edited", Some("invoice.pdf"), &after),
+    ]);
+    let (pdf, _said, _took) =
+        make_delta(&request).expect("two different documents with one name are still two");
+    assert!(pdf.starts_with(b"%PDF"), "no delta came back");
+}
+
+/// The backs of a sheet come with the one instruction that cannot be guessed.
+///
+/// The browser used to hand back `back.pdf` and nothing else. One-sided is the
+/// default in every print dialogue, so a delta meant for a two-sided run,
+/// printed the ordinary way, puts every back onto fresh paper and leaves the
+/// real stack untouched; printed the other way round it puts every back upside
+/// down on the real stack. Neither is recoverable and neither is guessable
+/// from a file called `back.pdf`.
+#[test]
+fn the_backs_come_with_the_instruction_that_cannot_be_guessed() {
+    let sheet = a_page("Invoice 4471");
+
+    let one_sided = posted(&[
+        ("sheet", Some("invoice.pdf"), &sheet),
+        ("text", None, b"Terms overleaf"),
+        ("x", None, b"20"),
+        ("y", None, b"40"),
+    ]);
+    let (_, name, said) = the_back_of_the_sheet(&one_sided).expect("it should place the backs");
+    assert_eq!(name, "back.pdf");
+    let all = said.join("\n");
+    // Which way the stack goes back in, and which way up Onionskin assumed.
+    assert!(all.contains("back in the tray"), "{all}");
+    assert!(all.contains("Placed for a feed of"), "{all}");
+    assert!(all.contains("--check"), "{all}");
+
+    // And the sheet that answers the which-way-up question says how to read it.
+    let checking = posted(&[
+        ("sheet", Some("invoice.pdf"), &sheet),
+        ("check", None, b"yes"),
+    ]);
+    let (_, name, said) = the_back_of_the_sheet(&checking).expect("it should draw the test sheet");
+    assert_eq!(name, "which-way-up.pdf");
+    assert!(
+        said.join("\n").contains("turn it over"),
+        "the test sheet came with no way to read it: {said:?}"
+    );
 }

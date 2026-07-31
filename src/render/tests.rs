@@ -381,15 +381,37 @@ fn a_pdf_needs_no_conversion() {
 #[test]
 fn a_file_type_nothing_can_convert_is_named() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("holiday.jpeg");
-    std::fs::write(&path, b"not a document").unwrap();
+    let path = dir.path().join("archive.zip");
+    std::fs::write(&path, b"PK\x03\x04 not a document").unwrap();
 
     let err = to_pdf(&path, dir.path(), 60).unwrap_err().to_string();
-    assert!(err.contains("unsupported file type '.jpeg'"), "{err}");
+    assert!(err.contains("unsupported file type '.zip'"), "{err}");
     assert!(
         err.contains(".docx"),
         "it should list what does work: {err}"
     );
+}
+
+/// A picture is not an unusual file, it is the other thing Onionskin is for —
+/// so it gets an answer rather than a list.
+///
+/// Somebody holding a scan of a printed sheet is this program's most ordinary
+/// visitor. Handing them sixty formats that do not include theirs reads as
+/// "your file is strange"; the truth is that there is a command for exactly
+/// what they are trying to do, and this is the only place to say so.
+#[test]
+fn a_picture_is_told_which_command_it_belongs_to() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["holiday.jpeg", "scan.png", "sheet.tif", "photo.HEIC"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"not a document").unwrap();
+        let err = to_pdf(&path, dir.path(), 60).unwrap_err().to_string();
+        assert!(err.contains("is a picture"), "{name}: {err}");
+        assert!(err.contains("onionskin add"), "{name}: {err}");
+        assert!(err.contains("onionskin read"), "{name}: {err}");
+        // And not the list, which is what made it useless.
+        assert!(!err.contains(".fodp"), "{name}: {err}");
+    }
 }
 
 #[test]

@@ -125,12 +125,13 @@ fn handle(mut stream: TcpStream) {
                 respond_file(&mut stream, &pdf, "delta.pdf")
             }
             Ok((pdf, said, took)) => {
-                let token = set_aside(pdf);
+                let token = set_aside("delta.pdf", pdf);
                 respond(
                     &mut stream,
                     200,
                     "text/html; charset=utf-8",
-                    result_page(&said, &token, took).as_bytes(),
+                    result_page("The delta is ready", &said, &token, "delta.pdf", Some(took))
+                        .as_bytes(),
                 )
             }
             Err(message) => respond(
@@ -140,15 +141,15 @@ fn handle(mut stream: TcpStream) {
                 message.as_bytes(),
             ),
         },
-        // Collecting the delta the page above offered.
-        ("GET", path) if path.starts_with("/delta/") => {
-            match collect(path.trim_start_matches("/delta/")) {
-                Some(pdf) => respond_file(&mut stream, &pdf, "delta.pdf"),
+        // Collecting the file the page above offered.
+        ("GET", path) if path.starts_with("/get/") => {
+            match collect(path.trim_start_matches("/get/")) {
+                Some((filename, pdf)) => respond_file(&mut stream, &pdf, &filename),
                 None => respond(
                     &mut stream,
                     404,
                     "text/plain; charset=utf-8",
-                    b"That delta has already been collected. Make it again from the front page.",
+                    b"That file has already been collected. Make it again from the front page.",
                 ),
             }
         }
@@ -171,7 +172,21 @@ fn handle(mut stream: TcpStream) {
             ),
         },
         ("POST", "/back") => match the_back_of_the_sheet(&request) {
-            Ok((bytes, name)) => respond_file(&mut stream, &bytes, &name),
+            // A script that asked for the file gets the file. A person gets
+            // the instructions first, because printing this one the ordinary
+            // way ruins the stack and there is no second attempt.
+            Ok((bytes, name, said)) if said.is_empty() || wants_the_file(&request) => {
+                respond_file(&mut stream, &bytes, &name)
+            }
+            Ok((bytes, name, said)) => {
+                let token = set_aside(&name, bytes);
+                respond(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    result_page("The backs are ready", &said, &token, &name, None).as_bytes(),
+                )
+            }
             Err(message) => respond(
                 &mut stream,
                 422,
@@ -379,14 +394,15 @@ fn wants_the_file(request: &Request) -> bool {
 /// No more of a hole than the rest of the server, which has no password: anyone
 /// who can reach the address can make a delta and read it. That is why it binds
 /// to this machine only, and says so loudly when told to bind elsewhere.
-static WAITING: std::sync::Mutex<Vec<(String, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+static WAITING: std::sync::Mutex<Vec<(String, String, Vec<u8>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// How many deltas may be waiting at once. Enough for somebody with three tabs
 /// open, and far short of filling memory with documents nobody came back for.
 const MOST_WAITING: usize = 4;
 
-/// Put a finished delta aside and hand back the name to collect it by.
-fn set_aside(pdf: Vec<u8>) -> String {
+/// Put a finished file aside and hand back the name to collect it by.
+fn set_aside(filename: &str, pdf: Vec<u8>) -> String {
     let token = unique_token();
     let mut waiting = WAITING
         .lock()
@@ -394,17 +410,18 @@ fn set_aside(pdf: Vec<u8>) -> String {
     while waiting.len() >= MOST_WAITING {
         waiting.remove(0);
     }
-    waiting.push((token.clone(), pdf));
+    waiting.push((token.clone(), filename.to_string(), pdf));
     token
 }
 
-/// Collect one, once.
-fn collect(token: &str) -> Option<Vec<u8>> {
+/// Collect one, once. The name it should be saved under comes with it.
+fn collect(token: &str) -> Option<(String, Vec<u8>)> {
     let mut waiting = WAITING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let at = waiting.iter().position(|(name, _)| name == token)?;
-    Some(waiting.remove(at).1)
+    let at = waiting.iter().position(|(name, _, _)| name == token)?;
+    let (_, filename, bytes) = waiting.remove(at);
+    Some((filename, bytes))
 }
 
 /// A name nothing else will pick, without a random number generator.
@@ -436,8 +453,20 @@ fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>, std::time::Dur
     };
 
     let workspace = Workspace::new(false).map_err(|e| e.to_string())?;
-    let write = |part: &Part, fallback: &str| -> Result<PathBuf, String> {
-        let path = workspace.path.join(safe_name(
+    // Each upload goes in a folder of its own, named after the box it came
+    // from. Both used to go in one folder under the name the browser gave —
+    // and picking `invoice.pdf` from Documents as the original and
+    // `invoice.pdf` from Desktop as the edited copy is the ordinary way people
+    // keep a before and an after. The second write landed on the first, so
+    // both paths were the same file holding the edited bytes, and Onionskin
+    // compared the document with itself. The answer was "the two documents
+    // render identically — check you passed the edited file second, and that
+    // the edit was saved", every clause of which was untrue, and swapping them
+    // gave the same message. A total dead end, over two files with one name.
+    let write = |part: &Part, field_name: &str, fallback: &str| -> Result<PathBuf, String> {
+        let folder = workspace.path.join(field_name);
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let path = folder.join(safe_name(
             part.filename.as_deref().unwrap_or(fallback),
             fallback,
         ));
@@ -450,37 +479,56 @@ fn make_delta(request: &Request) -> Result<(Vec<u8>, Vec<String>, std::time::Dur
         }
         Ok(path)
     };
-    let original_path = write(original, "original.pdf")?;
-    let edited_path = write(edited, "edited.pdf")?;
+    let original_path = write(original, "original", "original.pdf")?;
+    let edited_path = write(edited, "edited", "edited.pdf")?;
     let output = workspace.path.join("delta.pdf");
 
-    let number = |name: &str, fallback: f64| -> f64 {
+    // A number the form actually gave, or nothing. The distinction is the
+    // whole point: a field left empty must fall through to what this person
+    // saved, and a fallback baked in here looks exactly like an answer.
+    let number = |name: &str| -> Option<f64> {
         field(name)
             .map(|p| p.text())
-            .and_then(|t| t.parse::<f64>().ok())
+            .and_then(|t| t.trim().parse::<f64>().ok())
             .filter(|v| v.is_finite())
-            .unwrap_or(fallback)
     };
     // An unticked checkbox sends nothing at all, so its presence is the answer.
     let ticked = |name: &str| field(name).is_some();
-    let options = pipeline::Options {
-        dpi: number("dpi", pipeline::DEFAULT_DPI),
-        mode: field("mode")
-            .and_then(|p| pipeline::Mode::parse(&p.text()))
-            .unwrap_or(pipeline::Mode::Raster),
-        margin_mm: number("margin", crate::safety::DEFAULT_MARGIN_MM),
-        profile: field("profile").map(|p| p.text()).filter(|t| !t.is_empty()),
-        outline: ticked("outline").then(|| {
-            let colour = field("outline_colour")
-                .map(|p| p.text())
-                .unwrap_or_default();
-            crate::delta::Outline {
-                colour: outline_colour(&colour),
-                ..Default::default()
-            }
-        }),
-        ..Default::default()
-    };
+
+    // Onionskin's own answers, then this machine's saved ones, then whatever
+    // was typed on the form. In that order, because it is the order every
+    // other interface uses — `Defaults::over` exists to make sure the window
+    // and the command line cannot apply a setting differently, and this was
+    // the one place that never called it.
+    //
+    // What it cost: somebody sets a calibration profile once, so that every
+    // delta is corrected for their printer's mechanical offset. Made from the
+    // browser, it was not — and the sheet comes out two millimetres off, onto
+    // paper that was already printed. There is no second attempt at that.
+    let mut options = crate::settings::load()
+        .defaults
+        .over(pipeline::Options::default());
+    if let Some(dpi) = number("dpi") {
+        options.dpi = dpi;
+    }
+    if let Some(mode) = field("mode").and_then(|p| pipeline::Mode::parse(&p.text())) {
+        options.mode = mode;
+    }
+    if let Some(margin) = number("margin") {
+        options.margin_mm = margin;
+    }
+    if let Some(profile) = field("profile").map(|p| p.text()).filter(|t| !t.is_empty()) {
+        options.profile = Some(profile);
+    }
+    options.outline = ticked("outline").then(|| {
+        let colour = field("outline_colour")
+            .map(|p| p.text())
+            .unwrap_or_default();
+        crate::delta::Outline {
+            colour: outline_colour(&colour),
+            ..Default::default()
+        }
+    });
 
     let outcome = pipeline::run(&original_path, &edited_path, &output, &options)
         .map_err(|e| e.to_string())?;
@@ -690,7 +738,7 @@ fn harvest_a_stack(request: &Request) -> Result<(Vec<u8>, String), String> {
 /// and offers to print the sheet that answers it — the machine running this
 /// server is the machine with the printer on it, so the answer it remembers is
 /// the right one to remember.
-fn the_back_of_the_sheet(request: &Request) -> Result<(Vec<u8>, String), String> {
+fn the_back_of_the_sheet(request: &Request) -> Result<(Vec<u8>, String, Vec<String>), String> {
     let parts = parse_multipart(&request.content_type, &request.body)?;
     let field = |name: &str| parts.iter().find(|p| p.name == name);
 
@@ -752,7 +800,11 @@ fn the_back_of_the_sheet(request: &Request) -> Result<(Vec<u8>, String), String>
         )
         .map_err(|e| e.to_string())?;
         let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
-        return Ok((bytes, "which-way-up.pdf".to_string()));
+        return Ok((
+            bytes,
+            "which-way-up.pdf".to_string(),
+            vec![crate::duplex::HOW_TO_USE_THE_TEST_SHEET.to_string()],
+        ));
     }
 
     let pages = crate::recipe::pages_in(&path).unwrap_or(1);
@@ -820,7 +872,37 @@ fn the_back_of_the_sheet(request: &Request) -> Result<(Vec<u8>, String), String>
     crate::pdf::write_delta(&out, &sizes, &lines, "Onionskin back", None)
         .map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
-    Ok((bytes, "back.pdf".to_string()))
+
+    // The command line ends with these and the browser used to end with a
+    // download and nothing else — the one interface where the instructions
+    // vanished, and the one command where losing them costs the whole stack.
+    //
+    // Two-sided printing is not the default in any print dialogue, so a delta
+    // for the backs of a two-sided document, printed the ordinary way, puts
+    // every back onto a fresh sheet and leaves the real stack untouched.
+    // Printed the other way round, it puts every back upside down on the real
+    // stack. Neither is recoverable, and neither is guessable from a file
+    // called `back.pdf`.
+    //
+    // The one-sided case is the same shape: which way up this printer's backs
+    // come out is something Onionskin assumed, and saying which way it assumed
+    // is what lets somebody notice before the stack goes through.
+    let said = match two_sided {
+        true => vec![crate::duplex::PRINT_IT_THE_SAME_WAY.to_string()],
+        false => vec![
+            "Put the printed stack back in the tray the way you would to print the other \
+             side, and print this delta onto it."
+                .to_string(),
+            format!(
+                "Placed for a feed of '{}', which means: {}\nIf that is not what this \
+                 printer does, every sheet comes out at the wrong end of the paper. \
+                 `onionskin back <document> --check` settles it, once.",
+                feed.key(),
+                feed.describe()
+            ),
+        ],
+    };
+    Ok((bytes, "back.pdf".to_string(), said))
 }
 
 /// A barcode or a QR code on a sheet, worked out here.
@@ -1108,8 +1190,83 @@ fn convert_scan(request: &Request) -> Result<(Vec<u8>, String), String> {
 
 /// The one page. No script, no external asset, nothing to fetch.
 /// The one page this server serves.
+///
+/// The settings boxes are filled in from what this machine has saved, rather
+/// than from numbers written into the HTML. A browser sends every box on the
+/// form whether or not anybody touched it, so a form pre-filled with
+/// Onionskin's own answers *is* the setting — it overwrites the person's on
+/// every single run, and the calibration profile they set once is thrown away
+/// every time they use the browser instead of the terminal. The sheet then
+/// comes out a couple of millimetres off, onto paper that is already printed.
 fn page() -> String {
-    format!("{HEAD}{PAGE_BODY}")
+    let mine = crate::settings::load().defaults;
+    let mode = mine.mode.as_deref().unwrap_or("raster");
+    let saved = PAGE_BODY
+        .replace(
+            "{{raster}}",
+            if mode == "vector" { "" } else { " selected" },
+        )
+        .replace(
+            "{{vector}}",
+            if mode == "vector" { " selected" } else { "" },
+        )
+        .replace(
+            "{{dpi}}",
+            &trim_number(mine.dpi.unwrap_or(pipeline::DEFAULT_DPI)),
+        )
+        .replace(
+            "{{margin}}",
+            &trim_number(mine.margin_mm.unwrap_or(crate::safety::DEFAULT_MARGIN_MM)),
+        )
+        .replace(
+            "{{profile}}",
+            &escape_html(mine.profile.as_deref().unwrap_or("")),
+        )
+        .replace(
+            "{{outline}}",
+            if mine.outline.unwrap_or(false) {
+                " checked"
+            } else {
+                ""
+            },
+        )
+        .replace("{{whose}}", &whose_settings(&mine));
+    format!("{HEAD}{saved}")
+}
+
+/// A number as somebody would write it: `400`, not `400.0`.
+///
+/// The boxes it fills are `step="any"` rather than stepped to 50 and 0.5,
+/// because they now show whatever this machine has saved. A browser refuses to
+/// submit a number field whose value is off its own step grid, so a saved
+/// resolution of 437 would have left somebody with a form that would not send
+/// and no obvious reason why.
+fn trim_number(value: f64) -> String {
+    let text = format!("{value}");
+    text.strip_suffix(".0").unwrap_or(&text).to_string()
+}
+
+/// Whether the boxes above are this machine's settings or Onionskin's answers.
+///
+/// Said out loud because the difference matters and is invisible otherwise: a
+/// person who set a calibration profile has to be able to see that it is being
+/// used, and a person who did not has to be able to see that there is one to
+/// set.
+fn whose_settings(mine: &crate::settings::Defaults) -> String {
+    let set = mine.dpi.is_some()
+        || mine.margin_mm.is_some()
+        || mine.mode.is_some()
+        || mine.profile.is_some()
+        || mine.outline.is_some();
+    if set {
+        "Filled in from this machine's settings. Change them here for one run, or with \
+         <code>onionskin config set</code> for every run."
+            .to_string()
+    } else {
+        "Onionskin's own answers. <code>onionskin config set profile NAME</code> makes your \
+         printer's calibration the one used here every time."
+            .to_string()
+    }
 }
 
 /// What a finished run had to say, and a way to fetch the delta.
@@ -1118,7 +1275,13 @@ fn page() -> String {
 /// saying says it here and offers the file second. Nothing is lost by that: the
 /// warnings are the reason a person would not print the delta at all, and a
 /// file that arrives before them arrives too late to be worth reading.
-fn result_page(said: &[String], token: &str, took: std::time::Duration) -> String {
+fn result_page(
+    title: &str,
+    said: &[String],
+    token: &str,
+    filename: &str,
+    took: Option<std::time::Duration>,
+) -> String {
     let mut lines = String::new();
     for check in said {
         // A check is a first line and an indented detail under it, which is how
@@ -1141,21 +1304,18 @@ fn result_page(said: &[String], token: &str, took: std::time::Duration) -> Strin
 
     // How long it took. A browser shows nothing at all while it waits, so
     // afterwards is the only chance to say that the waiting was the work.
-    let seconds = took.as_secs_f64();
-    let spent = if seconds < 1.0 {
-        String::new()
-    } else if seconds < 60.0 {
-        format!(" Took {seconds:.0} seconds.")
-    } else {
-        format!(" Took {:.0} minutes.", seconds / 60.0)
+    let spent = match took.map(|took| took.as_secs_f64()) {
+        Some(seconds) if seconds >= 60.0 => format!(" Took {:.0} minutes.", seconds / 60.0),
+        Some(seconds) if seconds >= 1.0 => format!(" Took {seconds:.0} seconds."),
+        _ => String::new(),
     };
 
     format!(
-        "{HEAD}\n<h1>The delta is ready</h1>\n\
+        "{HEAD}\n<h1>{title}</h1>\n\
          <p class=\"lede\">Worth reading before you print it.{spent}</p>\n\
          {lines}\n\
-         <p><a class=\"get\" href=\"/delta/{token}\" download=\"delta.pdf\">\
-         Download delta.pdf</a></p>\n\
+         <p><a class=\"get\" href=\"/get/{token}\" download=\"{filename}\">\
+         Download {filename}</a></p>\n\
          <h2>Printing it</h2>\n\
          <ol>\n\
          <li>Put the printed sheet back in the tray. Check which way up, and \
@@ -1267,27 +1427,28 @@ const PAGE_BODY: &str = r#"
       <div>
         <label for="mode">Delta</label>
         <select id="mode" name="mode">
-          <option value="raster">Raster — exactly the new pixels</option>
-          <option value="vector">Vector — sharper, clips to boxes</option>
+          <option value="raster"{{raster}}>Raster — exactly the new pixels</option>
+          <option value="vector"{{vector}}>Vector — sharper, clips to boxes</option>
         </select>
       </div>
       <div>
         <label for="dpi">Resolution</label>
-        <input type="number" id="dpi" name="dpi" value="400" min="50" max="1200" step="50">
+        <input type="number" id="dpi" name="dpi" value="{{dpi}}" min="50" max="1200" step="any">
       </div>
       <div>
         <label for="margin">Edge margin (mm)</label>
-        <input type="number" id="margin" name="margin" value="5" min="0" max="40" step="0.5">
+        <input type="number" id="margin" name="margin" value="{{margin}}" min="0" max="40" step="any">
       </div>
       <div>
         <label for="profile">Printer profile
           <span class="hint">— optional</span></label>
-        <input type="text" id="profile" name="profile" placeholder="office">
+        <input type="text" id="profile" name="profile" value="{{profile}}" placeholder="office">
       </div>
     </div>
+    <p class="hint">{{whose}}</p>
     <p>
       <label for="outline">
-        <input type="checkbox" id="outline" name="outline" value="yes">
+        <input type="checkbox" id="outline" name="outline" value="yes"{{outline}}>
         Draw a box round every change, so it is easy to see
       </label>
       <span class="hint">— the box is printed onto the paper too</span>
@@ -1398,9 +1559,10 @@ const PAGE_BODY: &str = r#"
     <legend>The stack</legend>
 
     <label for="hvscan">The scanned stack
-      <span class="hint">— one PDF with a page per sheet.</span></label>
+      <span class="hint">— one PDF with a page per sheet. Most scanners will make
+      one; a folder of separate pictures will not do.</span></label>
     <input type="file" id="hvscan" name="scan"
-      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+      accept=".pdf,.docx,.doc,.odt,.rtf" required>
 
     <label for="fields">The columns, one to a line
       <span class="hint">— <code>Amount/number</code> for a column of figures,
@@ -1437,7 +1599,7 @@ const PAGE_BODY: &str = r#"
 
     <label for="bksheet">The printed document</label>
     <input type="file" id="bksheet" name="sheet"
-      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+      accept=".pdf,.docx,.doc,.odt,.rtf" required>
 
     <label for="bktext">What goes on the back</label>
     <input type="text" id="bktext" name="text"
@@ -1471,7 +1633,7 @@ const PAGE_BODY: &str = r#"
     <legend>Or find out which way up the backs come out</legend>
     <label for="cksheet">The printed document, for its paper size</label>
     <input type="file" id="cksheet" name="sheet"
-      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+      accept=".pdf,.docx,.doc,.odt,.rtf" required>
     <input type="hidden" name="check" value="yes">
   </fieldset>
   <button type="submit">Print a sheet and find out</button>
@@ -1498,7 +1660,7 @@ const PAGE_BODY: &str = r#"
 
     <label for="bcsheet">The sheet it goes on</label>
     <input type="file" id="bcsheet" name="sheet"
-      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+      accept=".pdf,.docx,.doc,.odt,.rtf" required>
 
     <label for="bctext">What it says</label>
     <input type="text" id="bctext" name="text" placeholder="INV-2024-00817"
@@ -1545,9 +1707,10 @@ const PAGE_BODY: &str = r#"
     <legend>The sheet</legend>
 
     <label for="sheet">The document
-      <span class="hint">— a PDF, or a scan of the printed page.</span></label>
+      <span class="hint">— a PDF, or a Word or OpenDocument file. Not a picture:
+      a scan is written on with <code>onionskin add</code>.</span></label>
     <input type="file" id="sheet" name="sheet"
-      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+      accept=".pdf,.docx,.doc,.odt,.rtf" required>
 
     <label for="text">The word</label>
     <input type="text" id="text" name="text" value="DRAFT" maxlength="60">

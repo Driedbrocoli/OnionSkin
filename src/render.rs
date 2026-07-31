@@ -49,6 +49,16 @@ pub const CONVERTIBLE: &[&str] = &[
 /// Formats that need no conversion at all.
 pub const PASSTHROUGH: &[&str] = &["pdf"];
 
+/// Pictures, which this does not open — named so it can say so properly.
+///
+/// A scan of a printed sheet is a picture, and it is one of the two things
+/// somebody is most likely to be holding. It has commands of its own
+/// (`onionskin add`, `onionskin read`), so being handed one here is not a
+/// mistake to be listed at, it is a signpost to be given.
+pub const PICTURES: &[&str] = &[
+    "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp", "heic", "heif",
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     /// LibreOffice could not produce a PDF from the input.
@@ -244,6 +254,20 @@ pub fn to_pdf_noting(
         return Ok((source.to_path_buf(), Opener::Already, Vec::new()));
     }
     if !CONVERTIBLE.contains(&suffix.as_str()) {
+        // A picture is not an oversight, it is a different job, and the sixty
+        // formats below do not include it — so a list of them reads as "your
+        // file is unusual" when the real answer is "there is a command for
+        // that". Somebody holding a scan of a printed sheet is Onionskin's
+        // most ordinary visitor; sending them off to read a list is the worst
+        // possible reply.
+        if PICTURES.contains(&suffix.as_str()) {
+            return Err(RenderError::Document(format!(
+                "'{}' is a picture, and this needs a document.\n    To write on a scanned \
+                 sheet, use:  onionskin add <picture> --at-mm '45,63:words'\n    To turn one \
+                 into words first, use:  onionskin read <picture>",
+                source.display()
+            )));
+        }
         let mut supported: Vec<String> = CONVERTIBLE
             .iter()
             .chain(PASSTHROUGH.iter())

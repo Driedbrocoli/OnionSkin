@@ -523,6 +523,18 @@ fn a_file_that_is_not_a_document_is_reported_cleanly() {
     let err = run(&bad, &ok, &dir.path().join("delta.pdf"), &quick())
         .unwrap_err()
         .to_string();
+    // A picture is not an unusual file here, it is the other thing Onionskin
+    // does — so what comes back names the command that does it, rather than
+    // listing sixty formats that do not include this one.
+    assert!(err.contains("is a picture"), "{err}");
+    assert!(err.contains("onionskin add"), "{err}");
+
+    // And something genuinely unopenable is still named for what it is.
+    let odd = dir.path().join("archive.zip");
+    std::fs::write(&odd, b"PK\x03\x04 not a document").unwrap();
+    let err = run(&odd, &ok, &dir.path().join("delta.pdf"), &quick())
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("unsupported file type"), "{err}");
 }
 
