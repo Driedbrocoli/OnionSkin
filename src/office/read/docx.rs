@@ -234,6 +234,7 @@ pub fn read(bytes: &[u8]) -> Result<Sheet, ReadError> {
         counters: numbering.counting(),
         setup: Setup::default(),
         notes: Vec::new(),
+        deep: 0,
     };
     let blocks = walk.body(&mut Reader::new(&decode(&document)));
 
@@ -546,13 +547,53 @@ struct Walk<'a> {
     counters: Counters<'a>,
     setup: Setup,
     notes: Vec<String>,
+    /// How far into the nesting this is, counted across every kind of it.
+    /// See [`Walk::deeper`].
+    deep: usize,
 }
+
+/// How far into a document's nesting Onionskin will follow.
+///
+/// A real document nests three or four deep — a table in a cell, a text box in
+/// a heading. Thirty-two is far past anything anybody writes and far short of
+/// anything that troubles the stack.
+const DEEP_ENOUGH: usize = 32;
 
 impl Walk<'_> {
     fn note(&mut self, text: &str) {
         if !self.notes.iter().any(|seen| seen == text) {
             self.notes.push(text.to_string());
         }
+    }
+
+    /// Step one level further in, if there is room. Say so if there is not.
+    ///
+    /// A Word file nests in a circle: a table holds paragraphs, a paragraph
+    /// holds a text box, a text box holds paragraphs. Nothing in the format
+    /// stops that going round for ever, and following it round for ever ends
+    /// the program — Rust answers an exhausted stack by killing the process
+    /// outright, without unwinding, so the window's own "something went wrong"
+    /// cannot catch it and the program simply disappears mid-sentence.
+    ///
+    /// There was a bound, on tables, and it was not one: `paragraph` started
+    /// each table at depth zero, so a file alternating `tbl` and `p` reset the
+    /// count on every turn and went as deep as it liked. Text boxes had none
+    /// at all. One count kept for the whole walk cannot be got round either
+    /// way, which is why it lives on the struct with everything else that is
+    /// read at every depth.
+    fn deeper(&mut self) -> bool {
+        if self.deep >= DEEP_ENOUGH {
+            self.note(
+                "Part of this file was nested deeper than Onionskin will follow; the innermost part of it was left out.",
+            );
+            return false;
+        }
+        self.deep += 1;
+        true
+    }
+
+    fn shallower(&mut self) {
+        self.deep = self.deep.saturating_sub(1);
     }
 
     /// Walk the body and collect what is in it.
@@ -563,8 +604,13 @@ impl Walk<'_> {
             match tag.name.as_str() {
                 "p" => blocks.append(&mut self.paragraph(reader)),
                 "tbl" => {
-                    if let Some(table) = self.table(reader, 0) {
-                        blocks.push(Block::Table(table));
+                    if self.deeper() {
+                        if let Some(table) = self.table(reader) {
+                            blocks.push(Block::Table(table));
+                        }
+                        self.shallower();
+                    } else {
+                        reader.skip_element("tbl");
                     }
                 }
                 "sectPr" => read_setup(reader, &mut self.setup),
@@ -629,13 +675,25 @@ impl Walk<'_> {
                     // page even though they are text in the file.
                     "instrText" | "delText" | "delInstrText" => reader.skip_element(&tag.name),
                     "Fallback" => reader.skip_element("Fallback"),
-                    "txbxContent" => extra.append(&mut self.text_box(reader)),
+                    "txbxContent" => {
+                        if self.deeper() {
+                            extra.append(&mut self.text_box(reader));
+                            self.shallower();
+                        } else {
+                            reader.skip_element("txbxContent");
+                        }
+                    }
                     "drawing" | "object" => {
                         self.note("Pictures were left out; only the text is set.")
                     }
                     "tbl" => {
-                        if let Some(table) = self.table(reader, 0) {
-                            extra.push(Block::Table(table));
+                        if self.deeper() {
+                            if let Some(table) = self.table(reader) {
+                                extra.push(Block::Table(table));
+                            }
+                            self.shallower();
+                        } else {
+                            reader.skip_element("tbl");
                         }
                     }
                     _ => {}
@@ -701,7 +759,7 @@ impl Walk<'_> {
     }
 
     /// A table, from a `w:tbl` that has just started.
-    fn table(&mut self, reader: &mut Reader, depth: usize) -> Option<Table> {
+    fn table(&mut self, reader: &mut Reader) -> Option<Table> {
         let mut table = Table::default();
         let mut row: Option<Row> = None;
         let mut cell: Option<Cell> = None;
@@ -737,11 +795,16 @@ impl Walk<'_> {
                             cell.blocks.extend(found);
                         }
                     }
-                    "tbl" if depth < 3 => {
-                        if let Some(inner) = self.table(reader, depth + 1) {
-                            if let Some(cell) = cell.as_mut() {
-                                cell.blocks.push(Block::Table(inner));
+                    "tbl" => {
+                        if self.deeper() {
+                            if let Some(inner) = self.table(reader) {
+                                if let Some(cell) = cell.as_mut() {
+                                    cell.blocks.push(Block::Table(inner));
+                                }
                             }
+                            self.shallower();
+                        } else {
+                            reader.skip_element("tbl");
                         }
                     }
                     _ => {}

@@ -56,6 +56,19 @@ use crate::office::xml::{decode, Event, Reader};
 const MOST_ROWS: usize = 1_048_576;
 const MOST_COLUMNS: usize = 16_384;
 
+/// The most cells this reader will build, however the file asks for them.
+///
+/// Bounding each repeat on its own is not enough, because they multiply. One
+/// row of 16,384 repeated cells, itself repeated 1,048,576 times, is inside
+/// both bounds above and asks for seventeen billion strings — from about three
+/// hundred bytes of XML. Neither limit is ever exceeded and the machine runs
+/// out of memory long before either is approached.
+///
+/// Five million is past any list anybody prints labels or letters from, and
+/// small enough that holding it is a few hundred megabytes rather than a
+/// wedged machine.
+const MOST_CELLS: usize = 5_000_000;
+
 /// One sheet of a book: its name and its cells, as they are shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sheet {
@@ -116,6 +129,14 @@ pub enum SheetError {
          spreadsheet can hold. The file is damaged."
     )]
     TooBig(usize),
+    #[error(
+        "the spreadsheet asks for more than {0} cells, which is more than \
+         Onionskin will build. An OpenDocument file says 'and now sixteen \
+         thousand more of these', and a few of those together can ask for \
+         billions of cells from a very small file. This one is damaged or was \
+         made to be awkward."
+    )]
+    TooManyCells(usize),
 }
 
 /// Whether these bytes look like a spreadsheet rather than a Word file.
@@ -707,6 +728,10 @@ fn read_ods(archive: &Archive) -> Result<Book, SheetError> {
     let mut paragraph = String::new();
     let mut depth_in_cell = 0usize;
     let mut in_paragraph = false;
+    // How many cells have been built so far, across every sheet in the book.
+    // See `MOST_CELLS`: the per-row and per-column bounds multiply, so the
+    // only one that holds is a bound on the total.
+    let mut made = 0usize;
 
     for event in reader {
         match event {
@@ -773,7 +798,12 @@ fn read_ods(archive: &Archive) -> Result<Book, SheetError> {
                     if shown.is_empty() {
                         blank_cells = blank_cells.saturating_add(repeat_cell);
                     } else {
-                        for _ in 0..blank_cells.min(MOST_COLUMNS) {
+                        let blanks = blank_cells.min(MOST_COLUMNS);
+                        made = made.saturating_add(blanks).saturating_add(repeat_cell);
+                        if made > MOST_CELLS {
+                            return Err(SheetError::TooManyCells(MOST_CELLS));
+                        }
+                        for _ in 0..blanks {
                             row.push(String::new());
                         }
                         blank_cells = 0;
@@ -786,12 +816,25 @@ fn read_ods(archive: &Archive) -> Result<Book, SheetError> {
                     if row.is_empty() {
                         blank_rows = blank_rows.saturating_add(repeat_row);
                     } else {
+                        // The row's own cells are already counted. Repeating
+                        // it costs the rest, which is where the multiplying
+                        // happens and where it has to be caught.
+                        made = made
+                            .saturating_add(repeat_row.saturating_sub(1).saturating_mul(row.len()));
+                        if made > MOST_CELLS {
+                            return Err(SheetError::TooManyCells(MOST_CELLS));
+                        }
                         for _ in 0..blank_rows.min(MOST_ROWS) {
                             rows.push(Vec::new());
                         }
                         blank_rows = 0;
                         for _ in 0..repeat_row {
                             rows.push(row.clone());
+                        }
+                        // Empty rows cost nothing in cells and are still a
+                        // vector each, so they are held to their own bound.
+                        if rows.len() > MOST_ROWS {
+                            return Err(SheetError::TooBig(rows.len()));
                         }
                     }
                     row = Vec::new();

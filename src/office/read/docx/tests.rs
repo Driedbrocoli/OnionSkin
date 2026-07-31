@@ -489,3 +489,90 @@ fn what_this_program_writes_it_can_read_back() {
     let sheet = read(&bytes).unwrap();
     assert!(sheet.text().contains("Written by Onionskin"), "{sheet:?}");
 }
+
+/// A file that nests for ever used to take the program with it.
+///
+/// Word's structure is a circle: a table holds paragraphs, a paragraph holds a
+/// text box, a text box holds paragraphs. Nothing in the format stops that
+/// going round, and following it round ends in an exhausted stack — which Rust
+/// answers by killing the process, without unwinding, so nothing anywhere can
+/// catch it. The program disappears mid-sentence with no message at all.
+///
+/// There was a bound on tables, and it did not hold: a paragraph started each
+/// table at depth zero, so alternating `tbl` and `p` reset the count every
+/// turn. Text boxes had no bound at all. Both are covered here, and so is the
+/// alternation, because it is the one that got past the bound that existed.
+///
+/// Two thousand deep is well past what any real stack survives unbounded and
+/// costs nothing to build.
+#[test]
+fn a_file_nested_beyond_all_reason_is_read_as_far_as_it_goes_and_no_further() {
+    const DEEP: usize = 2000;
+
+    let boxes = {
+        let mut body = "<w:p><w:r><w:t>outside</w:t></w:r>".to_string();
+        for _ in 0..DEEP {
+            body.push_str("<w:pict><v:textbox><w:txbxContent><w:p><w:r>");
+        }
+        body.push_str("<w:t>the very middle</w:t></w:r>");
+        for _ in 0..DEEP {
+            body.push_str("</w:p></w:txbxContent></v:textbox></w:pict>");
+        }
+        body.push_str("</w:p>");
+        body
+    };
+
+    // Tables and paragraphs alternating, which is what defeated the old bound.
+    let alternating = {
+        let mut body = String::new();
+        for _ in 0..DEEP {
+            body.push_str("<w:tbl><w:tr><w:tc><w:p><w:r>");
+        }
+        body.push_str("<w:t>the very middle</w:t>");
+        for _ in 0..DEEP {
+            body.push_str("</w:r></w:p></w:tc></w:tr></w:tbl>");
+        }
+        body
+    };
+
+    for (what, body) in [("text boxes", boxes), ("tables", alternating)] {
+        let sheet = read(&docx(&body)).unwrap_or_else(|why| panic!("{what}: {why}"));
+        // It comes back — that is the whole assertion. What it managed to read
+        // of the innermost part is not promised.
+        let _ = sheet.text();
+    }
+
+    // And it says it gave up, rather than quietly dropping the words.
+    let sheet = read(&docx(&{
+        let mut body = String::new();
+        for _ in 0..DEEP {
+            body.push_str("<w:tbl><w:tr><w:tc><w:p><w:r>");
+        }
+        body.push_str("<w:t>x</w:t>");
+        for _ in 0..DEEP {
+            body.push_str("</w:r></w:p></w:tc></w:tr></w:tbl>");
+        }
+        body
+    }))
+    .unwrap();
+    assert!(
+        sheet.notes.iter().any(|note| note.contains("nested")),
+        "it gave up silently: {:?}",
+        sheet.notes
+    );
+
+    // The depth an ordinary document uses is untouched: a table in a cell in a
+    // table, with a text box in it, still reads.
+    let ordinary = read(&docx(
+        "<w:tbl><w:tr><w:tc><w:tbl><w:tr><w:tc><w:p><w:r>\
+         <w:pict><v:textbox><w:txbxContent><w:p><w:r><w:t>still here</w:t></w:r></w:p>\
+         </w:txbxContent></v:textbox></w:pict></w:r></w:p></w:tc></w:tr></w:tbl>\
+         </w:tc></w:tr></w:tbl>",
+    ))
+    .unwrap();
+    assert!(
+        ordinary.text().contains("still here"),
+        "{}",
+        ordinary.text()
+    );
+}

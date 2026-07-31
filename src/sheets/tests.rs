@@ -447,6 +447,66 @@ fn repeated_empty_cells_between_two_values_are_kept() {
     assert_eq!(book.sheets[0].rows[0], vec!["name", "", "", "", "notes"]);
 }
 
+/// The two repeats multiply, and each being bounded on its own is no bound at
+/// all.
+///
+/// A row of 16,384 repeated values, itself repeated 1,048,576 times, is inside
+/// both limits and asks for seventeen billion strings. The XML below is a few
+/// hundred bytes. Somebody in an office opens the spreadsheet a supplier sent
+/// them and the machine stops answering — no crash, no message, just a program
+/// filling memory until something kills it.
+///
+/// The test is written so that the *speed* is the assertion as much as the
+/// error is: if the bound goes, this does not fail, it never finishes.
+#[test]
+fn two_repeats_that_multiply_are_stopped_rather_than_built() {
+    let began = std::time::Instant::now();
+    let why = read(&ods("<table:table table:name=\"S\">\
+         <table:table-row table:number-rows-repeated=\"1048576\">\
+         <table:table-cell table:number-columns-repeated=\"16384\" \
+         office:value-type=\"string\"><text:p>x</text:p></table:table-cell>\
+         </table:table-row></table:table>"))
+    .expect_err("seventeen billion cells is not a spreadsheet");
+
+    let said = why.to_string();
+    assert!(said.contains("cells"), "{said}");
+    // And it says what sort of file does this, so nobody reads it as a bug in
+    // their own perfectly ordinary spreadsheet.
+    assert!(
+        said.contains("damaged") || said.contains("awkward"),
+        "{said}"
+    );
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(10),
+        "it took {:?}, so it is building the cells before refusing them",
+        began.elapsed()
+    );
+}
+
+/// The bound has to be past anything real, or it is a bug of its own: a person
+/// with a long list would be told their own file is damaged.
+#[test]
+fn an_ordinary_long_list_is_still_read() {
+    let rows: String = (0..2000)
+        .map(|n| {
+            format!(
+                "<table:table-row>{}{}</table:table-row>",
+                cell(&format!("Name {n}")),
+                cell(&format!("{n}@example.com")),
+            )
+        })
+        .collect();
+    let book = read(&ods(&format!(
+        "<table:table table:name=\"S\">{rows}</table:table>"
+    )))
+    .expect("two thousand rows is an ordinary list");
+    assert_eq!(book.sheets[0].rows.len(), 2000);
+    assert_eq!(
+        book.sheets[0].rows[1999],
+        vec!["Name 1999", "1999@example.com"]
+    );
+}
+
 /// A repeated *value* is a real row of that value, which is how a column of
 /// "Yes" is stored.
 #[test]

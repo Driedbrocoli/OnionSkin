@@ -96,6 +96,32 @@ fn a_bare_ampersand_does_not_eat_the_rest_of_the_line() {
     assert_eq!(text_of("<t>Fish & chips</t>"), "Fish & chips");
 }
 
+/// A bare ampersand near an accented letter used to bring the whole program
+/// down.
+///
+/// The search for the `;` that ends an entity was bounded at twelve *bytes*,
+/// and slicing a string at a byte offset panics outright if that offset is
+/// inside a character. `&` then eleven bytes then anything non-ASCII put the
+/// cut in the middle of it. Nothing exotic: a French or German name in a Word
+/// document, with an `&` a dozen characters before it.
+#[test]
+fn an_ampersand_near_an_accented_letter_does_not_bring_it_down() {
+    // The `€` begins at byte 11 and runs to byte 13, so a twelve-byte cut
+    // lands inside it.
+    assert_eq!(text_of("<t>&abcdefghij€</t>"), "&abcdefghij€");
+    // The same again for every width of character, and at every offset it
+    // could be cut at, so no single position is what the test rests on.
+    for filler in 0..16 {
+        for tail in ["é", "€", "—", "𝄞", "日本語"] {
+            let body = format!("<t>&{}{tail} and more</t>", "x".repeat(filler));
+            let expected = format!("&{}{tail} and more", "x".repeat(filler));
+            assert_eq!(text_of(&body), expected, "filler {filler}, tail {tail}");
+        }
+    }
+    // And a real entity is still read when an accented letter follows it.
+    assert_eq!(text_of("<t>caf&#233; &amp; th&#233;</t>"), "café & thé");
+}
+
 #[test]
 fn an_attribute_value_may_hold_the_end_of_a_tag() {
     let found = events("<w:t w:val=\"a > b\">body</w:t>");

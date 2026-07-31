@@ -279,7 +279,17 @@ fn unescape(text: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        let Some(end) = rest[..rest.len().min(12)].find(';') else {
+        // Twelve characters, not twelve bytes. `rest[..12]` panics outright if
+        // byte 12 lands inside a character — `&` followed by anything
+        // accented, which in a Word file means any European name — and the
+        // longest entity there is (`&#x10FFFF;`) is ten characters, so
+        // counting characters loses nothing.
+        let far_enough = rest
+            .char_indices()
+            .nth(12)
+            .map(|(offset, _)| offset)
+            .unwrap_or(rest.len());
+        let Some(end) = rest[..far_enough].find(';') else {
             // A bare ampersand, which is not legal and is also what a
             // hand-edited file is full of.
             out.push('&');
