@@ -519,3 +519,42 @@ fn nothing_on_the_path_is_no_copies_rather_than_a_guess() {
     let joined = std::env::join_paths([&empty]).unwrap();
     assert!(every_binary_on(&joined, "onionskin").is_empty());
 }
+
+/// The advice printed on Windows must not be the command that breaks the path.
+///
+/// `setx PATH "%PATH%;..."` does two kinds of damage, both invisible until
+/// much later: `%PATH%` in a command prompt is the machine path and the user
+/// path merged, and `setx` writes that merged value into the user path, where
+/// it shadows the real one; and `setx` silently truncates at 1024 characters,
+/// which a corporate account passes easily, leaving the path ending in half an
+/// entry. What somebody sees, days afterwards, is other programs no longer
+/// being found — with nothing to connect it back to installing Onionskin.
+#[test]
+fn the_windows_path_advice_does_not_break_the_path() {
+    let said = the_windows_path_command(Path::new("C:\\Users\\jo\\AppData\\Local\\Onionskin"));
+
+    assert!(!said.contains("setx PATH"), "{said}");
+    assert!(!said.contains("%PATH%"), "{said}");
+    // The user's own path, read on its own rather than merged with the
+    // machine's.
+    assert!(
+        said.contains("GetEnvironmentVariable('Path', 'User')"),
+        "{said}"
+    );
+    assert!(said.contains("'User')"), "{said}");
+    // And it does nothing when the folder is already there, because "run it
+    // again" is what everybody tries.
+    assert!(said.contains("-notlike"), "{said}");
+    // The folder itself is in it, and so is what to do next.
+    assert!(said.contains("AppData\\Local\\Onionskin"), "{said}");
+    assert!(said.contains("open a new terminal"), "{said}");
+}
+
+/// A folder name with an apostrophe in it must not end the PowerShell string.
+#[test]
+fn a_folder_with_an_apostrophe_does_not_break_the_command() {
+    let said = the_windows_path_command(Path::new("C:\\Users\\Jo O'Brien\\Onionskin"));
+    // Doubled, which is how PowerShell writes one inside a quoted string.
+    assert!(said.contains("Jo O''Brien"), "{said}");
+    assert!(!said.contains("Jo O'Brien"), "{said}");
+}

@@ -695,3 +695,39 @@ fn two_files_wanting_the_same_delta_are_pointed_out() {
     // And putting the deltas somewhere else does not make the clash go away.
     assert_eq!(sharing_a_delta(&now, Some(Path::new("/out"))).len(), 1);
 }
+
+/// The same clash, spelled differently.
+///
+/// Windows and macOS treat `Invoice-delta.pdf` and `invoice-delta.pdf` as one
+/// file. The map keyed on the path as written, so two spellings were two
+/// entries, neither had more than one source, and the guard found nothing to
+/// report — on the two platforms where the clash is real. Both files were
+/// processed and the second delta landed on the first: one sheet where two
+/// were expected, carrying the wrong document's additions, silently.
+///
+/// The pair below is `invoice.pdf` and `Invoice.docx`, which is the document
+/// and the Word file it came from — the case named in this function's own
+/// reason for existing, differing only in a capital letter somebody's scanner
+/// chose.
+#[test]
+fn a_clash_that_is_only_a_capital_letter_apart_is_still_a_clash() {
+    let now = vec![
+        seen("/scans/invoice.pdf", 100, 1),
+        seen("/scans/Invoice.docx", 200, 2),
+    ];
+    let clashing = sharing_a_delta(&now, None);
+    assert_eq!(
+        clashing.len(),
+        1,
+        "two spellings of one filename were taken for two files: {clashing:?}"
+    );
+    assert_eq!(clashing[0].1.len(), 2);
+
+    // And a real pair of different names is still not a clash, so the folding
+    // has not turned the guard into something that fires at everything.
+    let apart = vec![
+        seen("/scans/invoice.pdf", 100, 1),
+        seen("/scans/statement.docx", 200, 2),
+    ];
+    assert!(sharing_a_delta(&apart, None).is_empty());
+}

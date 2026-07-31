@@ -467,15 +467,30 @@ pub fn decide(
 /// tie would be a file nobody was expecting, in a folder somebody is watching
 /// precisely so they know what is in it.
 pub fn sharing_a_delta(now: &[Seen], into: Option<&Path>) -> Vec<(PathBuf, Vec<PathBuf>)> {
-    let mut by_delta: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+    // Keyed by the name folded to one case, because Windows and macOS treat
+    // `Invoice-delta.pdf` and `invoice-delta.pdf` as one file and this map
+    // treated them as two. `invoice.pdf` and `Invoice.docx` sitting in a
+    // watched folder — a document and the Word file it came from, which is the
+    // very pair this function exists for — therefore looked like no clash at
+    // all, both were processed, and the second delta landed on the first. One
+    // sheet where two were expected, carrying the wrong document's additions,
+    // with nothing said. Printed onto the other document's sheet, that is
+    // words on a page that do not belong there, and toner does not lift.
+    //
+    // Folding on Linux too, where the two really are separate files: it costs
+    // a caution nobody needed, and the alternative is a rule that holds on the
+    // machine it was written on and quietly fails on the other two.
+    let mut by_delta: BTreeMap<String, (PathBuf, Vec<PathBuf>)> = BTreeMap::new();
     for seen in now.iter().filter(|seen| worth_opening(&seen.path).is_ok()) {
+        let delta = where_the_delta_goes(&seen.path, into);
         by_delta
-            .entry(where_the_delta_goes(&seen.path, into))
-            .or_default()
+            .entry(delta.to_string_lossy().to_lowercase())
+            .or_insert_with(|| (delta, Vec::new()))
+            .1
             .push(seen.path.clone());
     }
     by_delta
-        .into_iter()
+        .into_values()
         .filter(|(_, sources)| sources.len() > 1)
         .collect()
 }

@@ -310,6 +310,46 @@ pub fn on_path(directory: &Path) -> bool {
 /// The one the user's shell actually reads, which is not the same file
 /// everywhere: zsh is the default on macOS and reads `.zprofile`, bash reads
 /// `.bash_profile` if it exists and `.profile` otherwise.
+/// The one command that puts Onionskin on a Windows path without damage.
+///
+/// What used to be printed here was `setx PATH "%PATH%;C:\..."`, and it breaks
+/// the account's path in two separate ways, neither of which shows up until
+/// much later, and neither of which the person this program is written for
+/// could recognise.
+///
+/// The first is `%PATH%`. Inside a command prompt it expands to the machine's
+/// path and the user's path *merged*, and `setx` without `/M` writes the
+/// result into the user's own path. So the whole system path is copied into
+/// the account, where it shadows the real one — every later change an
+/// administrator makes to the system path is then invisible on that machine.
+///
+/// The second is worse. `setx` truncates its value at 1024 characters, without
+/// complaint. A corporate or developer account passes that easily, so
+/// everything past the thousandth character is thrown away and the path is
+/// left ending in half an entry. What the person sees, days later, is other
+/// programs no longer being found, with nothing to connect it to Onionskin.
+///
+/// PowerShell ships with every supported Windows and has neither fault: the
+/// `User` scope is read on its own, so nothing is merged, and .NET's
+/// environment writer has no length limit. Asking first whether the folder is
+/// already there means running it twice does nothing the second time, which
+/// matters because "run it again" is what everybody tries.
+pub fn the_windows_path_command(prefix: &Path) -> String {
+    // Single quotes inside a PowerShell single-quoted string are doubled. A
+    // path holding one is absurd and is somebody's real folder somewhere.
+    let quoted = prefix.display().to_string().replace('\'', "''");
+    format!(
+        "To run 'onionskin' from anywhere, add it to your path. This adds the folder to \
+         your own path only, and does nothing if it is already there:\n    \
+         powershell -NoProfile -Command \"$p = [Environment]::GetEnvironmentVariable('Path', \
+         'User'); if (-not $p) {{ $p = '' }}; if ($p -notlike '*{quoted}*') {{ \
+         [Environment]::SetEnvironmentVariable('Path', ($p.TrimEnd(';') + ';{quoted}').TrimStart(';'), \
+         'User') }}\"\n    Then open a new terminal.\n    \
+         (Not `setx`: it copies the whole system path into your own and cuts it off at 1024 \
+         characters, which quietly breaks other programs.)"
+    )
+}
+
 pub fn shell_profile() -> PathBuf {
     let home = home();
     let shell = std::env::var("SHELL").unwrap_or_default();
@@ -437,11 +477,7 @@ pub fn install(options: &Options) -> Result<Report, InstallError> {
             // damages a setting the whole account depends on. Saying the one
             // command that does it is safer, and the person can see what it
             // will do before they run it.
-            report.notes.push(format!(
-                "To run 'onionskin' from anywhere, add it to your path:\n    \
-                 setx PATH \"%PATH%;{}\"\n    Then open a new terminal.",
-                prefix.display()
-            ));
+            report.notes.push(the_windows_path_command(&prefix));
         } else {
             let profile = shell_profile();
             let line = path_line(&prefix, &profile);

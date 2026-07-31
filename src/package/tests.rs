@@ -1124,3 +1124,59 @@ fn dpkg_reads_a_package_that_has_a_window_in_it() {
         .join("usr/share/applications/onionskin.desktop")
         .is_file());
 }
+
+/// The renderer has to be beside the command line program as well as inside
+/// the application bundle.
+///
+/// It was only inside. The renderer is looked for next to whatever wants it,
+/// so `./onionskin` from the unpacked archive found nothing — and `onionskin
+/// install`, which copies it out of the same folder, found nothing to copy
+/// either. It said "no PDF rendering library was found next to this file" and
+/// carried on, in the middle of an install that otherwise looked fine.
+///
+/// What that switches off is comparing two documents, which is the program.
+/// Every macOS download shipped without it.
+#[test]
+fn the_mac_archive_has_the_renderer_where_both_programs_look() {
+    let dir = tempfile::tempdir().unwrap();
+    let licence = licence_file(dir.path());
+    let cli = binary_for(dir.path(), Platform::MacOs);
+    let window = dir.path().join("onionskin-desktop");
+    std::fs::write(&window, b"\xcf\xfa\xed\xfe pretend window").unwrap();
+    let renderer = dir.path().join("libpdfium.dylib");
+    std::fs::write(&renderer, b"\xcf\xfa\xed\xfe pretend renderer").unwrap();
+
+    let entries = contents_with_window(
+        Platform::MacOs,
+        &cli,
+        Some(&window),
+        Some(&renderer),
+        &licence,
+    )
+    .unwrap();
+    let bundle = mac_bundle(&entries, "0.1.0");
+    let names: Vec<&str> = bundle.iter().map(|e| e.name.as_str()).collect();
+
+    // Beside the window, which loads it from inside the bundle.
+    assert!(
+        names.contains(&"Onionskin.app/Contents/MacOS/libpdfium.dylib"),
+        "{names:?}"
+    );
+    // And beside the command line program, at the root of the archive, which
+    // is the copy that was missing.
+    assert!(
+        names.contains(&"libpdfium.dylib"),
+        "the command line program has no renderer beside it: {names:?}"
+    );
+    // The same file, not an empty placeholder.
+    let beside = bundle
+        .iter()
+        .find(|e| e.name == "libpdfium.dylib")
+        .expect("just checked");
+    let inside = bundle
+        .iter()
+        .find(|e| e.name == "Onionskin.app/Contents/MacOS/libpdfium.dylib")
+        .expect("just checked");
+    assert_eq!(beside.bytes, inside.bytes);
+    assert!(!beside.bytes.is_empty());
+}

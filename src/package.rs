@@ -721,7 +721,25 @@ pub fn mac_bundle(entries: &[Entry], version: &str) -> Vec<Entry> {
         let name = match entry.name.as_str() {
             // The window, and the renderer it loads, live inside the bundle.
             "Onionskin" => format!("{APP}/MacOS/Onionskin"),
-            "libpdfium.dylib" => format!("{APP}/MacOS/libpdfium.dylib"),
+            "libpdfium.dylib" => {
+                // And a second copy beside the command line program, which is
+                // the whole reason this arm is not just a rename.
+                //
+                // The renderer is looked for next to the program that wants
+                // it. With one copy, buried in the bundle, `./onionskin` from
+                // the unpacked archive found nothing — and `onionskin install`
+                // found nothing to install either, so it reported "no PDF
+                // rendering library was found next to this file" and carried
+                // on. What that costs is comparing two documents, which is the
+                // program. Every macOS download shipped with the central
+                // feature switched off, and the note explaining it appeared in
+                // the middle of a successful-looking install.
+                out.push(Entry {
+                    name: "libpdfium.dylib".to_string(),
+                    ..entry.clone()
+                });
+                format!("{APP}/MacOS/libpdfium.dylib")
+            }
             // The command line program goes beside the app rather than inside
             // it, because a path buried in a bundle is not one anybody types.
             "onionskin" => "onionskin".to_string(),
