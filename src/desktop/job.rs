@@ -249,4 +249,15 @@ impl Jobs {
     pub fn dismiss(&mut self) {
         self.last = None;
     }
+
+    /// Say no without starting anything.
+    ///
+    /// For a refusal the screen can settle by itself — a file already there, a
+    /// box left empty — where spawning a thread only to have it come straight
+    /// back would put a spinner on screen for a question that was answered
+    /// before any work began. It reads the same to the person either way,
+    /// which is the point.
+    pub fn refuse(&mut self, why: impl Into<String>) {
+        self.last = Some(Outcome::refused(why));
+    }
 }

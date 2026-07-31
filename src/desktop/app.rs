@@ -251,7 +251,41 @@ impl Onionskin {
         }
     }
 
+    /// The list of screens down the left, and the two lines at the bottom.
+    ///
+    /// The order here is load-bearing. The footer is claimed first, as a panel
+    /// of its own, and the list scrolls in whatever is left — because a
+    /// scrolling area takes all the height there is, and anything drawn after
+    /// it is pushed off the end of the window.
+    ///
+    /// There was no scrolling area at all until now, and there are twenty-odd
+    /// screens each with a heading and a wrapped sentence under it. On a
+    /// laptop, that is a list about half as tall again as the window it is in:
+    /// the ones at the bottom — measuring the printer, saved jobs, what works
+    /// on this machine — could not be clicked, and there was nothing on the
+    /// screen to suggest they were there. A whole third of the program was
+    /// unreachable from the window, and nobody would have known to look.
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("who-this-is")
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Nothing leaves this machine.\nIt speaks to printers, and to nothing else.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(concat!("Onionskin ", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .weak(),
+                );
+                ui.add_space(6.0);
+            });
+
         ui.add_space(12.0);
         ui.heading("Onionskin");
         ui.label(
@@ -261,42 +295,40 @@ impl Onionskin {
         );
         ui.add_space(14.0);
 
-        for screen in Screen::ALL {
-            let chosen = self.screen == *screen;
-            let response = ui.selectable_label(chosen, egui::RichText::new(screen.name()).strong());
-            if response.clicked() {
-                self.screen = *screen;
-                let key = screen.key();
-                onionskin::settings::remember(|settings| {
-                    settings.last_screen = Some(key.to_string())
-                });
-            }
-            // The sentence beneath is what lets somebody pick the right screen
-            // without opening all six to find out what they do. Wrapped, or
-            // the longer ones run off the edge of the panel and lose their
-            // last word — which is usually the one that distinguishes them.
-            ui.indent(screen.name(), |ui| {
-                ui.add(egui::Label::new(egui::RichText::new(screen.lede()).small().weak()).wrap());
+        // Written down rather than acted on inside the loop, because changing
+        // the screen borrows `self` and the loop is already holding it.
+        let mut chose: Option<Screen> = None;
+        let here = self.screen;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for screen in Screen::ALL {
+                    let chosen = here == *screen;
+                    let response =
+                        ui.selectable_label(chosen, egui::RichText::new(screen.name()).strong());
+                    if response.clicked() {
+                        chose = Some(*screen);
+                    }
+                    // The sentence beneath is what lets somebody pick the right
+                    // screen without opening all six to find out what they do.
+                    // Wrapped, or the longer ones run off the edge of the panel
+                    // and lose their last word — which is usually the one that
+                    // distinguishes them.
+                    ui.indent(screen.name(), |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(screen.lede()).small().weak())
+                                .wrap(),
+                        );
+                    });
+                    ui.add_space(4.0);
+                }
             });
-            ui.add_space(4.0);
-        }
 
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new(
-                    "Nothing leaves this machine.\nIt speaks to printers, and to nothing else.",
-                )
-                .small()
-                .weak(),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(concat!("Onionskin ", env!("CARGO_PKG_VERSION")))
-                    .small()
-                    .weak(),
-            );
-        });
+        if let Some(screen) = chose {
+            self.screen = screen;
+            let key = screen.key();
+            onionskin::settings::remember(|settings| settings.last_screen = Some(key.to_string()));
+        }
     }
 
     fn status(&mut self, ui: &mut egui::Ui) {
@@ -327,5 +359,70 @@ impl Onionskin {
             },
         });
         ui.add_space(3.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The list of screens has to scroll, and there is no way to find out from
+    /// a test whether it does.
+    ///
+    /// egui draws to a window, and Onionskin has no harness that opens one —
+    /// getting one means another dependency, which this program does not take.
+    /// So the check is on the source, which is crude, and the alternative is
+    /// nothing at all. That is a bad trade only if the fault is easy to spot
+    /// by other means, and this one is the opposite: the program compiles,
+    /// starts, and looks perfectly well, and a third of it simply cannot be
+    /// reached. Nobody reports a screen they never knew was there.
+    ///
+    /// The arithmetic below is the reason, kept next to the rule so that if
+    /// the sidebar ever becomes short enough not to need scrolling, this fails
+    /// and says so rather than quietly enforcing a habit.
+    #[test]
+    fn the_list_of_screens_can_be_scrolled() {
+        // A heading, a wrapped sentence under it, and the space between: this
+        // is a floor, not an estimate, so the conclusion holds even if the
+        // rows are drawn tighter than they are today.
+        const AT_LEAST_PER_SCREEN: f32 = 38.0;
+        // The window's own minimum, less the status strip along the bottom and
+        // the heading at the top of the panel. Generous, for the same reason.
+        const ROOM_AT_MOST: f32 = 620.0 - 30.0 - 60.0;
+
+        let needed = Screen::ALL.len() as f32 * AT_LEAST_PER_SCREEN;
+        assert!(
+            needed > ROOM_AT_MOST,
+            "{} screens now fit without scrolling ({needed} px in {ROOM_AT_MOST} px), \
+             so this test is no longer about anything real",
+            Screen::ALL.len()
+        );
+
+        let source = include_str!("app.rs");
+        let from = source
+            .find("fn sidebar(")
+            .expect("the sidebar is drawn by a function called sidebar");
+        let to = source[from..]
+            .find("\n    fn ")
+            .map(|at| from + at)
+            .unwrap_or(source.len());
+        let drawing = &source[from..to];
+        assert!(
+            drawing.contains("ScrollArea"),
+            "the sidebar draws {} screens and does not scroll, so the ones at \
+             the bottom cannot be reached",
+            Screen::ALL.len()
+        );
+        // And the footer is a panel of its own rather than something drawn
+        // after the scrolling area, which would put it past the bottom edge.
+        let scrolls_at = drawing.find("ScrollArea").expect("just checked");
+        let footer_at = drawing
+            .find("Panel::bottom")
+            .expect("the footer is claimed as a panel before the list scrolls");
+        assert!(
+            footer_at < scrolls_at,
+            "the footer is drawn after the scrolling area, which pushes it off \
+             the bottom of the window"
+        );
     }
 }

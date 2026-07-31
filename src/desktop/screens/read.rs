@@ -27,6 +27,13 @@ pub struct State {
     format: OutputKind,
     layout: office::Layout,
     output: Option<PathBuf>,
+    /// Whether a file already at the destination may be written over.
+    ///
+    /// Off, and asked rather than assumed, because reading a scan a second
+    /// time — after naming the font, or choosing Flow instead of Placed — is
+    /// an ordinary thing to do, and the first thing somebody does with the
+    /// result is edit it. Replacing it without a word throws that away.
+    replace: bool,
 }
 
 impl Default for State {
@@ -38,6 +45,7 @@ impl Default for State {
             format: OutputKind::Docx,
             layout: office::Layout::Placed,
             output: None,
+            replace: false,
         }
     }
 }
@@ -68,6 +76,14 @@ impl OutputKind {
             OutputKind::Docx => "read.docx",
             OutputKind::Odt => "read.odt",
             OutputKind::Onionskin => "read.onionskin",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            OutputKind::Docx => "docx",
+            OutputKind::Odt => "odt",
+            OutputKind::Onionskin => "onionskin",
         }
     }
 
@@ -176,6 +192,13 @@ pub fn show(state: &mut State, room: &mut Room) {
         state.format.extensions(),
         "beside the scan, named after it",
     );
+    room.ui
+        .checkbox(&mut state.replace, "Replace it if it is already there");
+    widgets::hint(
+        room.ui,
+        "Off, so reading a second scan cannot quietly write over the first one's \
+         result — or over a file of your own that happens to have the same name.",
+    );
 
     room.ui.add_space(6.0);
     let ready = state.scan.is_some();
@@ -209,6 +232,20 @@ pub fn show(state: &mut State, room: &mut Room) {
     );
 }
 
+/// Where the result goes when nobody has said: beside the scan, named after
+/// it. `invoice.png` becomes `invoice-read.docx`, so a folder of scans read
+/// one after another ends up with a result per scan rather than one file
+/// replaced over and over.
+fn beside_the_scan(scan: &std::path::Path, format: OutputKind) -> PathBuf {
+    let stem = scan
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "scan".to_string());
+    let mut path = scan.to_path_buf();
+    path.set_file_name(format!("{stem}-read.{}", format.extension()));
+    path
+}
+
 fn start(state: &mut State, room: &mut Room) {
     let Some(scan_path) = state.scan.clone() else {
         return;
@@ -218,13 +255,31 @@ fn start(state: &mut State, room: &mut Room) {
     let format = state.format;
     let layout = state.layout;
 
-    // Beside the scan unless somebody has said otherwise, because that is the
-    // folder they are already working in.
-    let output = state.output.clone().unwrap_or_else(|| {
-        let mut path = scan_path.clone();
-        path.set_file_name(format.suggested_name());
-        path
-    });
+    // Beside the scan and named after it, unless somebody has said otherwise,
+    // because that is the folder they are already working in and that is what
+    // the box on screen says will happen.
+    //
+    // It used to be a fixed `read.docx`, which is a name a person may well
+    // have of their own — and it was written with no guard at all. Reading a
+    // second scan replaced the first one's result, and a `read.docx` somebody
+    // wrote themselves was destroyed outright. Neither said anything.
+    let output = state
+        .output
+        .clone()
+        .unwrap_or_else(|| beside_the_scan(&scan_path, format));
+
+    // Nothing marks a Word or OpenDocument file as Onionskin's own, so there
+    // is no way to tell one this screen wrote from one somebody typed. The
+    // question therefore has to be asked rather than guessed at, and asked
+    // before the reading rather than after it.
+    if !state.replace && output.is_file() {
+        room.jobs.refuse(format!(
+            "'{}' is already there.\n\nTick 'Replace it if it is already there' to write over \
+             it, or choose another name under 'Where to save it'.",
+            output.display()
+        ));
+        return;
+    }
 
     room.previews.forget(&output);
     let target = output.clone();
@@ -359,4 +414,58 @@ fn start(state: &mut State, room: &mut Room) {
             notes,
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of scans read one after another has to end up with a result
+    /// per scan.
+    ///
+    /// The name used to be a fixed `read.docx`, put in the scan's own folder.
+    /// So reading `invoice-01.png` and then `invoice-02.png` left one file,
+    /// holding the second — and anybody who had edited the first lost the
+    /// edit. The box on screen said "beside the scan, named after it" the
+    /// whole time, which was half true.
+    #[test]
+    fn the_result_is_named_after_the_scan_it_came_from() {
+        let one = beside_the_scan(
+            std::path::Path::new("/home/jo/scans/invoice-01.png"),
+            OutputKind::Docx,
+        );
+        let two = beside_the_scan(
+            std::path::Path::new("/home/jo/scans/invoice-02.png"),
+            OutputKind::Docx,
+        );
+        assert_eq!(
+            one,
+            std::path::Path::new("/home/jo/scans/invoice-01-read.docx")
+        );
+        assert_ne!(one, two, "two scans were given one name");
+        // Beside the scan, which is the folder they are already working in.
+        assert_eq!(one.parent(), std::path::Path::new("/home/jo/scans").into());
+
+        // Each kind gets its own extension, so choosing OpenDocument does not
+        // hand somebody a `.docx` full of OpenDocument.
+        for (kind, tail) in [
+            (OutputKind::Docx, "invoice-01-read.docx"),
+            (OutputKind::Odt, "invoice-01-read.odt"),
+            (OutputKind::Onionskin, "invoice-01-read.onionskin"),
+        ] {
+            let made = beside_the_scan(std::path::Path::new("/home/jo/scans/invoice-01.png"), kind);
+            assert_eq!(made.file_name().unwrap().to_string_lossy(), tail);
+        }
+    }
+
+    /// A scan whose name is nothing but an extension still gets a result.
+    #[test]
+    fn a_scan_with_no_name_to_speak_of_still_gets_one() {
+        let made = beside_the_scan(std::path::Path::new("/tmp/.png"), OutputKind::Docx);
+        // `.png` is all extension and no stem to most people, and a file stem
+        // to Rust. Either way the result is a name, not an empty one.
+        let name = made.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with("-read.docx"), "{name}");
+        assert!(name.len() > "-read.docx".len(), "{name}");
+    }
 }
