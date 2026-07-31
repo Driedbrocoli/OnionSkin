@@ -128,6 +128,14 @@ pub fn show(state: &mut State, room: &mut Room) {
     if state.words.is_empty() || room.ui.small_button("Another").clicked() {
         state.words.push(String::new());
     }
+    // Next to the words, because it is about the words. It used to sit in the
+    // rectangle section below, alongside a page number that is *not* about the
+    // words — so the one control that applies to a word search was in the one
+    // place somebody searching by word would never open.
+    room.ui.horizontal(|ui| {
+        ui.label("A margin beyond each line of");
+        millimetres(ui, &mut state.pad_mm);
+    });
 
     room.ui.add_space(8.0);
     room.ui.collapsing("Or a rectangle, measured", |ui| {
@@ -162,12 +170,17 @@ pub fn show(state: &mut State, room: &mut Room) {
                 height_mm: 8.0,
             });
         }
+        // Which page these rectangles are on — and only these. Words are
+        // searched for on every page, and a control labelled just "Page" sat
+        // here reading as though it decided that too.
         ui.horizontal(|ui| {
-            ui.label("Beyond the words");
-            millimetres(ui, &mut state.pad_mm);
-            ui.label("Page");
+            ui.label("These rectangles are on page");
             ui.add(egui::DragValue::new(&mut state.page).range(1..=999));
         });
+        widgets::hint(
+            ui,
+            "Words are looked for on every page, whatever this says.",
+        );
     });
 
     room.ui.add_space(8.0);

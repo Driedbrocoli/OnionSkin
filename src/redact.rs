@@ -423,6 +423,14 @@ pub fn redact(
     if std::fs::symlink_metadata(&nearly).is_ok() {
         return Err(RedactError::WorkingFileInTheWay { path: nearly });
     }
+    // And swept up however this ends. Only the failed-check path used to
+    // delete it, so a full disk or a rename onto another filesystem left a
+    // complete copy of the document sitting in the output directory — under a
+    // name nobody had heard of, after a message saying the redaction had
+    // failed. Whether that copy is redacted or half-written, it is not
+    // something to leave lying about without telling anybody.
+    let sweep = Sweep(Some(nearly.clone()));
+
     let nothing: Vec<Vec<PlacedLine>> = vec![Vec::new(); pages];
     let no_shapes: Vec<Vec<PlacedShape>> = vec![Vec::new(); pages];
     crate::pdf::write_page_content_with_pictures(
@@ -445,6 +453,17 @@ pub fn redact(
     // check would not run" sends them looking for a leak that is not there.
     let check = engine.open(&nearly);
     let verdict = match check {
+        // The page count first. "Every page came back clean" is only worth
+        // something if every page is there — a file with no pages in it passes
+        // a page-by-page check without the check running once, and a document
+        // that lost its last three pages passes one that ran on the wrong
+        // document. Neither is a redaction; both would be reported as one.
+        Ok(written) if written.len() != pages => Err(RedactError::Unchecked {
+            why: format!(
+                "the copy has {} page(s) and the document has {pages}",
+                written.len()
+            ),
+        }),
         Ok(written) => (0..written.len()).try_for_each(|index| match written.text_on(index) {
             Ok(text) if text.trim().is_empty() => Ok(()),
             Ok(_) => Err(RedactError::TextSurvived { page: index + 1 }),
@@ -456,15 +475,13 @@ pub fn redact(
             why: why.to_string(),
         }),
     };
-    if let Err(why) = verdict {
-        let _ = std::fs::remove_file(&nearly);
-        return Err(why);
-    }
+    verdict?;
 
     std::fs::rename(&nearly, out).map_err(|source| RedactError::Io {
         path: out.to_path_buf(),
         source,
     })?;
+    sweep.kept();
     Ok(Redacted {
         output: out.to_path_buf(),
         pages,
@@ -518,6 +535,29 @@ fn paint_out(rgb: &mut [u8], width: usize, height: usize, page: PageSize, area: 
         }
     }
     painted
+}
+
+/// Deletes the half-finished copy when the job ends, however it ends.
+///
+/// A guard rather than a call at each exit, because the exits are the problem:
+/// a `?` on the writer, a `?` on the check, a `?` on the rename, and each one
+/// added later is another chance to forget. This runs on all of them, and on a
+/// panic.
+struct Sweep(Option<PathBuf>);
+
+impl Sweep {
+    /// The file made it to where it was going; there is nothing to sweep.
+    fn kept(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Whether a rectangle has any area at all.

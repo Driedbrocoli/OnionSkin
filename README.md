@@ -1094,6 +1094,15 @@ operation at all.
 onionskin redact offer.pdf --word 'Salary' -o to-send.pdf
 ```
 
+That takes out the whole line the word sits on, on every page it appears, and
+prints the lines it took so you can see what went. The whole line is deliberate:
+somebody who says "take out the salary" means `Salary: 84000 per annum`, not six
+letters of label — and a bar over the label with the figure still beside it is
+worse than no bar at all, because it looks like it worked. Onionskin reads the
+words out of the document's own text layer rather than by looking at a picture
+of the page, so a grey line and a five-point footnote are found as readily as
+the body text.
+
 Drawing a black rectangle in a PDF hides nothing. The words stay in the file:
 selectable, copyable, searchable, and recovered by anybody who presses Ctrl-A.
 It is the obvious thing to do, it looks completely convincing on screen, and
@@ -1116,6 +1125,11 @@ metadata, the leftovers of an earlier save. Something that removes only what it
 recognises leaves whatever it did not.
 
 Keep the original. This is the copy you send, not the copy you work from.
+
+And read that copy before you send it. What Onionskin checks is that no text is
+left in the file, which it can prove. What it cannot check is whether you named
+everything that should have gone — a figure repeated in a table, a page nobody
+thought about, a name spelled another way. Nothing in here will notice.
 
 ### Check a whole run, not one sheet
 

@@ -396,6 +396,90 @@ fn a_document_that_never_had_text_is_reported_as_such() {
     );
 }
 
+/// A page with a crop box or a `/Rotate` on it, which is most scanned ones.
+///
+/// The text layer gives its coordinates in the page's own frame, which starts
+/// at the MediaBox. What gets drawn — and what the black bar is painted on —
+/// is the CropBox, turned by `/Rotate`. On an ordinary page those are the same
+/// and nothing shows; on a page cropped 50 pt in from the corner the bar landed
+/// twenty millimetres up the sheet, in the margin, and the salary stayed where
+/// it was, plainly readable, under a report saying it had gone.
+///
+/// A phone scan has a crop box. So does anything that has been through a PDF
+/// editor. This is not the exotic case.
+#[test]
+fn a_cropped_or_turned_page_gets_the_bar_where_the_words_actually_are() {
+    let Ok(engine) = crate::render::engine() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+
+    // The same document three ways: plain, cropped in from the corner, and
+    // turned a quarter turn. The words are in the same place in the file every
+    // time; only how the page is presented differs.
+    let framed = |name: &str, crop: Option<[f32; 4]>, turn: Option<i64>| -> PathBuf {
+        let plain = a_document(
+            dir.path(),
+            &format!("plain-{name}"),
+            &[&[("Salary: 84000", 60.0)]],
+        );
+        let mut pdf = lopdf::Document::load(&plain).unwrap();
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        if let Some(box_of) = crop {
+            pdf.get_dictionary_mut(page_id).unwrap().set(
+                "CropBox",
+                lopdf::Object::Array(box_of.iter().map(|v| (*v).into()).collect()),
+            );
+        }
+        if let Some(turn) = turn {
+            pdf.get_dictionary_mut(page_id)
+                .unwrap()
+                .set("Rotate", lopdf::Object::Integer(turn));
+        }
+        let path = dir.path().join(name);
+        pdf.save(&path).unwrap();
+        path
+    };
+
+    for (name, crop, turn) in [
+        ("plain.pdf", None, None),
+        ("cropped.pdf", Some([50.0, 50.0, 545.0, 792.0]), None),
+        ("turned.pdf", None, Some(90)),
+        ("both.pdf", Some([50.0, 50.0, 545.0, 792.0]), Some(270)),
+    ] {
+        let source = framed(name, crop, turn);
+        let found = lines_carrying(&source, &["Salary".to_string()], 1.0)
+            .unwrap_or_else(|why| panic!("{name}: {why}"));
+        assert_eq!(found.areas.len(), 1, "{name}: {found:?}");
+
+        let out = dir.path().join(format!("out-{name}"));
+        redact(&source, &out, &found.areas, QUICK).unwrap_or_else(|why| panic!("{name}: {why}"));
+
+        // What is left on the page. A bar in the right place leaves one solid
+        // block of ink and nothing else; a bar in the margin leaves two marks
+        // — the useless bar, and the words it missed.
+        let drawn = engine.open(&out).unwrap().render_gray(0, QUICK).unwrap();
+        let mut rows: Vec<usize> = Vec::new();
+        for y in 0..drawn.height {
+            let dark = (0..drawn.width)
+                .filter(|x| drawn.gray[y * drawn.width + x] < 128)
+                .count();
+            if dark > 0 {
+                rows.push(y);
+            }
+        }
+        assert!(!rows.is_empty(), "{name}: the page came back blank");
+        let gaps = rows.windows(2).filter(|pair| pair[1] - pair[0] > 2).count();
+        assert_eq!(
+            gaps,
+            0,
+            "{name}: the ink on the page is in {} separate bands, which means the bar \
+             went somewhere the words are not and left them behind",
+            gaps + 1
+        );
+    }
+}
+
 /// A rectangle that lands nowhere near the page takes nothing out, and the
 /// file that would come of it is the document unchanged with a sentence
 /// attached saying the words are gone.

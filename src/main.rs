@@ -1482,6 +1482,27 @@ fn cmd_redact(args: RedactArgs) -> Result<ExitCode, String> {
             println!("  {line}");
         }
     }
+    // And the one thing Onionskin cannot check, said out loud.
+    //
+    // Everything printed above is reassurance, and every word of it is about
+    // the file: there is no text left in it, and that was checked. What was
+    // never checked, and cannot be, is whether the right things were named.
+    // A bar over the wrong line, a page nobody thought about, a second copy of
+    // the figure in a table — none of those fails any test in here.
+    //
+    // The window screen has said this since the day it was written. The
+    // command line said nothing, while `cover` — which puts real toner on real
+    // paper and is far harder to get catastrophically wrong — printed four
+    // lines of caveat. The warning was being spent on the safer command.
+    println!();
+    for line in wrapped(
+        "Read the copy before you send it. Onionskin has checked that no text is \
+         left in the file. It cannot check that you named everything that should \
+         have gone, and nothing here will notice if you did not.",
+        74,
+    ) {
+        println!("  {line}");
+    }
     rehearsal.say_nothing_was_written();
     if !rehearsal.pretending() {
         open_if_asked(args.open, &output);
@@ -2024,13 +2045,39 @@ struct Rehearsal {
 impl Rehearsal {
     fn new(dry_run: bool) -> Result<Rehearsal, String> {
         let scratch = match dry_run {
-            true => Some(
-                tempfile::tempdir()
-                    .map_err(|why| format!("could not make a scratch folder: {why}"))?,
-            ),
+            true => Some(Rehearsal::scratch_folder()?),
             false => None,
         };
         Ok(Rehearsal { scratch })
+    }
+
+    /// A folder nobody else can look in.
+    ///
+    /// A rehearsal does the whole job and puts the result somewhere it will be
+    /// thrown away, which means the file that gets written is the *real* one:
+    /// the whole document, complete, including whatever was in it that made
+    /// somebody want to rehearse. `tempfile` makes its folders world-readable
+    /// — 0755 — and the shared temporary directory is where they go.
+    ///
+    /// So on a machine with more than one account, `--dry-run` on a document
+    /// somebody is redacting put a complete copy of it where every other
+    /// account could read it, under a banner reading "Nothing written". The
+    /// banner is about the destination the person chose. It was never a claim
+    /// about the disk, and it read like one.
+    ///
+    /// The permissions are asked for at creation rather than set afterwards,
+    /// so there is no moment when the folder exists and is open.
+    fn scratch_folder() -> Result<tempfile::TempDir, String> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("onionskin-rehearsal");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        builder
+            .tempdir()
+            .map_err(|why| format!("could not make a scratch folder: {why}"))
     }
 
     fn pretending(&self) -> bool {
@@ -9845,6 +9892,39 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rehearsal writes the real file, complete, and only the destination is
+    /// pretend. On a shared machine the shared temporary directory is not a
+    /// private place, and `tempfile` opens its folders to everybody by default
+    /// — so `--dry-run` on a document somebody is redacting used to leave a
+    /// full copy of it where any other account could read it, under a line
+    /// saying "Nothing written".
+    #[test]
+    #[cfg(unix)]
+    fn a_rehearsal_writes_somewhere_nobody_else_can_look() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let rehearsal = Rehearsal::new(true).expect("it should make a scratch folder");
+        let scratch = rehearsal
+            .instead_of(Path::new("/somewhere/offer.pdf"))
+            .parent()
+            .expect("the scratch file should be in a folder")
+            .to_path_buf();
+
+        let mode = std::fs::metadata(&scratch).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "the rehearsal folder is {mode:o}, so anybody on this machine can read \
+             the document that was written into it"
+        );
+
+        // And it really is somewhere else — a rehearsal that wrote to the
+        // place the person named would be no rehearsal at all.
+        assert_ne!(
+            rehearsal.instead_of(Path::new("/somewhere/offer.pdf")),
+            PathBuf::from("/somewhere/offer.pdf")
+        );
+    }
 
     #[test]
     fn colour_is_only_for_a_terminal_and_only_when_wanted() {

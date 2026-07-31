@@ -470,6 +470,36 @@ impl PageFrame {
         PageSize::from_pt(width, height)
     }
 
+    /// A point in the page's own coordinates, where it lands on the drawn page.
+    ///
+    /// Both still in points and still counting up from the bottom, because this
+    /// is one change of frame and not two — turning it into millimetres down
+    /// from the top is the caller's business and needs the *displayed* height,
+    /// which is why [`display_size`](Self::display_size) is next door.
+    ///
+    /// A PDF's contents are drawn in the page's own coordinates, which start at
+    /// the MediaBox. What a reader shows is the CropBox, turned by `/Rotate`.
+    /// On an ordinary page those are the same thing and this is the identity,
+    /// which is exactly why it is so easy to leave out: everything works until
+    /// somebody hands over a scanned page with a crop on it, and then a
+    /// measurement taken from the file lands somewhere else entirely on the
+    /// picture — for `redact`, a black bar in the margin and the salary still
+    /// legible below it.
+    pub fn to_display_pt(&self, x: f64, y: f64) -> (f64, f64) {
+        let (width, height) = self.crop_size_pt();
+        let (across, up) = (x - self.crop.0, y - self.crop.1);
+        // Clockwise, which is the direction `/Rotate` counts in. Each case is
+        // the four corners worked out by hand and checked against the other
+        // three; anything not a right angle is not a `/Rotate` and is left
+        // alone rather than approximated.
+        match self.rotate.rem_euclid(360) {
+            90 => (up, width - across),
+            180 => (width - across, height - up),
+            270 => (height - up, across),
+            _ => (across, up),
+        }
+    }
+
     /// True when display space and user space are the same thing.
     pub fn is_simple(&self) -> bool {
         self.rotate == 0
@@ -1006,7 +1036,16 @@ impl Document<'_> {
             .pages()
             .get(index as u16)
             .map_err(|e| RenderError::Pdfium(format!("page {} : {e}", index + 1)))?;
-        Ok(page.text().map(|text| text.all()).unwrap_or_default())
+        // A failure to read the text is *not* an empty page.
+        //
+        // This used to end `.unwrap_or_default()`, which turns "I could not
+        // look" into "I looked and there was nothing" — and the only caller is
+        // [`crate::redact`], where that sentence is the entire proof that a
+        // document is safe to hand over. A reader that fell over on one page
+        // certified it clean.
+        page.text()
+            .map(|text| text.all())
+            .map_err(|e| RenderError::Pdfium(format!("page {}: {e}", index + 1)))
     }
 
     /// The lines of text on a page, with where each one sits.
@@ -1074,17 +1113,38 @@ impl Document<'_> {
             }
         }
 
+        // The coordinates above are the page's own — they start at the
+        // MediaBox and take no notice of a CropBox or a `/Rotate`. Everything
+        // downstream works on the page as *drawn*, so they are moved into that
+        // frame here, at the one place where the two are both in hand.
+        //
+        // Two opposite corners are enough because a `/Rotate` is a multiple of
+        // a right angle: the box stays a box, and taking the smaller and larger
+        // of each pair puts it back the right way round after a turn has swapped
+        // top with bottom or left with right.
+        let frame = self.frames.get(index);
         let height_pt = paper.height_pt();
         Ok(lines
             .into_iter()
-            .map(|(top, bottom, left, right, said)| TextLine {
-                text: said,
-                x_mm: crate::geometry::pt_to_mm(left),
-                // PDF counts up from the bottom of the paper and Onionskin
-                // counts down from the top.
-                y_mm: crate::geometry::pt_to_mm(height_pt - top),
-                width_mm: crate::geometry::pt_to_mm(right - left),
-                height_mm: crate::geometry::pt_to_mm(top - bottom),
+            .map(|(top, bottom, left, right, said)| {
+                let ((x0, y0), (x1, y1)) = match frame {
+                    Some(frame) => (
+                        frame.to_display_pt(left, bottom),
+                        frame.to_display_pt(right, top),
+                    ),
+                    None => ((left, bottom), (right, top)),
+                };
+                let (near, far) = (x0.min(x1), x0.max(x1));
+                let (low, high) = (y0.min(y1), y0.max(y1));
+                TextLine {
+                    text: said,
+                    x_mm: crate::geometry::pt_to_mm(near),
+                    // PDF counts up from the bottom of the paper and Onionskin
+                    // counts down from the top.
+                    y_mm: crate::geometry::pt_to_mm(height_pt - high),
+                    width_mm: crate::geometry::pt_to_mm(far - near),
+                    height_mm: crate::geometry::pt_to_mm(high - low),
+                }
             })
             .collect())
     }
