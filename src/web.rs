@@ -230,11 +230,38 @@ fn handle(mut stream: TcpStream) {
     };
 }
 
+/// The longest a request line or one header may be.
+///
+/// A browser's longest header is a few kilobytes. Without a limit, a client
+/// that opens a connection and sends bytes with no newline in them grows the
+/// string it is being read into until the machine runs out of memory — and
+/// `MAX_BODY` does not help, because it is checked after the headers are read.
+const MOST_HEADER: u64 = 16 * 1024;
+
+/// How many headers are read before the request is treated as nonsense.
+const MOST_HEADERS: usize = 100;
+
+/// How long a connection may take to say anything.
+///
+/// A client that opens a connection and then says nothing at all held a thread
+/// for ever, and `serve` spawns one per connection with no ceiling. On this
+/// machine that is somebody's own browser hanging; bound to a network address
+/// — which the code allows, with a warning — it is anybody on the office
+/// network stopping the machine.
+///
+/// Thirty seconds is far longer than a local browser ever needs and far
+/// shorter than for ever.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
+    let _ = stream.set_read_timeout(Some(PATIENCE));
+    let _ = stream.set_write_timeout(Some(PATIENCE));
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
 
+    // Each line is read through its own limit, so a line with no end to it
+    // stops at the limit rather than at the end of memory.
     let mut line = String::new();
-    reader
+    Read::take(&mut reader, MOST_HEADER)
         .read_line(&mut line)
         .map_err(|e| format!("could not read the request: {e}"))?;
     let mut parts = line.split_whitespace();
@@ -244,9 +271,14 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     let mut content_length = 0usize;
     let mut content_type = String::new();
     let mut accept = String::new();
+    let mut headers_read = 0usize;
     loop {
+        headers_read += 1;
+        if headers_read > MOST_HEADERS {
+            return Err("that request has more headers than a request has.".to_string());
+        }
         let mut header = String::new();
-        let read = reader
+        let read = Read::take(&mut reader, MOST_HEADER)
             .read_line(&mut header)
             .map_err(|e| format!("could not read the headers: {e}"))?;
         if read == 0 || header.trim().is_empty() {

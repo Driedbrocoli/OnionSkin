@@ -55,6 +55,14 @@ pub struct State {
     /// it again — reading is three passes of template matching over every mark
     /// on the sheet, and the page has not changed between one and the next.
     read: Option<onionskin::letters::PageText>,
+    /// Whether the paper size was taken from the file rather than typed.
+    ///
+    /// A PDF says how big its own pages are, so asking is asking somebody to
+    /// answer a question the file already answered — and to get it wrong,
+    /// which puts every word somewhere else on the sheet. A photograph of a
+    /// page says nothing about the paper, so for one of those the question is
+    /// real and is still asked.
+    paper_known: bool,
 }
 
 impl Default for State {
@@ -74,8 +82,24 @@ impl Default for State {
             anchor_said: None,
             anchor_below: false,
             read: None,
+            paper_known: false,
         }
     }
+}
+
+/// How big this file says its own pages are, where it says.
+///
+/// A PDF carries its page size; a photograph of a page does not, so this
+/// answers `None` for one and the screen goes on asking. Opening the document
+/// costs a parse of its page tree and nothing else — no rendering — and it
+/// happens once, when a file is chosen, rather than on every frame.
+fn paper_of(path: &std::path::Path) -> Option<geometry::PageSize> {
+    if crate::preview::is_image(path) {
+        return None;
+    }
+    let engine = onionskin::render::engine().ok()?;
+    let document = engine.open(path).ok()?;
+    document.page_sizes.first().copied()
 }
 
 pub fn show(state: &mut State, room: &mut Room) {
@@ -87,7 +111,11 @@ pub fn show(state: &mut State, room: &mut Room) {
         room.picker,
         "The scan",
         &mut state.scan,
-        &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+        // A PDF as well as a photograph, because most people asking to write
+        // on a sheet they have already printed still have the file it was
+        // printed from — and being told this screen only takes pictures sends
+        // them off to scan a page they did not need to scan.
+        &["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"],
         room.dropped,
     ) {
         // A different sheet: everything worked out about the last one is now
@@ -95,18 +123,35 @@ pub fn show(state: &mut State, room: &mut Room) {
         state.read = None;
         state.matched = None;
         state.anchor_said = None;
+        state.paper_known = false;
+        if let Some(chosen) = &state.scan {
+            if let Some(size) = paper_of(chosen) {
+                state.page = format!("{:.1}x{:.1}", size.width_mm, size.height_mm);
+                state.paper_known = true;
+            }
+        }
     }
 
-    room.ui.horizontal(|ui| {
-        ui.label("Paper size");
-        ui.text_edit_singleline(&mut state.page);
-    });
-    widgets::hint(
-        room.ui,
-        "a4, letter, legal, a5, or a custom size such as 210x297 (mm). This \
-         must match the sheet that was scanned — it is what turns a click, \
-         and the delta itself, into millimetres on the real page.",
-    );
+    if state.paper_known {
+        widgets::hint(
+            room.ui,
+            &format!(
+                "The page is {} — read from the file, so there is nothing to measure.",
+                state.page
+            ),
+        );
+    } else {
+        room.ui.horizontal(|ui| {
+            ui.label("How big is the paper?");
+            ui.text_edit_singleline(&mut state.page);
+        });
+        widgets::hint(
+            room.ui,
+            "a4, letter, legal, a5, or a custom size such as 210x297 (mm). A \
+             photograph does not say how big the paper was, and this is what \
+             turns a click into millimetres on the real page.",
+        );
+    }
 
     room.ui.add_space(6.0);
     let picker = &mut *room.picker;
@@ -178,9 +223,9 @@ pub fn show(state: &mut State, room: &mut Room) {
         );
         widgets::hint(
             ui,
-            "Optional. Overrides the font above, and is carried inside the \
-             delta — needed only for letters Helvetica, Times and Courier \
-             cannot write.",
+            "Optional. Overrides the font above, and travels with the page \
+             — needed only for letters Helvetica, Times and Courier cannot \
+             write.",
         );
 
         ui.horizontal(|ui| {
@@ -232,11 +277,11 @@ pub fn show(state: &mut State, room: &mut Room) {
     widgets::save_row(
         room.ui,
         room.picker,
-        "Where to save the delta",
+        "Where to save the page to print",
         &mut state.output,
         "delta.pdf",
         &["pdf"],
-        "beside the scan, as delta.pdf",
+        "beside the sheet, as delta.pdf",
     );
 
     room.ui.add_space(6.0);
@@ -248,7 +293,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         .ui
         .add_enabled(
             ready && !busy,
-            egui::Button::new(egui::RichText::new("Write the delta").strong()),
+            egui::Button::new(egui::RichText::new("Make the page to print").strong()),
         )
         .clicked()
     {
@@ -491,7 +536,7 @@ fn start(state: &mut State, room: &mut Room) {
 
     room.previews.forget(&output);
     let target = output.clone();
-    room.jobs.start("Writing the delta", move |report| {
+    room.jobs.start("Making the page", move |report| {
         let embedded = match &font_file {
             Some(path) => {
                 report.saying("Loading the font…");
@@ -522,7 +567,7 @@ fn start(state: &mut State, room: &mut Room) {
                     "Pass --font-file with a .ttf that covers your language and \
                      it will be carried inside the delta.",
                     "Choose a font file above that covers your language — it \
-                     will be carried inside the delta.",
+                     will travel with the page.",
                 );
                 if let Some(path) = font::suggest_system_font() {
                     message.push_str(&format!(

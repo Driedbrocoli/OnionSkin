@@ -174,6 +174,66 @@ impl Screen {
         Screen::Doctor,
     ];
 
+    /// The same screens, under headings, in the order the list is read.
+    ///
+    /// [`Screen::ALL`] is what exists; this is how somebody finds it. Twenty-six
+    /// names down the side of a window, in one undifferentiated column, is not
+    /// a list anybody reads — it is a wall to be scrolled past, and the screen
+    /// somebody actually wants is somewhere in it. Six headings turn "read
+    /// twenty-six names" into "read six, then read four".
+    ///
+    /// Kept apart from `ALL` rather than replacing it, because `ALL` is what
+    /// `key`, `from_key` and the counting test are written against — and
+    /// because a screen dropped out of a grouping by accident would then simply
+    /// vanish from the window. The test below counts one against the other so
+    /// it cannot.
+    ///
+    /// The headings are in the person's words rather than the program's: not
+    /// "delta", not "registration", not "vector". Somebody arriving at this
+    /// window is holding a sheet of paper and knows what they want to do to it.
+    pub const GROUPS: &'static [(&'static str, &'static [Screen])] = &[
+        (
+            "ADD SOMETHING TO A SHEET",
+            &[
+                Screen::Scan,
+                Screen::Watermark,
+                Screen::Correct,
+                Screen::Cover,
+                Screen::Barcode,
+                Screen::Back,
+                Screen::Blanks,
+                Screen::Draw,
+            ],
+        ),
+        (
+            "PRINT ONLY WHAT CHANGED",
+            // `Document` belongs here: the whole point of that screen is that
+            // each print carries only what was added since the last one.
+            &[
+                Screen::Compare,
+                Screen::Document,
+                Screen::Merge,
+                Screen::Join,
+            ],
+        ),
+        (
+            "THE SAME THING, MANY TIMES",
+            &[Screen::Batch, Screen::Labels, Screen::Jobs, Screen::Watch],
+        ),
+        (
+            "CHECK IT",
+            &[Screen::Proof, Screen::Fits, Screen::Verify, Screen::History],
+        ),
+        (
+            "GET WORDS BACK OFF PAPER",
+            &[Screen::Read, Screen::Harvest, Screen::Stack],
+        ),
+        (
+            "THIS MACHINE",
+            &[Screen::Devices, Screen::Calibrate, Screen::Doctor],
+        ),
+    ];
+
     /// A short name to write in the settings file — the visible one is a
     /// sentence, and a sentence in a settings file is a sentence somebody will
     /// eventually reword.
@@ -219,13 +279,13 @@ impl Screen {
     pub fn name(&self) -> &'static str {
         match self {
             Screen::Compare => "Compare two documents",
-            Screen::Scan => "Write on a scan",
+            Screen::Scan => "Write on a sheet",
             Screen::Document => "Make a document",
             Screen::Draw => "Draw on a page",
             Screen::Read => "Read a scan",
-            Screen::Blanks => "Where there is room",
-            Screen::Proof => "See it before you print",
-            Screen::Merge => "Merge deltas",
+            Screen::Blanks => "Find the gaps on a form",
+            Screen::Proof => "Look at it on screen first",
+            Screen::Merge => "Two sets of additions, one pass",
             Screen::Join => "Join files",
             Screen::Labels => "Sheet of labels",
             Screen::Jobs => "Saved jobs",
@@ -237,13 +297,13 @@ impl Screen {
             Screen::Barcode => "A barcode or a QR code",
             Screen::Back => "The back of the sheet",
             Screen::Harvest => "Forms into a spreadsheet",
-            Screen::Fits => "Check before printing",
+            Screen::Fits => "Is this the right sheet?",
             Screen::Stack => "Sort a stack",
-            Screen::Verify => "Check a sheet or a run",
-            Screen::History => "What was added",
+            Screen::Verify => "Did it come out right?",
+            Screen::History => "Have I printed this already?",
             Screen::Devices => "Printers and scanners",
-            Screen::Calibrate => "Calibration",
-            Screen::Doctor => "This machine",
+            Screen::Calibrate => "Measure your printer",
+            Screen::Doctor => "What works here",
         }
     }
 
@@ -252,17 +312,17 @@ impl Screen {
     pub fn lede(&self) -> &'static str {
         match self {
             Screen::Compare => "Print only what changed between two files",
-            Screen::Scan => "Type onto a page you only have as a scan",
+            Screen::Scan => "Put words where you point on the page",
             Screen::Document => "Start from blank paper and keep adding",
             Screen::Draw => "Lines, boxes and circles, in any colour",
             Screen::Read => "Turn a scan into a Word document",
             Screen::Blanks => "Ask the form where you can write, in millimetres",
-            Screen::Proof => "The sheet and the delta together, on screen",
+            Screen::Proof => "The sheet and the new words together, on screen",
             Screen::Merge => "Several onto one, so the sheet goes through once",
             Screen::Join => "Several one after another, into one document",
             Screen::Labels => "Addresses and files, one per label, from a list",
             Screen::Jobs => "The same stamp on today's document, in two clicks",
-            Screen::Watch => "Scan to a folder, and the delta is waiting for you",
+            Screen::Watch => "Scan to a folder, and the new page is waiting for you",
             Screen::Batch => "Two hundred certificates, two hundred names",
             Screen::Correct => "Cover the wrong words and set the right ones",
             Screen::Cover => "Print solid over what must not be read",
@@ -270,13 +330,13 @@ impl Screen {
             Screen::Barcode => "An asset number or a link, worked out here",
             Screen::Back => "Terms, an address, \"continued overleaf\"",
             Screen::Harvest => "Read the sheets back instead of typing them",
-            Screen::Fits => "Is this the sheet the delta was made for?",
+            Screen::Fits => "Same size, same page, before the sheet goes in the tray",
             Screen::Stack => "Which document is each sheet from the feeder?",
-            Screen::Verify => "Did it come out of the printer right — one sheet, or all of them?",
-            Screen::History => "Have I printed this delta already?",
+            Screen::Verify => "Check the printed sheet — one of them, or the whole run",
+            Screen::History => "Everything that has been written, and when",
             Screen::Devices => "Print and scan over the network",
-            Screen::Calibrate => "Measure a printer, once, for exactness",
-            Screen::Doctor => "What works here, and what is missing",
+            Screen::Calibrate => "Once, so the words land where you asked",
+            Screen::Doctor => "What is installed, and what is missing",
         }
     }
 }
@@ -376,6 +436,98 @@ mod tests {
         }
         assert_eq!(Screen::from_key("no-such-screen"), None);
         assert_eq!(Screen::from_key(""), None);
+    }
+    /// Every screen has to be in a group as well, or it is invisible.
+    ///
+    /// `GROUPS` is what the sidebar is actually drawn from now, and it is a
+    /// hand-written list of hand-written lists — so a screen left out of it
+    /// compiles, passes every other test, and simply is not in the window.
+    /// That is the same fault the test above exists for, one level further in.
+    #[test]
+    fn every_screen_is_under_a_heading_and_only_one() {
+        let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+        for (heading, screens) in Screen::GROUPS {
+            assert!(
+                !screens.is_empty(),
+                "the heading '{heading}' has nothing under it"
+            );
+            for screen in *screens {
+                assert!(
+                    seen.insert(screen.key()),
+                    "{} is under two headings, so it appears in the list twice",
+                    screen.key()
+                );
+            }
+        }
+        for screen in Screen::ALL {
+            assert!(
+                seen.contains(screen.key()),
+                "{} is in ALL and under no heading, so nobody can reach it",
+                screen.key()
+            );
+        }
+        assert_eq!(seen.len(), Screen::ALL.len());
+    }
+
+    /// The window's own words, not the program's.
+    ///
+    /// "Delta" is the word this program thinks in and nobody else does. A
+    /// person arriving at this window is holding a sheet of paper; every name
+    /// and every sentence under one has to make sense to them before they have
+    /// read anything else. The rest of the vocabulary here is the same kind:
+    /// registration, raster, vector, XObject — all true, none of them a word
+    /// anybody would use about a piece of paper.
+    ///
+    /// The headings are held to it too, because they are read first.
+    #[test]
+    fn nothing_in_the_list_is_said_in_the_programs_own_words() {
+        const NOT_OUR_WORDS: &[&str] = &[
+            "delta",
+            "raster",
+            "vector",
+            "registration",
+            "xobject",
+            "dpi",
+            "rasterise",
+            "coincident",
+            "affine",
+        ];
+        for screen in Screen::ALL {
+            for said in [screen.name(), screen.lede()] {
+                let plain = said.to_lowercase();
+                for word in NOT_OUR_WORDS {
+                    assert!(
+                        !plain.contains(word),
+                        "{}: '{said}' says '{word}', which is a word for the inside                          of the program and not for the person reading it",
+                        screen.key()
+                    );
+                }
+            }
+        }
+        for (heading, _) in Screen::GROUPS {
+            let plain = heading.to_lowercase();
+            for word in NOT_OUR_WORDS {
+                assert!(
+                    !plain.contains(word),
+                    "the heading '{heading}' says '{word}'"
+                );
+            }
+        }
+    }
+
+    /// Four screens were four spellings of "check", which a stranger cannot
+    /// tell apart — so each is now the question it answers, and no two of them
+    /// may be the same question.
+    #[test]
+    fn no_two_screens_are_called_the_same_thing() {
+        let mut names: BTreeSet<&'static str> = BTreeSet::new();
+        for screen in Screen::ALL {
+            assert!(
+                names.insert(screen.name()),
+                "two screens are both called '{}'",
+                screen.name()
+            );
+        }
     }
 }
 

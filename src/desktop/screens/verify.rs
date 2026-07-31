@@ -48,7 +48,7 @@ impl Default for State {
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "Check a sheet, or a whole run",
+        "Did it come out right?",
         "Print one, scan it, and find out before you print sixty — or check all \
          sixty at once.",
     );

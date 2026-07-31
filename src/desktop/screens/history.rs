@@ -31,8 +31,8 @@ pub struct State {
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "What was added, and when",
-        "Every delta this machine has written, most recent first.",
+        "Have I printed this already?",
+        "Everything this machine has written, most recent first.",
     );
 
     let entries = state

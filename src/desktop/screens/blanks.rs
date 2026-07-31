@@ -73,7 +73,7 @@ const FORM_KINDS: &[&str] = &["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "Where there is room to write",
+        "Find the gaps on a form",
         "Ask the form, instead of measuring it with a ruler.",
     );
 
@@ -178,7 +178,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         widgets::hint(
             room.ui,
             "Beside a label first, then widest. Copy one and paste it into \
-             'Write on a scan'.",
+             'Write on a sheet'.",
         );
         room.ui.add_space(6.0);
 

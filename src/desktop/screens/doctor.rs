@@ -41,8 +41,8 @@ enum Verdict {
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "This machine",
-        "What Onionskin can do here, and what it cannot.",
+        "What works here",
+        "What Onionskin can do on this machine, and what it cannot.",
     );
 
     if state.checks.is_none() {

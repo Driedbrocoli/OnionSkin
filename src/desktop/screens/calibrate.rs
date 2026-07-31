@@ -49,8 +49,8 @@ impl Default for State {
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "Calibration",
-        "Measure a printer once, and every delta after it lands truer.",
+        "Measure your printer",
+        "Once, and everything printed after it lands truer.",
     );
 
     widgets::caution(

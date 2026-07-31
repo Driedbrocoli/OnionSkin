@@ -54,7 +54,7 @@ impl Default for State {
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "Check the sheet before you feed it",
+        "Is this the right sheet?",
         "Hold the delta against the sheet and see what is underneath.",
     );
 

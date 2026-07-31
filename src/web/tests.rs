@@ -1700,3 +1700,97 @@ fn the_backs_come_with_the_instruction_that_cannot_be_guessed() {
         "the test sheet came with no way to read it: {said:?}"
     );
 }
+
+/// A connection that never says anything must not hold a thread for ever.
+///
+/// The server spawns one thread per connection with no ceiling, and nothing
+/// ever set a read timeout — so a client that opened a connection and then
+/// went quiet kept its thread until the program stopped. On this machine that
+/// is somebody's own browser; bound to a network address, which the code
+/// allows with a warning, it is anybody on the office network stopping the
+/// machine with a handful of sockets.
+#[test]
+fn a_connection_that_says_nothing_is_let_go_of() {
+    let address = start();
+    let mut quiet = TcpStream::connect(&address).expect("it should connect");
+    // Well under the server's own patience, so this is not the test waiting
+    // it out — it is the test checking the thread has not been claimed for
+    // ever while the server carries on serving.
+    quiet
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .unwrap();
+    let mut scratch = [0u8; 16];
+    let _ = std::io::Read::read(&mut quiet, &mut scratch);
+
+    // Somebody else's request goes through while that one is still hanging on.
+    let response = get(&address, "/");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response:.120}");
+    drop(quiet);
+}
+
+/// A request line with no end to it must stop at a limit, not at the end of
+/// memory.
+///
+/// The line was read into a fresh String with no cap, and `MAX_BODY` is no
+/// help because it is checked after the headers. A client sending bytes with
+/// no newline in them grew that String until the machine ran out.
+#[test]
+fn a_request_with_no_end_to_it_is_refused_rather_than_swallowed() {
+    let address = start();
+
+    // Sent without `request`, because the server is *meant* to give up and
+    // close part-way through — so the write fails, and that failing is the
+    // behaviour under test rather than a fault in the test. How much it took
+    // before giving up comes back too, because for the endless line that is
+    // the whole question.
+    let refused = |raw: &[u8]| -> (String, usize) {
+        let mut stream = TcpStream::connect(&address).expect("it should connect");
+        let mut taken = 0usize;
+        for piece in raw.chunks(8 * 1024) {
+            if stream.write_all(piece).is_err() {
+                break;
+            }
+            taken += piece.len();
+        }
+        let _ = stream.flush();
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        (String::from_utf8_lossy(&response).to_string(), taken)
+    };
+
+    // A first line far longer than any request line, and no newline at all.
+    //
+    // Eight megabytes, and the assertion is that the server does *not* take
+    // all of it. Refusing at the end would be no defence: the fault was that
+    // the line grew in memory without limit, so what has to be true is that
+    // the reading stops. A refusal on its own proves nothing, because a
+    // server that swallowed the lot would refuse at the end too.
+    let mut endless = Vec::from(&b"GET /"[..]);
+    endless.extend(std::iter::repeat(b'a').take(8 * 1024 * 1024));
+    let (response, taken) = refused(&endless);
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "an endless request line was not refused: {response:.120}"
+    );
+    assert!(
+        taken < endless.len(),
+        "the server read all {} bytes of a request line with no end to it",
+        endless.len()
+    );
+
+    // And a request with an absurd number of headers.
+    let mut many = Vec::from(&b"GET / HTTP/1.1\r\nHost: localhost\r\n"[..]);
+    for n in 0..500 {
+        many.extend(format!("X-Made-Up-{n}: value\r\n").into_bytes());
+    }
+    many.extend_from_slice(b"\r\n");
+    let (response, _) = refused(&many);
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "five hundred headers were accepted: {response:.120}"
+    );
+
+    // The server is still serving, which is the point of refusing rather than
+    // falling over.
+    assert!(get(&address, "/").starts_with("HTTP/1.1 200 OK"));
+}

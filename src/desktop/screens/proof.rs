@@ -22,7 +22,7 @@ use crate::widgets;
 pub struct State {
     /// The sheet as it is now: the PDF that was printed.
     sheet: Option<std::path::PathBuf>,
-    /// The delta that would go onto it.
+    /// The page that would go onto it.
     delta: Option<std::path::PathBuf>,
     output: Option<std::path::PathBuf>,
     /// Fade the sheet almost away, as though holding it up to the light.
@@ -43,8 +43,8 @@ const COLOURS: &[(&str, &str)] = &[
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "See it before you print it",
-        "The sheet and the delta together, in a PDF. No paper involved.",
+        "Look at it on screen first",
+        "The sheet and the new words together, in a PDF. No paper involved.",
     );
 
     widgets::hint(
@@ -66,7 +66,7 @@ pub fn show(state: &mut State, room: &mut Room) {
     widgets::file_row(
         room.ui,
         room.picker,
-        "The delta that would go onto it",
+        "The page that would go onto it",
         &mut state.delta,
         &["pdf"],
         room.dropped,

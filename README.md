@@ -258,32 +258,68 @@ drop two documents on the comparing screen and they fill both, in order. The
 window opens on the screen you were last using, and the file browser opens in
 the folder you last chose something from.
 
-Down the side, in the order somebody meets them:
+Down the side, under six headings, so twenty-six names is a list rather than
+a wall:
+
+**Add something to a sheet**
+
+| | |
+|---|---|
+| **Write on a sheet** | Put words where you point on the page |
+| **Stamp a word across it** | DRAFT, COPY or VOID, corner to corner |
+| **Fix a mistake** | Cover the wrong words and set the right ones |
+| **Cover something up** | Print solid over what must not be read |
+| **A barcode or a QR code** | An asset number or a link, worked out here |
+| **The back of the sheet** | Terms, an address, "continued overleaf" |
+| **Find the gaps on a form** | Ask the form where you can write, in millimetres |
+| **Draw on a page** | Lines, boxes and circles, in any colour |
+
+**Print only what changed**
 
 | | |
 |---|---|
 | **Compare two documents** | Print only what changed between two files |
-| **Write on a scan** | Type onto a page you only have as a scan |
 | **Make a document** | Start from blank paper and keep adding |
-| **Draw on a page** | Lines, boxes and circles, in any colour |
-| **Read a scan** | Turn a scan into a Word document |
-| **Where there is room** | Ask the form where you can write, in millimetres |
-| **Fix a mistake** | Cover the wrong words and set the right ones |
-| **Cover something up** | Print solid over what must not be read |
-| **See it before you print** | The sheet and the delta together, on screen |
-| **Merge deltas** | Several onto one, so the sheet goes through once |
+| **Two sets of additions, one pass** | Several onto one, so the sheet goes through once |
 | **Join files** | Several one after another, into one document |
+
+**The same thing, many times**
+
+| | |
+|---|---|
 | **One each, from a list** | Two hundred certificates, two hundred names |
 | **Sheet of labels** | Addresses and files, one per label, from a list |
 | **Saved jobs** | The same stamp on today's document, in two clicks |
-| **Watch a folder** | Scan to a folder, and the delta is waiting for you |
-| **Check before printing** | Is this the sheet the delta was made for? |
+| **Watch a folder** | Scan to a folder, and the new page is waiting for you |
+
+**Check it**
+
+| | |
+|---|---|
+| **Look at it on screen first** | The sheet and the new words together, on screen |
+| **Is this the right sheet?** | Same size, same page, before the sheet goes in the tray |
+| **Did it come out right?** | Check the printed sheet — one of them, or the whole run |
+| **Have I printed this already?** | Everything that has been written, and when |
+
+**Get words back off paper**
+
+| | |
+|---|---|
+| **Read a scan** | Turn a scan into a Word document |
+| **Forms into a spreadsheet** | Read the sheets back instead of typing them |
 | **Sort a stack** | Which document is each sheet from the feeder? |
-| **Check a sheet or a run** | Did it come out right — one sheet, or all of them? |
-| **What was added** | Have I printed this delta already? |
+
+**This machine**
+
+| | |
+|---|---|
 | **Printers and scanners** | Print and scan over the network |
-| **Calibration** | Measure a printer, once, for exactness |
-| **This machine** | What works here, and what is missing |
+| **Measure your printer** | Once, so the words land where you asked |
+| **What works here** | What is installed, and what is missing |
+
+The first time the window is opened it asks what you want to do, and offers the
+three things it is nearly always for. After that it opens where you left off,
+and the question is one line at the top of the list.
 
 Everything the command line can do that involves a file and a printer has a
 screen. The two share the same library underneath — a run of two hundred sheets
@@ -310,7 +346,7 @@ wants, and the sorter asks each sheet which document it belongs with and files
 it under that name. Nothing is written until you tick the box — reporting on a
 stack is the safe thing to do first.
 
-**Where there is room** is the one that matters most if you have never measured
+**Find the gaps on a form** is the one that matters most if you have never measured
 anything in millimetres. Give it the form — as a PDF, or a photograph of the
 paper — and it lists every empty place with a **Copy** button, which pastes
 straight into the writing screen. No ruler, no image editor, no arithmetic.

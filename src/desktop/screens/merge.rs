@@ -26,7 +26,7 @@ pub struct State {
 pub fn show(state: &mut State, room: &mut Room) {
     widgets::title(
         room.ui,
-        "Several deltas, one pass",
+        "Two sets of additions, one pass",
         "Put them onto one page, so the sheet goes through the printer once.",
     );
 

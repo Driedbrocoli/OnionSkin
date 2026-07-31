@@ -12,7 +12,7 @@
 //! printed, and printing showing through the bars changes their widths — which
 //! does not produce a barcode that reads wrongly, it produces one that does not
 //! read at all. So the warning is above the button, and the screen points at
-//! "Where there is room" rather than leaving somebody to find out with sixty
+//! "Find the gaps on a form" rather than leaving somebody to find out with sixty
 //! sheets printed.
 
 use eframe::egui;

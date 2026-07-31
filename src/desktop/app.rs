@@ -19,6 +19,10 @@ pub struct Onionskin {
     dropped: Vec<std::path::PathBuf>,
     /// Something to say along the bottom, and when it was said.
     said: Option<(String, f64)>,
+    /// Whether "What do you want to do?" is open. See
+    /// [`Onionskin::what_do_you_want_to_do`]. Never written to settings —
+    /// there is nothing worth remembering about whether a hint was expanded.
+    front_open: bool,
 
     compare: screens::compare::State,
     scan: screens::scan::State,
@@ -53,11 +57,19 @@ impl Onionskin {
         theme::apply(&cc.egui_ctx);
         // Where somebody was last time. Opening on the screen they left is a
         // small thing that makes the program feel like it was waiting.
-        let screen = onionskin::settings::load()
+        //
+        // And when there is no last time, `Screen::Scan` rather than
+        // `Screen::Compare`. Comparing two documents is the one screen that
+        // fails outright when the PDF renderer is missing — everything else
+        // works without it — which makes it the worst possible first door.
+        // Writing on a sheet is also the thing most people came for.
+        let settings = onionskin::settings::load();
+        let front_open = settings.last_screen.is_none();
+        let screen = settings
             .last_screen
             .as_deref()
             .and_then(Screen::from_key)
-            .unwrap_or(Screen::Compare);
+            .unwrap_or(Screen::Scan);
         Onionskin {
             screen,
             jobs: Jobs::new(&cc.egui_ctx),
@@ -65,6 +77,7 @@ impl Onionskin {
             picker: picker::Picker::default(),
             dropped: Vec::new(),
             said: None,
+            front_open,
             compare: Default::default(),
             join: Default::default(),
             fits: Default::default(),
@@ -293,42 +306,133 @@ impl Onionskin {
                 .small()
                 .weak(),
         );
-        ui.add_space(14.0);
+        ui.add_space(12.0);
 
-        // Written down rather than acted on inside the loop, because changing
-        // the screen borrows `self` and the loop is already holding it.
+        // Written down rather than acted on where it is clicked, because
+        // changing the screen borrows `self` and the drawing is already
+        // holding it.
         let mut chose: Option<Screen> = None;
         let here = self.screen;
+
+        chose = self.what_do_you_want_to_do(ui).or(chose);
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for screen in Screen::ALL {
-                    let chosen = here == *screen;
-                    let response =
-                        ui.selectable_label(chosen, egui::RichText::new(screen.name()).strong());
-                    if response.clicked() {
-                        chose = Some(*screen);
+                for (heading, screens) in Screen::GROUPS {
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new(*heading).small().weak().strong());
+                    for screen in *screens {
+                        let chosen = here == *screen;
+                        let response = ui
+                            .selectable_label(chosen, egui::RichText::new(screen.name()).strong())
+                            .on_hover_text(screen.lede());
+                        if response.clicked() {
+                            chose = Some(*screen);
+                        }
+                        // The sentence beneath is what lets somebody pick the
+                        // right screen without opening six to find out what
+                        // they do. Under the chosen one only, and on hover for
+                        // the rest: twenty-six names each with a wrapped
+                        // sentence under it is a list half again as tall as
+                        // the window, and a list that long is not read at all.
+                        if chosen {
+                            ui.indent(screen.name(), |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(screen.lede()).small().weak(),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        }
                     }
-                    // The sentence beneath is what lets somebody pick the right
-                    // screen without opening all six to find out what they do.
-                    // Wrapped, or the longer ones run off the edge of the panel
-                    // and lose their last word — which is usually the one that
-                    // distinguishes them.
-                    ui.indent(screen.name(), |ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(screen.lede()).small().weak())
-                                .wrap(),
-                        );
-                    });
-                    ui.add_space(4.0);
                 }
+                ui.add_space(12.0);
             });
 
         if let Some(screen) = chose {
             self.screen = screen;
             let key = screen.key();
             onionskin::settings::remember(|settings| settings.last_screen = Some(key.to_string()));
+            self.front_open = false;
         }
+    }
+
+    /// The first thing a person who has never used this before reads.
+    ///
+    /// Twenty-six screens down the side is a complete answer to a question
+    /// nobody asked. Somebody opening this window for the first time is
+    /// holding a sheet of paper; what they need is not a list of everything
+    /// the program can do, it is the three things it is nearly always for,
+    /// said in the words they would use themselves.
+    ///
+    /// Shown expanded exactly once in a person's life — `last_screen` is unset
+    /// only before they have ever chosen a screen, which is the whole
+    /// first-run detector: no new setting, nothing to migrate. Afterwards it
+    /// is one line at the top of the panel, and that line is the entire
+    /// ongoing cost of this to somebody who already knows their way around.
+    fn what_do_you_want_to_do(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
+        if !self.front_open {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("› What do you want to do?")
+                        .small()
+                        .weak(),
+                ))
+                .clicked()
+            {
+                self.front_open = true;
+            }
+            return None;
+        }
+
+        let mut chose = None;
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("What do you want to do?").strong());
+            ui.add_space(6.0);
+            // Nothing is filled in by any of these, on purpose: a button that
+            // fills something in is a button that can fill it in wrongly, and
+            // the first control on every one of these screens asks for a file
+            // anyway.
+            for (screen, said, then) in [
+                (
+                    Screen::Scan,
+                    "Write on a sheet I already printed",
+                    "PAID on an invoice, a date, a name",
+                ),
+                (
+                    Screen::Compare,
+                    "Print only what changed",
+                    "You edited the file. Print the edits onto the sheet still in the tray.",
+                ),
+                (
+                    Screen::Batch,
+                    "The same thing, two hundred times",
+                    "A different name on each certificate",
+                ),
+            ] {
+                let width = ui.available_width();
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(said).strong())
+                            .wrap()
+                            .min_size(egui::vec2(width, 0.0)),
+                    )
+                    .clicked()
+                {
+                    chose = Some(screen);
+                }
+                ui.add(egui::Label::new(egui::RichText::new(then).small().weak()).wrap());
+                ui.add_space(8.0);
+            }
+            ui.label(
+                egui::RichText::new("Or pick from the list below.")
+                    .small()
+                    .weak(),
+            );
+        });
+        chose
     }
 
     fn status(&mut self, ui: &mut egui::Ui) {

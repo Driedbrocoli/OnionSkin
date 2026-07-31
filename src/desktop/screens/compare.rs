@@ -223,7 +223,7 @@ pub fn show(state: &mut State, room: &mut Room) {
         ui.horizontal(|ui| {
             ui.label("Printer profile");
             ui.text_edit_singleline(&mut state.profile);
-            widgets::hint(ui, "optional — see Calibration");
+            widgets::hint(ui, "optional — see 'Measure your printer'");
         });
 
         // Folded away inside Settings, which is itself folded away. Two
