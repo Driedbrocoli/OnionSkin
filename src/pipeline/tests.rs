@@ -1221,3 +1221,107 @@ fn a_cropped_page_gets_the_raster_delta_and_is_told_so() {
         "an ordinary page lost its vector delta"
     );
 }
+
+/// Where the ink actually lands, on the two page shapes that make display
+/// space and user space different things.
+///
+/// A crop box that does not start at the origin, and a `/Rotate`, are both
+/// ordinary: a phone scan has the first, a scanned landscape page the second.
+/// Between the diff, the calibration and the conforming there are three
+/// matrices on the way to the paper, and a transposed sign in any of them is
+/// invisible in the file — the delta opens, has the right pages, and puts ink
+/// somewhere.
+///
+/// So it is measured rather than reasoned about. The addition's real position
+/// is found by rendering both documents and taking what is dark in the second
+/// and not the first; the delta's by rendering the delta. They have to agree
+/// in millimetres of paper, because that is what agreeing means when the two
+/// impressions land on one sheet.
+#[test]
+fn a_delta_on_a_turned_or_cropped_page_lands_where_the_addition_is() {
+    let Ok(engine) = render::engine() else { return };
+    const DPI: f64 = 150.0;
+    let px_per_mm = DPI / 25.4;
+
+    let ink = |path: &Path| -> (Vec<u8>, usize, usize) {
+        let drawn = engine
+            .open(path)
+            .expect("it should open")
+            .render_gray(0, DPI)
+            .expect("it should draw");
+        (drawn.gray, drawn.width, drawn.height)
+    };
+    let corner_of =
+        |dark: &dyn Fn(usize, usize) -> bool, w: usize, h: usize| -> Option<(f64, f64)> {
+            let (mut top, mut left) = (usize::MAX, usize::MAX);
+            for y in 0..h {
+                for x in 0..w {
+                    if dark(x, y) {
+                        if y < top {
+                            top = y;
+                        }
+                        left = left.min(x);
+                    }
+                }
+            }
+            (top != usize::MAX).then(|| (left as f64 / px_per_mm, top as f64 / px_per_mm))
+        };
+
+    for turn in [0, 90, 180, 270] {
+        let dir = tempfile::tempdir().unwrap();
+        let awkward = |name: &str, lines: &[(&str, f64)]| -> PathBuf {
+            let plain = a_pdf(dir.path(), &format!("plain-{name}"), lines);
+            let mut pdf = lopdf::Document::load(&plain).unwrap();
+            let page_id = *pdf.get_pages().values().next().unwrap();
+            pdf.get_dictionary_mut(page_id).unwrap().set(
+                "CropBox",
+                lopdf::Object::Array(vec![
+                    36.0f32.into(),
+                    36.0f32.into(),
+                    559.0f32.into(),
+                    806.0f32.into(),
+                ]),
+            );
+            if turn != 0 {
+                pdf.get_dictionary_mut(page_id)
+                    .unwrap()
+                    .set("Rotate", lopdf::Object::Integer(turn));
+            }
+            let path = dir.path().join(name);
+            pdf.save(&path).unwrap();
+            path
+        };
+
+        let before = awkward("before.pdf", &[("Report", 40.0)]);
+        let after = awkward("after.pdf", &[("Report", 40.0), ("APPROVED", 150.0)]);
+        let out = dir.path().join("delta.pdf");
+        run(&before, &after, &out, &quick()).unwrap_or_else(|why| panic!("turned {turn}: {why}"));
+
+        // Where the addition is: dark in the edited document, not in the
+        // original.
+        let (was, w, h) = ink(&before);
+        let (now, _, _) = ink(&after);
+        let (want_x, want_y) = corner_of(
+            &|x, y| {
+                let at = y * w + x;
+                now.get(at).copied().unwrap_or(255) < 128
+                    && was.get(at).copied().unwrap_or(255) >= 128
+            },
+            w,
+            h,
+        )
+        .unwrap_or_else(|| panic!("turned {turn}: the two documents render the same"));
+
+        let (delta, dw, dh) = ink(&out);
+        let (got_x, got_y) = corner_of(&|x, y| delta[y * dw + x] < 128, dw, dh)
+            .unwrap_or_else(|| panic!("turned {turn}: the delta is blank"));
+
+        let out_by = ((got_x - want_x).powi(2) + (got_y - want_y).powi(2)).sqrt();
+        assert!(
+            out_by < 1.5,
+            "turned {turn}: the delta's ink starts at {got_x:.1},{got_y:.1} mm and the \
+             addition is at {want_x:.1},{want_y:.1} — {out_by:.1} mm out, onto a sheet \
+             that cannot be printed again"
+        );
+    }
+}
