@@ -38,6 +38,7 @@ pub struct Onionskin {
     stack: screens::stack::State,
     correct: screens::correct::State,
     cover: screens::cover::State,
+    redact: screens::redact::State,
     watermark: screens::watermark::State,
     barcode: screens::barcode::State,
     back: screens::back::State,
@@ -84,6 +85,7 @@ impl Onionskin {
             stack: Default::default(),
             correct: Default::default(),
             cover: Default::default(),
+            redact: Default::default(),
             watermark: Default::default(),
             barcode: Default::default(),
             back: Default::default(),
@@ -152,6 +154,7 @@ impl eframe::App for Onionskin {
                         Screen::Stack => screens::stack::show(&mut self.stack, &mut room),
                         Screen::Correct => screens::correct::show(&mut self.correct, &mut room),
                         Screen::Cover => screens::cover::show(&mut self.cover, &mut room),
+                        Screen::Redact => screens::redact::show(&mut self.redact, &mut room),
                         Screen::Watermark => {
                             screens::watermark::show(&mut self.watermark, &mut room)
                         }

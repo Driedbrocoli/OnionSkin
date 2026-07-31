@@ -84,6 +84,8 @@ enum Command {
     Batch(BatchArgs),
     /// Print solid over something on a sheet you have to hand over.
     Cover(CoverArgs),
+    /// Take something out of a PDF for good, for a copy you send rather than print.
+    Redact(RedactArgs),
     /// Fix a mistake on a page that is already printed: cover the wrong
     /// words and set the right ones in their place.
     Correct(CorrectArgs),
@@ -1343,6 +1345,124 @@ struct CoverArgs {
     dry_run: bool,
 }
 
+/// Taking something out of a file, rather than printing over it.
+///
+/// The same two ways of saying where as `cover`, because it is the same
+/// question asked of a file instead of a sheet — and somebody who has used one
+/// should not have to learn the other.
+#[derive(clap::Args)]
+struct RedactArgs {
+    /// The document to take something out of.
+    document: PathBuf,
+    /// What to take out: 'X,Y:WIDTHxHEIGHT', with X,Y its top-left corner, in
+    /// millimetres.
+    #[arg(long = "over", value_name = "X,Y:WxH", allow_hyphen_values = true)]
+    over: Vec<String>,
+    /// Take out whatever a word sits on, rather than measuring it: 'Salary'.
+    #[arg(long = "word", value_name = "WORDS")]
+    word: Vec<String>,
+    /// How much beyond the words to take out, in millimetres.
+    #[arg(long, default_value_t = 1.0)]
+    pad: f64,
+    /// Which page, counted from 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
+    /// Where to write the redacted copy.
+    #[arg(short, long, alias = "out")]
+    output: Option<PathBuf>,
+    /// How finely the pages are drawn. Higher is sharper and larger.
+    #[arg(long, default_value_t = onionskin::redact::DEFAULT_DPI)]
+    dpi: f64,
+    /// Open the redacted copy when it is written.
+    #[arg(long)]
+    open: bool,
+    /// Do the whole job and write nothing, so you can see what it would say.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+/// Take something out of a document for good.
+///
+/// The sibling of [`cmd_cover`], and the difference between them is the whole
+/// reason this exists. `cover` puts black ink on a sheet: the toner is on the
+/// paper and there is nothing underneath it. This is for the copy that is
+/// *sent* rather than printed — and drawing a black rectangle in a file hides
+/// nothing at all. The words stay in it, selectable and searchable, which is
+/// how an organisation comes to publish a redacted document and read the
+/// covered names in the newspaper the following week.
+fn cmd_redact(args: RedactArgs) -> Result<ExitCode, String> {
+    if args.over.is_empty() && args.word.is_empty() {
+        return Err("nothing to take out. Say what to remove:\n    \
+             --word 'Salary'            take out whatever that word sits on\n    \
+             --over '40,100:70x8'       take out a rectangle, in millimetres"
+            .into());
+    }
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| beside(&args.document, "-redacted", "pdf"));
+    // Never over the document it came from: the original is the only copy of
+    // what was taken out, and somebody who redacts in place has destroyed the
+    // thing they will need when asked what was removed.
+    refuse_to_clobber(&output, "redacted copy", &[(&args.document, "document")])?;
+    check_writable(&output, "redacted copy")?;
+    let rehearsal = Rehearsal::new(args.dry_run)?;
+
+    let mut areas: Vec<onionskin::redact::Area> = Vec::new();
+    for spec in &args.over {
+        let ((x_mm, y_mm), size) = parse_placement(spec)?;
+        let (width_mm, height_mm) = parse_size(&size)?;
+        areas.push(onionskin::redact::Area {
+            page: args.page,
+            x_mm,
+            y_mm,
+            width_mm,
+            height_mm,
+        });
+    }
+    // Named words are found by reading the page, the same way `cover` and the
+    // anchors do.
+    if !args.word.is_empty() {
+        let page_text = read_a_document(&args.document)?;
+        for wanted in &args.word {
+            let found = onionskin::anchor::boxes_for(&page_text, wanted);
+            if found.is_empty() {
+                return Err(format!(
+                    "nothing on the page reads as '{wanted}', so there is nothing to \
+                     take out — and a file that has had nothing taken out of it must \
+                     not be handed over as though it had.\n    Run `onionskin read` to \
+                     see what is on it, or give millimetres with --over."
+                ));
+            }
+            for rect in found {
+                areas.push(onionskin::redact::Area {
+                    page: args.page,
+                    x_mm: rect.x_mm - args.pad,
+                    y_mm: rect.y_mm - args.pad,
+                    width_mm: rect.width_mm + args.pad * 2.0,
+                    height_mm: rect.height_mm + args.pad * 2.0,
+                });
+            }
+        }
+    }
+
+    let destination = rehearsal.instead_of(&output);
+    let done = onionskin::redact::redact(&args.document, &destination, &areas, args.dpi)
+        .map_err(|e| e.to_string())?;
+
+    println!("{}: redacted.", output.display());
+    for said in done.describe() {
+        for line in wrapped(&said, 74) {
+            println!("  {line}");
+        }
+    }
+    rehearsal.say_nothing_was_written();
+    if !rehearsal.pretending() {
+        open_if_asked(args.open, &output);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// One sheet each, from a spreadsheet.
 ///
 /// Deliberately the same placement flags as `write`, because it is the same
@@ -2189,6 +2309,7 @@ fn run() -> Result<ExitCode, String> {
         Command::Tidy => cmd_tidy(),
         Command::Batch(args) => cmd_batch(args),
         Command::Cover(args) => cmd_cover(args),
+        Command::Redact(args) => cmd_redact(args),
         Command::Correct(args) => cmd_correct(args),
         Command::Print(args) => cmd_print(args),
         Command::Read(args) => cmd_read(args),
@@ -2646,7 +2767,10 @@ fn cmd_cover(args: CoverArgs) -> Result<ExitCode, String> {
          the paper —\n  a strong light behind the sheet may still show it \
          through.\n  \
          For anything that must not be recoverable, print a fresh page \
-         without it."
+         without it.\n  \
+         And if what you are handing over is a file rather than a sheet, use \
+         `onionskin redact`\n  instead — a black rectangle drawn in a PDF \
+         leaves the words in it, selectable."
     );
     rehearsal.say_nothing_was_written();
     if !rehearsal.pretending() {

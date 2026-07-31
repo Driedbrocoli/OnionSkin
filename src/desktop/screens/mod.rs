@@ -25,6 +25,7 @@ pub mod labels;
 pub mod merge;
 pub mod proof;
 pub mod read;
+pub mod redact;
 pub mod scan;
 pub mod stack;
 pub mod verify;
@@ -122,6 +123,7 @@ pub enum Screen {
     Blanks,
     Correct,
     Cover,
+    Redact,
     Watermark,
     Barcode,
     Back,
@@ -154,6 +156,7 @@ impl Screen {
         Screen::Blanks,
         Screen::Correct,
         Screen::Cover,
+        Screen::Redact,
         Screen::Watermark,
         Screen::Barcode,
         Screen::Back,
@@ -228,6 +231,7 @@ impl Screen {
             "GET WORDS BACK OFF PAPER",
             &[Screen::Read, Screen::Harvest, Screen::Stack],
         ),
+        ("SEND IT ON", &[Screen::Redact]),
         (
             "THIS MACHINE",
             &[Screen::Devices, Screen::Calibrate, Screen::Doctor],
@@ -254,6 +258,7 @@ impl Screen {
             Screen::Batch => "batch",
             Screen::Correct => "correct",
             Screen::Cover => "cover",
+            Screen::Redact => "redact",
             Screen::Watermark => "watermark",
             Screen::Barcode => "barcode",
             Screen::Back => "back",
@@ -293,6 +298,7 @@ impl Screen {
             Screen::Batch => "One each, from a list",
             Screen::Correct => "Fix a mistake",
             Screen::Cover => "Cover something up",
+            Screen::Redact => "Take something out for good",
             Screen::Watermark => "Stamp a word across it",
             Screen::Barcode => "A barcode or a QR code",
             Screen::Back => "The back of the sheet",
@@ -326,6 +332,7 @@ impl Screen {
             Screen::Batch => "Two hundred certificates, two hundred names",
             Screen::Correct => "Cover the wrong words and set the right ones",
             Screen::Cover => "Print solid over what must not be read",
+            Screen::Redact => "For a copy you email, not one you print",
             Screen::Watermark => "DRAFT, COPY or VOID, corner to corner",
             Screen::Barcode => "An asset number or a link, worked out here",
             Screen::Back => "Terms, an address, \"continued overleaf\"",
@@ -631,6 +638,7 @@ mod drawing {
         stack: stack::State,
         correct: correct::State,
         cover: cover::State,
+        redact: redact::State,
         watermark: watermark::State,
         barcode: barcode::State,
         back: back::State,
@@ -662,6 +670,7 @@ mod drawing {
                 Screen::Stack => stack::show(&mut self.stack, room),
                 Screen::Correct => correct::show(&mut self.correct, room),
                 Screen::Cover => cover::show(&mut self.cover, room),
+                Screen::Redact => redact::show(&mut self.redact, room),
                 Screen::Watermark => watermark::show(&mut self.watermark, room),
                 Screen::Barcode => barcode::show(&mut self.barcode, room),
                 Screen::Back => back::show(&mut self.back, room),

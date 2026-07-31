@@ -172,7 +172,10 @@ pub fn show(state: &mut State, room: &mut Room) {
         "Covering is not erasing. Solid toner hides the words from the eye and \
          from a photocopier; it does not take the ink off the paper, and a \
          strong light behind the sheet may still show them through. For \
-         anything that must not be recoverable, print a fresh page without them.",
+         anything that must not be recoverable, print a fresh page without \
+         them — and if what you are handing over is a file rather than a \
+         sheet, use 'Take something out for good' instead: a black rectangle \
+         drawn in a PDF leaves the words in it.",
     );
 
     room.ui.add_space(10.0);

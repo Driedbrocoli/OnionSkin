@@ -301,6 +301,12 @@ a wall:
 | **Did it come out right?** | Check the printed sheet — one of them, or the whole run |
 | **Have I printed this already?** | Everything that has been written, and when |
 
+**Send it on**
+
+| | |
+|---|---|
+| **Take something out for good** | For a copy you email, not one you print |
+
 **Get words back off paper**
 
 | | |
@@ -1077,6 +1083,39 @@ toner and the new ones printed on top. That hides them from the eye and from a
 photocopier. It does not take the old ink off the paper — a strong light behind
 the sheet may still show it through. For anything that must not be recoverable,
 print a fresh page.
+
+### Handing over a file, not a sheet
+
+Everything above puts ink on paper. `redact` is for the other case — the copy
+you email, or send to a regulator, or publish — and it is not the same
+operation at all.
+
+```
+onionskin redact offer.pdf --word 'Salary' -o to-send.pdf
+```
+
+Drawing a black rectangle in a PDF hides nothing. The words stay in the file:
+selectable, copyable, searchable, and recovered by anybody who presses Ctrl-A.
+It is the obvious thing to do, it looks completely convincing on screen, and
+every few months an organisation publishes a document redacted that way and
+reads the covered names in the newspaper the following week.
+
+So this does not draw over anything. Every page is drawn as a picture, the
+areas are painted solid on the picture, and the document is rebuilt from those
+pictures — after which the sentence "there is no text in this file" is true and,
+more to the point, *checkable*. Onionskin checks it, page by page, and deletes
+what it wrote rather than hand over a file that failed.
+
+That is a real trade and it is stated plainly rather than buried: the copy can
+no longer be searched, and text cannot be copied out of it, including on pages
+nothing was taken from. The surgical alternative — cutting the text operators
+out and leaving the rest — keeps that, and it is how the subtle version of the
+same mistake gets made. A word can be in a file in more places than the page it
+is drawn on: a form field's value, an annotation, a bookmark, the document's own
+metadata, the leftovers of an earlier save. Something that removes only what it
+recognises leaves whatever it did not.
+
+Keep the original. This is the copy you send, not the copy you work from.
 
 ### Check a whole run, not one sheet
 

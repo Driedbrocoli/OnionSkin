@@ -972,6 +972,24 @@ impl Document<'_> {
         })
     }
 
+    /// The words on a page, as the document itself carries them.
+    ///
+    /// Not read off a picture of the page — asked of the document, which is
+    /// the only way to find text that is *there* without being visible. That
+    /// is the whole point of it: a black rectangle drawn over a salary leaves
+    /// the salary in the file, selectable, copyable and searchable, and no
+    /// amount of looking at the page will show it. So a redaction is checked
+    /// by asking this, after the fact, and a redaction that cannot be checked
+    /// is not one.
+    pub fn text_on(&self, index: usize) -> Result<String, RenderError> {
+        let page = self
+            .pdf
+            .pages()
+            .get(index as u16)
+            .map_err(|e| RenderError::Pdfium(format!("page {} : {e}", index + 1)))?;
+        Ok(page.text().map(|text| text.all()).unwrap_or_default())
+    }
+
     /// The same page, in grey only.
     ///
     /// See [`GrayPage`]: the colour is three bytes a pixel that most callers

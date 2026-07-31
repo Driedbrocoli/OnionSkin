@@ -460,7 +460,16 @@ pub fn write_page_content_with_pictures(
             .unwrap_or_else(|| "Im0".to_string())
     };
 
-    let mut resources = dictionary! { "Font" => font_dict };
+    // No fonts, no `/Font` — rather than an empty dictionary that says nothing
+    // and means nothing. It matters for one caller in particular: `redact`
+    // writes a document that must have no way of showing text in it, and
+    // somebody auditing that file will search it for `/Font`. An empty entry
+    // is a true answer to a question nobody asked and a frightening one to the
+    // person asking it.
+    let mut resources = lopdf::Dictionary::new();
+    if !font_dict.is_empty() {
+        resources.set("Font", font_dict);
+    }
     if !xobjects.is_empty() {
         resources.set("XObject", xobjects);
     }
