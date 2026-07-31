@@ -161,6 +161,14 @@ pub enum MergeError {
     #[error("{path} has no pages in it.")]
     Blank { path: PathBuf },
     #[error(
+        "{path} is a protected PDF — its contents are encrypted, and this cannot \
+         read them.\n    Every reader opens a file like this without asking for a \
+         password, so it looks ordinary; what it carries is a restriction on \
+         copying and changing, and merging is changing.\n    Open it in a PDF \
+         reader and save or print it to a fresh PDF, then merge that."
+    )]
+    Locked { path: PathBuf },
+    #[error(
         "page {page} of {path} does not say what size paper it is for, and \
          neither does anything above it. Onionskin will not guess: the guess \
          would decide where every word on that page lands."
@@ -197,6 +205,28 @@ pub enum MergeError {
     },
 }
 
+/// Whether a PDF's contents are encrypted.
+///
+/// Not "is it password protected" as anybody would mean it. A file with an
+/// *owner* password and an empty user password opens in every reader with no
+/// prompt at all — it looks like an ordinary PDF, and it is the common case,
+/// because it is what "restrict copying and editing" produces in Acrobat and in
+/// half the online tools people use.
+///
+/// Its streams are still encrypted, and the library this reads structure with
+/// does not decrypt them. What came back was an empty page: `merge` wrote a form
+/// of zero length and reported success, then advised printing the merged file
+/// *instead of* the deltas it was made from — so the second delta was gone, and
+/// the advice was to throw away the only copy of it. `join` kept the bytes and
+/// wrote a page no reader can open.
+///
+/// Neither is something to do quietly. Refusing costs somebody one step —
+/// re-save the file — and the alternative costs them a sheet of paper they only
+/// have one of.
+pub(crate) fn is_locked(doc: &Document) -> bool {
+    doc.trailer.get(b"Encrypt").is_ok()
+}
+
 /// Merge several delta PDFs into one, page for page.
 ///
 /// The merged file has as many pages as the longest of them; a file that runs
@@ -215,6 +245,9 @@ pub fn merge(inputs: &[PathBuf], out: &Path, title: &str) -> Result<Merged, Merg
             path: path.clone(),
             source,
         })?;
+        if is_locked(&doc) {
+            return Err(MergeError::Locked { path: path.clone() });
+        }
         let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
         if pages.is_empty() {
             return Err(MergeError::Blank { path: path.clone() });

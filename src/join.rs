@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use lopdf::{dictionary, Document, Object, ObjectId};
 
 use crate::geometry::PageSize;
-use crate::merge::{import, inherited, newest_version, sheet_of};
+use crate::merge::{import, inherited, is_locked, newest_version, sheet_of};
 
 /// Things a page may inherit from the page tree above it.
 ///
@@ -167,6 +167,14 @@ pub enum JoinError {
     #[error("{path} has no pages in it.")]
     Blank { path: PathBuf },
     #[error(
+        "{path} is a protected PDF — its contents are encrypted, and this cannot \
+         read them.\n    Every reader opens a file like this without asking for a \
+         password, so it looks ordinary; what it carries is a restriction on \
+         copying and changing, and joining is changing.\n    Open it in a PDF \
+         reader and save or print it to a fresh PDF, then join that."
+    )]
+    Locked { path: PathBuf },
+    #[error(
         "page {page} of {path} does not say what size paper it is for, and \
          neither does anything above it. Onionskin will not guess: the guess \
          would decide what size paper that page asks the printer for."
@@ -193,6 +201,12 @@ pub fn join(inputs: &[PathBuf], out: &Path, title: &str) -> Result<Joined, JoinE
             path: path.clone(),
             source,
         })?;
+        // See `merge::is_locked`: the bytes come across verbatim here, so a
+        // protected file joins to a page that no reader will open — and nothing
+        // said so.
+        if is_locked(&doc) {
+            return Err(JoinError::Locked { path: path.clone() });
+        }
         let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
         if pages.is_empty() {
             return Err(JoinError::Blank { path: path.clone() });

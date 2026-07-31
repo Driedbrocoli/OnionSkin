@@ -591,3 +591,59 @@ fn a_merge_says_what_it_did_in_words() {
     assert!(said.contains("long.pdf"), "{said}");
     assert!(said.contains("nothing on the pages after that"), "{said}");
 }
+
+/// A PDF whose contents are encrypted is refused, not silently emptied.
+///
+/// The file this is about is not what anybody calls "password protected". It
+/// has an *owner* password and an empty user password, so every reader opens it
+/// with no prompt — it is what "restrict copying and editing" produces, and it
+/// looks entirely ordinary.
+///
+/// Its streams are encrypted all the same, and lopdf does not decrypt. What
+/// came out before this guard: `merge` wrote a form of zero length, said "1
+/// page(s) from 2 file(s)", and advised printing the merged file *instead of*
+/// the deltas it was made from — so the second delta was gone and the advice
+/// was to discard the only copy of it. `join` copied the bytes across and made
+/// a page no reader will open.
+///
+/// This builds the trailer entry rather than a really encrypted file, because
+/// the guard is the trailer entry: nothing here can encrypt a PDF, and a test
+/// that needed a third-party tool to run would not run. The real thing was
+/// reproduced by hand against a pikepdf-encrypted file, both before and after.
+#[test]
+fn a_protected_pdf_is_refused_rather_than_merged_into_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = a_delta(&dir.path().join("plain.pdf"), "PLAIN", Font::Helvetica, 1);
+    let locked = dir.path().join("locked.pdf");
+
+    let mut doc = Document::load(&plain).unwrap();
+    let guard = doc.add_object(dictionary! {
+        "Filter" => "Standard",
+        "V" => 2,
+        "R" => 3,
+        "P" => -44i64,
+    });
+    doc.trailer.set("Encrypt", Object::Reference(guard));
+    doc.save(&locked).unwrap();
+
+    let out = dir.path().join("merged.pdf");
+    let refused = merge(&[plain.clone(), locked.clone()], &out, "both");
+    assert!(
+        matches!(refused, Err(MergeError::Locked { .. })),
+        "a protected PDF was merged: {refused:?}"
+    );
+    assert!(
+        !out.exists(),
+        "a file was written for a merge that dropped a delta"
+    );
+
+    // And the same file joins to a page no reader opens, so it is refused there
+    // too — the two commands take different routes to the same damage.
+    let stacked = dir.path().join("joined.pdf");
+    let refused = crate::join::join(&[plain, locked], &stacked, "both");
+    assert!(
+        matches!(refused, Err(crate::join::JoinError::Locked { .. })),
+        "a protected PDF was joined: {refused:?}"
+    );
+    assert!(!stacked.exists());
+}
