@@ -3593,6 +3593,18 @@ fn parse_point(text: &str) -> Result<(f64, f64), String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_read(args: ReadArgs) -> Result<ExitCode, String> {
+    // Before any of the work, because the answer does not depend on it and
+    // finding out after twenty seconds of reading a page is finding out late.
+    //
+    // `onionskin read scan.pdf --to scan.pdf` is an easy thing to type when
+    // the two names are the same length and one is already in the shell's
+    // history. It used to destroy the scan: `check_writable` alone asks only
+    // whether the file is Onionskin's, and a sheet Onionskin printed is, so it
+    // was replaced without a word. The scan may be the only copy of a sheet
+    // that has already been through the printer once.
+    if let Some(destination) = &args.to {
+        refuse_to_clobber(destination, "document", &[(&args.scan, "scan")])?;
+    }
     // A document or a photograph of one. Every multifunction printer in an
     // office scans to PDF by default, so "the scan" arrives as a PDF far more
     // often than as a PNG — and until this it was refused, with the image

@@ -1450,14 +1450,67 @@ fn a_real_pdf_or_word_file_is_never_mistaken_for_a_document() {
 fn a_broken_document_is_still_a_document() {
     // So the complaint is that the document is broken, which is true and
     // fixable, rather than that the PDF is — which is neither.
+    //
+    // This used to assert `is_one`, which is now a stricter question than the
+    // one this test is about. `is_one` decides whether a file may be written
+    // over without asking, and a half-written file cannot be parsed, so it is
+    // no longer claimed — the safe way round, since the only consequence is
+    // that Onionskin asks before destroying it. What this test is for is the
+    // sentence somebody reads, and that is unchanged.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("half-written.pdf");
     std::fs::write(&path, b"\n  {\"page\": {\"width_mm\": 210.0,").unwrap();
-    assert!(Document::is_one(&path));
     assert!(matches!(
         Document::load(&path),
         Err(DocumentError::Malformed { .. })
     ));
+}
+
+/// The two questions, kept apart on purpose.
+///
+/// One truncated file is a document that lost its end; another is somebody's
+/// `package.json` that lost its end. Both are broken JSON beginning with `{`,
+/// and neither may be written over without asking — but only one of them
+/// should be reported to its owner as *their damaged document*.
+#[test]
+fn a_truncated_file_is_told_apart_from_a_truncated_document() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let ours = dir.path().join("half-written.osk");
+    std::fs::write(&ours, b"{\"page\": {\"width_mm\": 210.0,").unwrap();
+    let theirs = dir.path().join("half-written-package.json");
+    std::fs::write(
+        &theirs,
+        b"{\"name\": \"their-project\", \"dependencies\": {",
+    )
+    .unwrap();
+
+    // Neither may be overwritten in silence.
+    assert!(!Document::is_one(&ours));
+    assert!(!Document::is_one(&theirs));
+
+    // But they are described differently, because they are different troubles.
+    assert!(matches!(
+        Document::load(&ours),
+        Err(DocumentError::Malformed { .. })
+    ));
+    assert!(matches!(
+        Document::load(&theirs),
+        Err(DocumentError::NotOurs { .. })
+    ));
+
+    // A PDF may perfectly well have the word `"items"` inside it — it is a
+    // container, and somebody's form has fields with names. Mentioning one of
+    // our keys is only evidence in a file that opens like JSON in the first
+    // place, so the shape of the file is asked about as well as its contents.
+    let form = dir.path().join("a-form.pdf");
+    std::fs::write(&form, b"%PDF-1.7\n<< /T (\"items\") /Type /Annot >>\n").unwrap();
+    let why = Document::load(&form).unwrap_err();
+    assert!(
+        matches!(why, DocumentError::NotOurs { .. }),
+        "somebody's PDF was reported as a damaged Onionskin document: {why}"
+    );
+    assert!(why.to_string().contains("a PDF"), "{why}");
 }
 
 /// A type size has a ceiling as well as a floor.
@@ -1490,4 +1543,129 @@ fn a_type_size_too_large_to_write_is_refused() {
         one.size_pt = size;
         assert!(ok.add(one).is_ok(), "{size} pt was refused");
     }
+}
+
+/// The overwrite guard asks this question about a file it is on the point of
+/// destroying, so it has to be a *positive* claim.
+///
+/// It used to be "the first non-whitespace byte is `{`", which claims every
+/// JSON file in existence. `onionskin write sheet.pdf -o package.json`
+/// overwrote somebody's package.json with a PDF and did not ask, because the
+/// guard whose whole purpose is refusing that had decided the file was ours.
+#[test]
+fn only_onionskins_own_documents_are_claimed_as_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Ours: it has the three keys a document cannot be without.
+    let ours = dir.path().join("letter.osk");
+    Document::blank(crate::calibrate::A4, 1)
+        .save(&ours)
+        .unwrap();
+    assert!(Document::is_one(&ours));
+
+    // Theirs. Every one of these begins with '{' and none of them is a
+    // document; each is a file somebody would be upset to lose.
+    let theirs: &[(&str, &str)] = &[
+        (
+            "package.json",
+            r#"{"name":"their-project","version":"3.1.4"}"#,
+        ),
+        (
+            "tsconfig.json",
+            "{\n  \"compilerOptions\": { \"strict\": true }\n}",
+        ),
+        ("styles.css", "{ margin: 0 }"),
+        ("notes.jsonl", "{\"at\":1,\"said\":\"remember the milk\"}"),
+        ("empty-object.json", "{}"),
+        ("leading-space.json", "   \n\t {\"a\":1}"),
+        // The three keys, but not as an object at the top.
+        ("array.json", r#"[{"page":1,"pages":1,"items":[]}]"#),
+        // Two of the three is not enough — once for each one left out, so
+        // that no single key can be quietly dropped from the test.
+        ("no-items.json", r#"{"page":{"width_mm":210.0},"pages":1}"#),
+        ("no-pages.json", r#"{"page":{"width_mm":210.0},"items":[]}"#),
+        ("no-page.json", r#"{"pages":1,"items":[]}"#),
+    ];
+    for (name, body) in theirs {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        assert!(
+            !Document::is_one(&path),
+            "{name} was claimed as Onionskin's own, so it can be silently overwritten"
+        );
+    }
+
+    // Not there, not readable, not text: none of them ours.
+    assert!(!Document::is_one(&dir.path().join("nowhere.osk")));
+    let binary = dir.path().join("scan.png");
+    std::fs::write(&binary, [0x89u8, b'P', b'N', b'G', 0, 1, 2, 3]).unwrap();
+    assert!(!Document::is_one(&binary));
+}
+
+/// A document damaged in the middle is still ours — so `load` can say "this is
+/// yours and it is damaged" rather than "this is not one of mine", which sends
+/// somebody looking for a file they are already holding.
+#[test]
+fn a_damaged_document_is_still_recognised_as_ours() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("letter.osk");
+    // The three keys, with something later in it that will not deserialise.
+    std::fs::write(
+        &path,
+        r#"{"page":{"width_mm":210.0,"height_mm":297.0},"pages":1,"items":"this should be a list"}"#,
+    )
+    .unwrap();
+
+    assert!(
+        Document::is_one(&path),
+        "a damaged document of ours was disowned"
+    );
+    let why = Document::load(&path).unwrap_err();
+    assert!(
+        matches!(why, DocumentError::Malformed { .. }),
+        "it should be reported as damaged, not as somebody else's: {why}"
+    );
+    // And in words, since that is what somebody actually reads.
+    let said = why.to_string();
+    assert!(said.contains("damaged"), "{said}");
+    assert!(said.contains("Onionskin document"), "{said}");
+}
+
+/// Reading a file to find out whether it is ours is work done on the strength
+/// of a name somebody typed, so it is bounded — and a file far too big to be a
+/// document is not one, which errs in the safe direction.
+#[test]
+fn something_far_too_big_to_be_a_document_is_not_claimed() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Under the bound, so it is judged on its keys like anything else.
+    let ordinary = dir.path().join("ordinary.json");
+    let mut body = String::from("{\"page\":1,\"pages\":1,\"items\":[");
+    body.push_str(&"0,".repeat(1000));
+    body.push_str("0]}");
+    std::fs::write(&ordinary, &body).unwrap();
+    assert!(Document::is_one(&ordinary));
+
+    // Over it, and with the three keys at the front, so nothing but the size
+    // can be what turns it away. `set_len` rather than writing sixty-four
+    // megabytes: the file is a hole, so the test costs no disk and no time,
+    // and the bound is asked about the size the same way either way.
+    let huge = dir.path().join("huge.json");
+    let file = std::fs::File::create(&huge).unwrap();
+    {
+        use std::io::Write;
+        let mut writing = &file;
+        writing.write_all(body.as_bytes()).unwrap();
+    }
+    file.set_len(crate::document::TOO_BIG_TO_BE_ONE + 1)
+        .unwrap();
+    drop(file);
+    assert_eq!(
+        std::fs::metadata(&huge).unwrap().len(),
+        crate::document::TOO_BIG_TO_BE_ONE + 1
+    );
+    assert!(
+        !Document::is_one(&huge),
+        "a file too big to be a document was claimed as one"
+    );
 }

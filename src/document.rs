@@ -307,6 +307,16 @@ pub enum DocumentError {
 /// sets type at, and far short of anything that overflows.
 pub const BIGGEST_TYPE_PT: f64 = 4000.0;
 
+/// The most a file can weigh and still be asked whether it is a document.
+///
+/// A document is a few kilobytes: the page size, a list of items, and paths to
+/// any pictures rather than the pictures themselves. Sixty-four megabytes is
+/// therefore not a limit anybody meets, it is a limit on the work Onionskin
+/// will do to answer a question about a file somebody named — and a file that
+/// large is not a document, which errs in the safe direction, since the answer
+/// decides whether it may be written over without asking.
+pub const TOO_BIG_TO_BE_ONE: u64 = 64 * 1024 * 1024;
+
 impl Document {
     /// A blank document, ready to be written on.
     pub fn blank(page: PageSize, pages: usize) -> Document {
@@ -329,32 +339,80 @@ impl Document {
     /// expecting a PDF, fail, and report that the file is damaged — about a
     /// file Onionskin wrote itself, one command earlier.
     ///
-    /// A document is JSON, so it opens with `{`. A PDF opens with `%PDF`, a
-    /// Word or OpenDocument file with `PK`, and every image with a magic
-    /// number of its own. None of them can collide with this. The file is not
-    /// parsed: one that starts with `{` is *meant* to be a document, and if it
-    /// is broken the right complaint is that the document is broken, not that
-    /// the PDF is.
+    /// It has to be a *positive* claim, because the overwrite guard asks this
+    /// question about a file it is on the point of destroying: anything
+    /// Onionskin cannot positively claim is treated as somebody else's, and a
+    /// test that is easily satisfied turns that rule inside out.
+    ///
+    /// This used to be "the first non-whitespace byte is `{`", on the reasoning
+    /// that a PDF opens with `%PDF` and a Word file with `PK`, so nothing could
+    /// collide. Nothing *Onionskin reads* could. Everything it might be asked
+    /// to write over is another matter: `onionskin write sheet.pdf -o
+    /// package.json` overwrote the person's `package.json` with a PDF and did
+    /// not ask, because the guard whose whole purpose is refusing that had
+    /// decided the file was Onionskin's own.
+    ///
+    /// So the three keys a document cannot be without are required. That is
+    /// still cheap, and it is still tolerant of a document written by an older
+    /// or newer version — extra keys and missing optional ones are fine.
+    ///
+    /// It does mean a *damaged* document is disowned, since a truncated one is
+    /// not JSON any more. That is the right way round for a guard: the cost of
+    /// being wrong here is a destroyed file, and disowning a damaged document
+    /// only makes the guard ask before writing over it. Telling somebody their
+    /// broken document is broken is a different question with a much smaller
+    /// cost, and [`looks_like_a_damaged_one`] answers that one.
     pub fn is_one(path: &Path) -> bool {
         use std::io::Read;
-        let Ok(mut file) = std::fs::File::open(path) else {
+        // The size is asked first so that a huge file is turned away without
+        // reading any of it, and the read is capped anyway so that a file
+        // which grows between the two questions cannot pull sixty-four
+        // megabytes into memory on the strength of a stale answer.
+        let Ok(size) = std::fs::metadata(path).map(|meta| meta.len()) else {
             return false;
         };
-        let mut start = [0u8; 64];
-        let Ok(read) = file.read(&mut start) else {
+        if size > TOO_BIG_TO_BE_ONE {
+            return false;
+        }
+        let Ok(file) = std::fs::File::open(path) else {
             return false;
         };
-        start[..read]
-            .iter()
-            .find(|byte| !byte.is_ascii_whitespace())
-            .is_some_and(|byte| *byte == b'{')
+        let mut text = String::new();
+        // Reading a byte past the bound is what tells "exactly at the bound",
+        // which is allowed, from "over it", which is not.
+        if file
+            .take(TOO_BIG_TO_BE_ONE + 1)
+            .read_to_string(&mut text)
+            .is_err()
+        {
+            return false;
+        }
+        if text.len() as u64 > TOO_BIG_TO_BE_ONE {
+            return false;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        // The three a document cannot be without: the paper it is written for,
+        // how many sheets, and what is on them. Everything else has a default.
+        object.contains_key("page") && object.contains_key("pages") && object.contains_key("items")
     }
 
     pub fn load(path: &Path) -> Result<Document, DocumentError> {
         if !path.is_file() {
             return Err(DocumentError::Missing(path.to_path_buf()));
         }
-        if !Document::is_one(path) {
+        // Two questions, and the looser one is right here. `is_one` will not
+        // claim a truncated document, because it cannot parse it — correct
+        // where the answer decides whether to destroy a file, wrong here,
+        // where all it decides is which sentence somebody reads. A document
+        // half-written by a full disk would be reported as "not a document
+        // Onionskin can open", which is both untrue and unhelpful: it is one,
+        // and it is damaged, and saying so is what points at the fix.
+        if !Document::is_one(path) && !looks_like_a_damaged_one(path) {
             let (kind, advice) = what_it_looks_like(path);
             return Err(DocumentError::NotOurs {
                 path: path.to_path_buf(),
@@ -655,6 +713,56 @@ impl Document {
 /// Read from the first few bytes rather than the name, for the same reason
 /// [`Document::is_one`] is: the name is a label somebody chose and the magic
 /// number is what the file actually is.
+/// Does this file look like one of ours that has come to harm?
+///
+/// The companion to [`Document::is_one`], and deliberately much easier to
+/// satisfy, because the two are asked for opposite reasons.
+///
+/// `is_one` is asked before writing over a file. Being wrong there destroys
+/// somebody's work, so it insists on parsing the file and finding the three
+/// keys a document cannot be without.
+///
+/// This is asked only after `load` has already failed to recognise a file
+/// somebody named themselves, to decide between two sentences: "that is not a
+/// document Onionskin can open" and "that document is damaged". Being wrong
+/// costs a wrong sentence. A document truncated by a full disk is not JSON any
+/// more, so the strict test disowns it — and the person is told their own
+/// document, which they made with Onionskin an hour ago, is a file Onionskin
+/// has never heard of. That sends them looking in the wrong place.
+///
+/// So: text, opening with `{`, mentioning at least one key that belongs to a
+/// document and to nothing else. Not proof. Enough to name the trouble.
+fn looks_like_a_damaged_one(path: &Path) -> bool {
+    // The damage that matters is truncation, which takes the end off. The
+    // evidence is therefore at the front, and reading the front of a file
+    // costs the same whatever the file turns out to be.
+    const ENOUGH_TO_TELL: usize = 8 * 1024;
+    let mut start = vec![0u8; ENOUGH_TO_TELL];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| {
+            use std::io::Read;
+            file.read(&mut start)
+        })
+        .unwrap_or(0);
+    start.truncate(read);
+
+    let opens_like_json = start
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .map(|byte| *byte == b'{')
+        .unwrap_or(false);
+    if !opens_like_json {
+        return false;
+    }
+    // Quoted, so `"page"` is not found inside `"pages"` and neither is found
+    // inside a sentence somebody wrote. All three are required fields, so a
+    // document contains all of them and a file that contains none of them
+    // could not have been one however it was damaged.
+    [&b"\"page\""[..], &b"\"pages\""[..], &b"\"items\""[..]]
+        .iter()
+        .any(|key| start.windows(key.len()).any(|window| window == *key))
+}
+
 fn what_it_looks_like(path: &Path) -> (&'static str, &'static str) {
     let mut start = [0u8; 8];
     let read = std::fs::File::open(path)

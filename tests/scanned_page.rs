@@ -859,6 +859,11 @@ fn the_scan_is_never_written_over() {
             "--preview",
             scan,
         ],
+        // `read --to` had no guard at all. The general do-not-overwrite check
+        // was there, but it only asks whether the file is Onionskin's own —
+        // and a sheet Onionskin printed and somebody scanned is, so the scan
+        // was replaced with the document read off it, without a word.
+        vec!["read", scan, "--to", scan],
     ] {
         let result = run(&args);
         assert_eq!(result.code, 1, "should refuse: {args:?}");
